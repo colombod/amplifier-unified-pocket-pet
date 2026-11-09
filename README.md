@@ -13,6 +13,7 @@ not user-ratified acceptance contracts.
 
 - Device: [Waveshare ESP32-S3-Touch-LCD-1.83](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.83).
 - [Original user intent, interpretation and experiment boundaries](docs/intent.md).
+- [Draft vision (for review; not ratified)](docs/VISION.md).
 - The user reports an always-on Unified server already on Tailscale; this is
   context, not evidence of a supported external device integration.
 

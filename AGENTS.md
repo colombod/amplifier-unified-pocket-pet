@@ -15,9 +15,15 @@
   inspect the staged files before every push.
 - Use supported interfaces only. Never invent endpoints from app action names,
   forge human provenance, bypass host ownership or silently take over sessions.
-- Repository setup authorizes records only, not firmware, dependency installs,
-  flashing, server/Tailscale changes or deployment. Future experiments must stay
-  within their actual authorization.
+- The initial repository setup authorized records only, not firmware, installs,
+  flashing, server/Tailscale changes or deployment. Later work follows its actual
+  authorization, not that historical setup boundary.
+- Toolkit provisioning is separately authorized at workspace `.toolchains/esp32s3`
+  and `working-files/esp-idf-preflight`, isolated from Amplifier's environment.
+  Keep SDK/build outputs outside this repo. Flashing waits for a later device
+  handoff; toolkit authorization does not authorize it.
+- `docs/VISION.md` is draft direction for review, not ratified direction or evidence
+  that the product exists. Keep spike findings distinct from product acceptance.
 - For docs-only changes: review the exact staged diff, run
   `git diff --cached --check`, check links and source quotations, and inspect for
   secrets. Report these checks honestly; no runtime test exists or is implied
