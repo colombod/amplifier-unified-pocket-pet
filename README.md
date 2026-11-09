@@ -17,6 +17,13 @@ not user-ratified acceptance contracts.
 - The user reports an always-on Unified server already on Tailscale; this is
   context, not evidence of a supported external device integration.
 
+## Development toolkit
+
+[Workspace-local toolkit: activation, pinned versions and verified evidence](docs/development-toolkit.md).
+The no-hardware setup has independent compile-readiness evidence for IDF
+hello_world, the Waveshare LVGL demo and MicroLink basic_connect. USB and runtime
+checks come later; this does not complete a product spike.
+
 ## Open spikes
 
 GitHub issues own the work and its evidence. A spike may conclude with a negative,
@@ -30,5 +37,6 @@ blocked or inconclusive finding; closing one records learning, not product accep
 | [#4 Attention question and answer round trip](https://github.com/colombod/amplifier-unified-pocket-pet/issues/4) | Can a voice answer reach the exact waiting question revision without stale or duplicate effects? |
 
 The integrated attention check depends on session integration and voice checks;
-independent investigation can proceed separately. This seed contains records
-only: no dependency installation, flashing, server/network changes or deployment.
+independent investigation can proceed separately. This repository contains records
+only; the toolkit and its build outputs live outside it. No flashing,
+server/network changes or deployment have been performed.

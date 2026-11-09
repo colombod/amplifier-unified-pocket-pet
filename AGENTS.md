@@ -22,6 +22,8 @@
   and `working-files/esp-idf-preflight`, isolated from Amplifier's environment.
   Keep SDK/build outputs outside this repo. Flashing waits for a later device
   handoff; toolkit authorization does not authorize it.
+- `docs/development-toolkit.md` owns activation and authoritative evidence pointers;
+  historical result files and logs named “final” are not necessarily final status.
 - `docs/VISION.md` is draft direction for review, not ratified direction or evidence
   that the product exists. Keep spike findings distinct from product acceptance.
 - For docs-only changes: review the exact staged diff, run
