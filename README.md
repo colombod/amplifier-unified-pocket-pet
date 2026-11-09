@@ -1,8 +1,10 @@
 # Amplifier Unified Pocket Pet
 
 Private experiment tracking for a portable, Wi-Fi-connected ESP32 assistant:
-a pet-like touch display and voice gateway to existing Amplifier Unified
-workspaces, running sessions and things waiting on the human.
+a pet-like touch display and voice interface to a personal manager across
+Amplifier Unified workspaces, including creating workspaces and starting new
+work. Existing-session continuity and attention to waiting work remain required,
+not a scope ceiling; the interaction design is still a draft.
 
 **Status: de-risking spikes, not settled architecture.** No firmware or Unified
 connector is implemented or proven here. Native Tailscale, voice concurrency and

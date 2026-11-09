@@ -9,28 +9,46 @@ established or invented here.
 
 ## What Pocket Pet is
 
-Pocket Pet is a portable Wi-Fi voice gateway to the human's existing Amplifier
-Unified workspaces and running sessions, on the fixed Waveshare
-ESP32-S3-Touch-LCD-1.83 with microphone, speaker and touch display. Its animated,
-ChatGPT-like pet makes the assistant present without requiring the main computer
-screen. The human selects a session on the device and otherwise interacts by
-voice. Things waiting on the human come to their attention through the pet.
+Pocket Pet is a portable Wi-Fi voice interface to a personal manager across
+Amplifier Unified: existing workspaces and sessions, creating new workspaces,
+starting new work, and bringing things waiting on the human to their attention.
+It uses the fixed Waveshare ESP32-S3-Touch-LCD-1.83 with microphone, speaker and
+touch display. Its animated, ChatGPT-like pet makes the assistant present without
+requiring the main computer screen. Voice carries the interaction; touch supports
+explicit context selection.
 The intelligence and session runtime stay with Unified on `amplifier-srv-01`,
 the server the user describes as always on and already on Tailscale.
 
+The latest user clarification sets the whole-Unified manager goal; it does not
+prove full feature parity or authorize arbitrary projects. Existing-session
+continuity is a required part of that goal, not its ceiling. See the
+[source words and integration findings](intent.md#10-whole-unified-manager-scope-clarification).
+
+**Interaction proposal for review, not an accepted architecture:** a persistent
+server-side personal assistant is the default global manager. The human can ask
+what needs attention across workspaces, create a workspace and start work there,
+or focus directly on an actual existing session and later return to the overview.
+Whether to persist a dedicated assistant conversation and use this
+global-manager/direct-focus workflow remains DRAFT; it is not the user's choice
+merely because it is described here.
+
 ## Principles
 
-### 1. The same session continues
+### 1. Whole-Unified management includes the same session continuing
 
-The human can identify and select the existing session they are addressing.
-Their input and the spoken reply belong to that session, not a parallel chatbot.
-Switching to another session and back retains the original conversations and
-their histories; selecting a session does not mean creating a replacement.
+The human can manage work across workspaces, create a new workspace and start
+new work, as well as identify and select an existing session. When directly
+addressing that session, their input and the spoken reply belong to it, not a
+parallel chatbot. Switching to another context and back retains the original
+conversations and histories; selecting a session does not create a replacement.
+Creating a workspace, saving a goal and actually starting work are distinct
+outcomes, not interchangeable success claims.
 
 ### 2. Voice is the interaction
 
-Speech carries the conversation. Touch supports session selection, and the
-display carries the pet rather than requiring a miniature text-chat workflow.
+Speech carries the conversation. Touch supports workspace/session selection,
+and the display carries the pet rather than requiring a miniature text-chat
+workflow.
 “Screen-off” means reduced dependence on the main computer screen, not a
 requirement to read that screen to complete an otherwise spoken interaction.
 
@@ -57,9 +75,11 @@ grants itself permissions. Choosing voice does not broaden the human's authority
 
 ## What this deliberately resists
 
-- **A self-contained chatbot.** Intelligence and session execution belong to the
-  existing Unified host; a separate conversation is not the requested connector.
-- **A pocket chat browser.** The display serves the pet and touch session choice.
+- **A self-contained chatbot or existing-session-only ceiling.** Intelligence
+  and execution belong to Unified. Intentionally starting new Unified work is
+  part of the goal; substituting a separate chatbot for the selected existing
+  session is not continuity.
+- **A pocket chat browser.** The display serves the pet and touch context choice.
   The voice experience is not replaced by required reading and typing.
 - **A transport decision disguised as direction.** Away-from-home use over Wi-Fi
   is a goal; the authenticated connectivity path remains open. Native Tailscale
@@ -78,13 +98,23 @@ grants itself permissions. Choosing voice does not broaden the human's authority
 ## How you can tell it is working
 
 These are **proposed indicators for review**, not passed tests or ratified
-acceptance contracts. Counts distinguish repeated use from a one-off demo;
-they are not user-set performance targets.
+acceptance contracts or implemented acceptance. Counts discriminate context
+routing, separate outcomes and repeated use from a one-off demo; they are not
+user-set performance targets.
 
-- The device's user selects between **two existing sessions**, speaks into each,
-  then switches back. Input and replies stay in the selected original session,
-  with its prior history retained. A **second cycle** preserves earlier results
-  without duplicate answers or a reply attached to the wrong session.
+- The user asks for a **new workspace** and then **separate new work** there.
+  A real workspace exists at the intended host location and the intended work
+  actually starts in its own Unified conversation. An empty folder, saved goal,
+  prepared plan or accepted request alone does not demonstrate both outcomes.
+- Across **two workspaces**, the user receives status and waiting questions
+  traceable to their owning sessions and answers the intended question under
+  existing authority. A manager summary does not replace source-owned status,
+  revisions or question state; it cannot manufacture an answer or approval.
+- From the broader manager interaction the user focuses directly on an
+  **actual existing session**, then selects between **two existing sessions**,
+  speaks into each and switches back. Input and replies stay in the selected
+  original session, with its prior history retained. A **second cycle** preserves
+  earlier results without duplicate answers or a reply attached to the wrong session.
 - The user completes a voice request and hears its reply without looking at
   the main computer screen. Touch session selection and pet animation remain
   usable during the voice/network round trip; a frozen display fails this sign.
@@ -103,6 +133,7 @@ they are not user-set performance targets.
 | Date | Proposal or accepted change | Source / evidence |
 | --- | --- | --- |
 | 2026-11-09 | Initial proposal, pending review; no ratification or lock. No accepted changes recorded. | [Original user quotations and provenance](intent.md#source-quotations-from-initial-workspace-chat-2026-11-09); drafting references below. No runtime acceptance evidence. |
+| 2026-11-09 | Recorded the user's explicit scope clarification: personal manager across Unified, including new workspaces and new work; existing-session continuity is not the ceiling. Revised this draft accordingly. Interaction flow, persistent-assistant architecture and success scenarios remain proposals, not accepted direction or a lock. | [Latest exact source words](intent.md#10-whole-unified-manager-scope-clarification) and [documented/schema-level findings with qualification gaps](intent.md#integration-evidence-correction--2026-11-09). No product operations or device acceptance tested. |
 
 *Drafting references, not governing project contracts:* [Method document
 shape][shape], [Unified's vision guidance][unified] and [collaboration

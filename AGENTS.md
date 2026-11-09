@@ -4,6 +4,11 @@
   work-tracker queue.
 - Preserve original product intent in `docs/intent.md`. Keep interpretations,
   hypotheses, proposed checks, measurements and decisions distinct.
+- The latest intent is a personal manager across Unified workspaces, including
+  creating workspaces and starting new work; existing-session continuity is
+  required, not a scope ceiling. "Full Unified" is a goal, not proof of parity.
+  The persistent-assistant and global-manager/direct-focus interaction remain
+  proposals in `docs/VISION.md`, not ratified architecture or new authority.
 - These are de-risking spikes, not frozen architecture or ratified Converge
   contracts. Do not activate a Converge manager or lanes for repository setup.
 - Scope experiments explicitly. Record exact hardware/software versions,
