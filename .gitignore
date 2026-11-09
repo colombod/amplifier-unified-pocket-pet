@@ -1,0 +1,26 @@
+# Local secrets and environment values
+.env
+.env.*
+!.env.example
+credentials/
+secrets/
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Generated ESP-IDF configuration can contain Wi-Fi credentials
+sdkconfig
+sdkconfig.old
+
+# Private local evidence; retain sanitized measurements in issues
+captures/
+raw-captures/
+audio/
+recordings/
+
+# Future local build output
+build/
+dist/
+.pio/

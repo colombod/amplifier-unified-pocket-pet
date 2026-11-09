@@ -1,0 +1,24 @@
+# Working on this experiment
+
+- GitHub issues own work, evidence and learning outcomes; do not create a parallel
+  work-tracker queue.
+- Preserve original product intent in `docs/intent.md`. Keep interpretations,
+  hypotheses, proposed checks, measurements and decisions distinct.
+- These are de-risking spikes, not frozen architecture or ratified Converge
+  contracts. Do not activate a Converge manager or lanes for repository setup.
+- Scope experiments explicitly. Record exact hardware/software versions,
+  measurement methods, observations, failures and limitations in their issue.
+  A documented negative or blocked outcome can conclude a spike; it is not
+  successful product acceptance.
+- Never commit credentials, Wi-Fi passwords, tailnet enrollment keys, private
+  keys, raw audio or local captures. Ignore rules are not a security boundary;
+  inspect the staged files before every push.
+- Use supported interfaces only. Never invent endpoints from app action names,
+  forge human provenance, bypass host ownership or silently take over sessions.
+- Repository setup authorizes records only, not firmware, dependency installs,
+  flashing, server/Tailscale changes or deployment. Future experiments must stay
+  within their actual authorization.
+- For docs-only changes: review the exact staged diff, run
+  `git diff --cached --check`, check links and source quotations, and inspect for
+  secrets. Report these checks honestly; no runtime test exists or is implied
+  by this seed.
