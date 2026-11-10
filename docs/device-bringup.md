@@ -278,3 +278,23 @@ confirmation so a finishing prior generation cannot clear unsent replacement
 values. Native retry tests cover backoff, gating and clock wrap; page tests cover
 editing while an earlier save completes. Router-outage recovery itself has not
 been physically exercised. No existing integration spike is closed by these fixes.
+
+
+### Speaking crackles quantified, 0.3.7
+
+The user clarified that the idle screen is quiet after Stop, but speech still
+crackles on 0.3.6. A completed roughly 90-second voice trial finalized normally:
+4,128,000 bytes received, 4,167,360 submitted (including recovery padding), output
+peak 14656, input RMS 7082 and saved volume 100%. It logged **58 playback
+underruns** with the 160 ms buffer. Transcript character counts were nonzero;
+no transcript content was retained. Audio health remained a merge blocker.
+
+The 0.3.7 candidate increases prebuffer to 320 ms and disables modem sleep only
+for the explicitly started voice session, restoring the previous Wi-Fi power
+policy after cleanup. This targets packet delivery latency rather than merely
+raising volume. New aggregate metrics distinguish audible-tail underruns, packet
+spacing and chunk size. The change follows Espressif’s documented real-time
+latency tradeoff; it is not proof that every remaining crackle has that cause.
+Physical speech acceptance remains pending.
+
+Source: [ESP32-S3 Wi-Fi power saving](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-guides/wifi.html#esp32-s3-wi-fi-power-saving-mode).

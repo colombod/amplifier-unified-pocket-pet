@@ -86,6 +86,10 @@ directly expose macOS `/dev/cu.*` ports. A verified complete factory backup and
 restore script exist locally; see [recovery](docs/device-bringup.md#recovery-and-installation).
 Backups, secrets, raw logs, binaries and generated outputs are excluded from Git.
 
+A later restart exposed speech crackles; the installed health candidate is
+`0.3.7-amoled-v2-health`, with physical acceptance pending. The original milestone
+tag remains the first spoken baseline, not a certificate of long-term audio health.
+
 The post-restart health/review record is [PR #6 review](docs/pr-6-review.md).
 The next implementation context is [Unified handoff](docs/unified-handoff.md);
 the user chose the shared LAN for the first connection.

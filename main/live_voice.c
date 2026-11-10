@@ -17,6 +17,7 @@
 #include "esp_sntp.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+#include "esp_wifi.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/platform_util.h"
 #include "freertos/FreeRTOS.h"
@@ -33,7 +34,8 @@
 #define PLAYBACK_CAP (1024*1024)
 #define CAPTURE_CAP 96000
 #define INPUT_BYTES 4800
-#define PLAYBACK_START_BYTES 7680 /* 160 ms at 24 kHz PCM16 mono. */
+#define PLAYBACK_START_MS 320
+#define PLAYBACK_START_BYTES (48000*PLAYBACK_START_MS/1000)
 static const char *TAG="pet_live";
 static SemaphoreHandle_t status_lock;
 static QueueHandle_t jobs;
@@ -46,7 +48,8 @@ typedef struct {
  atomic_bool audio_stopping;
  atomic_uint speaker_until;
  unsigned returned_peak,captured_peak;
- unsigned playback_underruns;
+ unsigned playback_underruns,audible_underruns,output_events,max_audio_gap_ms,max_audio_chunk_bytes;
+ int64_t last_audio_at;
  unsigned sent_input_bytes,max_send_ms,input_transcript_chars,output_transcript_chars;
  uint64_t capture_samples,capture_squares;
  StreamBufferHandle_t playback,capture;
@@ -103,6 +106,7 @@ static void play_audio(void *arg) {
   size_t bytes=xStreamBufferReceive(c->playback,pcm,sizeof(pcm),0);
   if(bytes<sizeof(pcm)) {
    c->playback_underruns++;primed=false;
+   if(abs((int)last)>=250)c->audible_underruns++;
    size_t samples=bytes/2;
    int start=samples?pcm[samples-1]:last;
    for(size_t i=samples;i<CHUNK;i++){int remaining=240-(int)(i-samples);pcm[i]=remaining>0?start*remaining/240:0;}
@@ -134,6 +138,9 @@ static void handle_message(live_connection_t *c) {
    fail(c,"Invalid voice audio received.");goto done;
   }
   atomic_fetch_add(&c->received_bytes,count);
+  int64_t received_at=esp_timer_get_time();unsigned gap=c->last_audio_at?(received_at-c->last_audio_at)/1000:0;
+  if(gap>c->max_audio_gap_ms)c->max_audio_gap_ms=gap;
+  c->last_audio_at=received_at;c->output_events++;if(count>c->max_audio_chunk_bytes)c->max_audio_chunk_bytes=count;
   unsigned peak=live_pcm_peak(c->decoded,count);
   if(peak>c->returned_peak)c->returned_peak=peak;
   if(xStreamBufferSend(c->playback,c->decoded,count,0)!=count)fail(c,"Speaker buffer full. Tap Talk to retry.");
@@ -188,10 +195,17 @@ static bool synchronize_clock(void) {
 }
 static void run_session(void) {
  char key[256]={0},headers[300]={0};audio_session_t *audio=NULL;
+ wifi_ps_type_t saved_ps=WIFI_PS_NONE;bool restore_ps=false;
  live_connection_t *c=calloc(1,sizeof(*c));
  if(!c){set_state(LIVE_ERROR,"Not enough memory for voice.");return;}
  network_status_t network;network_snapshot(&network);
  if(!network.connected || !network.key_saved){set_state(LIVE_ERROR,"Connect Wi-Fi and save your OpenAI key first.");goto cleanup;}
+ if(esp_wifi_get_ps(&saved_ps)!=ESP_OK){fail(c,"Cannot check Wi-Fi streaming mode.");goto cleanup;}
+ if(saved_ps!=WIFI_PS_NONE) {
+  if(esp_wifi_set_ps(WIFI_PS_NONE)!=ESP_OK){fail(c,"Cannot enable low-latency Wi-Fi for voice.");goto cleanup;}
+  restore_ps=true;
+ }
+ ESP_LOGI(TAG,"Voice Wi-Fi power save off; previous_mode=%d",saved_ps);
  if(!synchronize_clock()){if(!atomic_load(&stop_requested))set_state(LIVE_ERROR,"Clock sync failed. Check internet access and try again.");goto cleanup;}
  if(atomic_load(&stop_requested))goto cleanup;
  if(network_copy_api_key(key,sizeof(key))!=ESP_OK){set_state(LIVE_ERROR,"Cannot read saved OpenAI key. Open Wi-Fi setup.");goto cleanup;}
@@ -274,7 +288,8 @@ cleanup:
  audio_test_status_t audio_status;audio_test_snapshot(&audio_status);
  ESP_LOGI(TAG,"Session audio bytes received=%u played=%u output_peak=%u input_peak=%u volume=%d; finalization=%s",atomic_load(&c->received_bytes),atomic_load(&c->played_bytes),c->returned_peak,c->captured_peak,audio_status.volume,finalized?"confirmed":"unconfirmed");
  ESP_LOGI(TAG,"Input captured=%llu sent=%u rms=%u max_send_ms=%u; transcript character counts input=%u output=%u (content not logged)",c->capture_samples*2,c->sent_input_bytes,c->capture_samples?(unsigned)sqrt((double)c->capture_squares/c->capture_samples):0,c->max_send_ms,c->input_transcript_chars,c->output_transcript_chars);
- ESP_LOGI(TAG,"Playback jitter buffer=160ms underruns=%u",c->playback_underruns);
+ ESP_LOGI(TAG,"Playback jitter buffer=%ums underruns=%u audible_tail_underruns=%u; output_events=%u max_gap_ms=%u max_chunk_bytes=%u",PLAYBACK_START_MS,c->playback_underruns,c->audible_underruns,c->output_events,c->max_audio_gap_ms,c->max_audio_chunk_bytes);
+ if(restore_ps){esp_err_t err=esp_wifi_set_ps(saved_ps);ESP_LOGI(TAG,"Wi-Fi power-save restore=%s",esp_err_to_name(err));}
  if(c->playback)vStreamBufferDelete(c->playback);
  if(c->capture)vStreamBufferDelete(c->capture);
  if(c->audio_done)vEventGroupDelete(c->audio_done);

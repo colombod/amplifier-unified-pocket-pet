@@ -11,7 +11,7 @@ not an external approval or a claim that all hardware behavior is proven.
 | Saved network stops retrying after failed joins (Copilot r4528466055) | Failed joins schedule bounded 5–60 second backoff while disconnected. Retry admission checks active join, queued commands and recent provisioning activity under the state lock. Native policy tests cover retries, cap, reset, provisioning pause and timer wrap. Physical router outage/return is untested. |
 | An older save can clear newer unsent edits (Copilot r4528466138) | Editing invalidates awaitingSave. The page regression simulates editing during a pending generation, confirms preservation/Done gating, then confirms a new explicit submission can complete normally. |
 | Amplifier not explicitly disabled at boot (restart health investigation) | Hold the exact BSP amplifier pin low before other app setup and during release; no codec/microphone opens at boot. Fresh-boot log and user listening check are separate evidence. |
-| Sparse playback can exhaust hardware DMA (health investigation) | Add 160 ms prebuffer, underrun counts and short fades around rebuffering. Physical audio check still required. |
+| Sparse playback can exhaust hardware DMA (health investigation) | The first 160 ms prebuffer still logged 58 underruns. The current candidate uses 320 ms and voice-only modem-sleep disable/restore, with underrun counts and short fades. Physical audio check still required. |
 | Audio workers depend on sender noticing Stop (manual review) | Workers now check Stop directly, including after the blocking microphone read; cleanup still joins them before freeing the codec. |
 
 ## Other reviewed boundaries
