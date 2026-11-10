@@ -1,44 +1,90 @@
 # Amplifier Unified Pocket Pet
 
-Private experiment tracking for a portable, Wi-Fi-connected ESP32 assistant:
-a pet-like touch display and voice interface to a personal manager across
-Amplifier Unified workspaces, including creating workspaces and starting new
-work. Existing-session continuity and attention to waiting work remain required,
-not a scope ceiling; the interaction design is still a draft.
+A portable Wi-Fi voice interface to a personal manager across Amplifier Unified:
+start work, continue existing sessions, and answer things waiting on the human.
+The animated Tachikoma, microphone, speaker and touch display provide a screen-off
+companion. [Original intent](docs/intent.md) and the [draft vision](docs/VISION.md)
+retain the distinction between the goal and a proven integration.
 
-**Status: de-risking spikes, not settled architecture.** No firmware or Unified
-connector is implemented or proven here. Native Tailscale, voice concurrency and
-the attention round trip remain unverified. Proposed checks are experiments,
-not user-ratified acceptance contracts.
+## Current implementation — 10 November 2026
 
-## Hardware and intent
-
-- Device: [Waveshare ESP32-S3-Touch-LCD-1.83](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.83).
-- [Original user intent, interpretation and experiment boundaries](docs/intent.md).
-- [Draft vision (for review; not ratified)](docs/VISION.md).
-- The user reports an always-on Unified server already on Tailscale; this is
-  context, not evidence of a supported external device integration.
-
-## Development toolkit
-
-[Workspace-local toolkit: activation, pinned versions and verified evidence](docs/development-toolkit.md).
-The no-hardware setup has independent compile-readiness evidence for IDF
-hello_world, the Waveshare LVGL demo and MicroLink basic_connect. USB and runtime
-checks come later; this does not complete a product spike.
-
-## Open spikes
-
-GitHub issues own the work and its evidence. A spike may conclude with a negative,
-blocked or inconclusive finding; closing one records learning, not product acceptance.
-
-| Spike | Question |
+| Capability | Actual evidence |
 | --- | --- |
-| [#1 Native ESP32 Tailscale connectivity](https://github.com/colombod/amplifier-unified-pocket-pet/issues/1) | Can the exact board connect, reconnect and stay within measured resource limits? |
-| [#2 Existing Unified session integration](https://github.com/colombod/amplifier-unified-pocket-pet/issues/2) | Is there a supported authenticated path into the exact existing session? |
-| [#3 Voice round trip and device concurrency](https://github.com/colombod/amplifier-unified-pocket-pet/issues/3) | Can voice coexist with responsive touch, animation and networking? |
-| [#4 Attention question and answer round trip](https://github.com/colombod/amplifier-unified-pocket-pet/issues/4) | Can a voice answer reach the exact waiting question revision without stale or duplicate effects? |
+| Correct display and touch profile | Connected board is **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**, 368×448 CO5300/CST820. Original LCD-1.83 link was mismatched. User confirmed factory recovery and corrected pet QR screen. |
+| Animated Tachikoma | Existing user-owned ChatGPT artwork preserved; 73 RGB565 frames mapped in flash. Idle, tap-wave and thinking animations implemented. |
+| Phone provisioning | Password-protected device Wi-Fi, QR join, phone page at `http://192.168.4.1`, 2.4 GHz scan, required OpenAI key, checked persistence, retry feedback and installed-version labels implemented. Successful save and restart reconnection observed. iPhone automatic captive-page opening remains unconfirmed. |
+| Local audio and volume | User confirmed both speaker tone and recorded playback audible at about 70%. Volume persists. Microphone playback is quieter than the tone, with occasional clipped peaks; gain/fidelity still needs tuning. |
+| GPT-Live candidate | `0.3.3-amoled-v2-live` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The corrected build separates audio workers and gates the microphone only on audible output; a complete audible reply remains **unverified**. See [voice test](docs/voice-test.md). |
+| Unified / remote access | No Unified connector, Tailscale enrollment, cross-workspace operations or attention-answer round trip implemented. The direct OpenAI voice test is an isolated hardware spike. |
 
-The integrated attention check depends on session integration and voice checks;
-independent investigation can proceed separately. This repository contains records
-only; the toolkit and its build outputs live outside it. No flashing,
-server/network changes or deployment have been performed.
+The [bring-up record](docs/device-bringup.md) includes the failed display route,
+factory recovery, pairing fixes, audio changes and validation boundaries.
+[Sanitized evidence](docs/device-evidence.json) records artifact identities.
+Historical Linux toolkit evidence remains in [development-toolkit.md](docs/development-toolkit.md);
+the Mac firmware workspace uses the Docker workflow below.
+
+## Use the device
+
+1. Open the gear icon, choose **Wi-Fi & OpenAI key**, and scan the QR to join its password-protected `Tachikoma-…-Setup` network.
+2. If no page opens automatically, browse to `http://192.168.4.1` while still on that Wi-Fi.
+3. Select a 2.4 GHz network and enter its password and your required OpenAI API key.
+4. Wait until settings are confirmed saved, then choose Done. Subsequent network changes can retain the saved key.
+5. In **Settings → Audio / volume**, adjust speaker level and run the local tone or three-second record/playback test.
+6. On the pet screen, the round **microphone** starts the voice session; the square **Stop** ends it.
+
+The setup page is reachable only through the device AP; it never returns the saved
+key. Provisioning changes require a per-boot token. Failed joins keep setup
+available; an interrupted response is shown as uncertain until a confirmed save.
+The prototype uses standard NVS, without encrypted flash or secure boot. Do not
+share flash dumps. No API call or microphone capture starts on boot.
+
+## Build on the Mac
+
+Requires Docker Desktop. No global ESP-IDF install is used.
+
+```sh
+docker compose build
+sh scripts/build.sh
+```
+
+ESP-IDF **5.5.4** is pinned by image digest. Managed versions are locked in
+`dependencies.lock`: Waveshare AMOLED BSP **2.0.3**, LVGL **9.3.0**,
+esp_lvgl_port **2.6.2**, esp_websocket_client **1.6.1**. Pillow **11.3.0** lives
+only in the image. The exporter recreates ignored generated assets from the
+unchanged source sheet; the output is `build-amoled/esp32_pet.bin`.
+
+```sh
+node tests/setup_page_test.mjs
+docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/setup_address_test.c -o /tmp/setup_address_test && /tmp/setup_address_test'
+docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/live_protocol_test.c -o /tmp/live_protocol_test && /tmp/live_protocol_test'
+```
+
+These checks cover setup retry/save behavior, AP address checks including mapped
+IPv6, and bounded WebSocket reassembly across TCP splits and continuation frames.
+They do not call OpenAI or prove physical audio quality.
+
+For macOS USB flashing, reproduce the allowed project-local tools with:
+
+```sh
+python3 -m venv .host-tools
+.host-tools/bin/pip install esptool==4.11.0 pyserial==3.5
+.host-tools/bin/python -m serial.tools.list_ports
+```
+
+Identify the actual Espressif device before opening it. Docker Desktop does not
+directly expose macOS `/dev/cu.*` ports. A verified complete factory backup and
+restore script exist locally; see [recovery](docs/device-bringup.md#recovery-and-installation).
+Backups, secrets, raw logs, binaries and generated outputs are excluded from Git.
+
+## Experiments toward the Unified goal
+
+The existing questions remain open; none is closed by the standalone voice test.
+
+| Spike | Remaining qualification |
+| --- | --- |
+| [#1 Native Tailscale](https://github.com/colombod/amplifier-unified-pocket-pet/issues/1) | Runtime reachability, reconnect, direct/DERP behavior and resource measurements on the corrected board. |
+| [#2 Unified integration](https://github.com/colombod/amplifier-unified-pocket-pet/issues/2) | Installed-host capabilities, scoped authentication, exact-session continuity and broader manager operations through supported contracts. |
+| [#3 Voice and concurrency](https://github.com/colombod/amplifier-unified-pocket-pet/issues/3) | First live speech reply, latency/dropout/resource measurements, touch/animation under load, then voice through the intended Unified session. |
+| [#4 Attention round trip](https://github.com/colombod/amplifier-unified-pocket-pet/issues/4) | Real waiting-question cue and human answer to the correct revision, including stale/duplicate/reconnect cases. |
+
+Current implementation scope and authorization are recorded in [PROJECT-BRIEF.md](PROJECT-BRIEF.md).

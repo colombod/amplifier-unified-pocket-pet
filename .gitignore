@@ -24,3 +24,13 @@ recordings/
 build/
 dist/
 .pio/
+
+# Device workspace tools, generated assets and private recovery data
+build-*/
+managed_components/
+.host-tools/
+assets/generated/
+private-backups/
+*.bin
+__pycache__/
+.DS_Store

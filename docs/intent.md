@@ -181,3 +181,25 @@ Each issue asks a question and proposes evidence to collect. A documented
 negative, blocked or inconclusive result can conclude a spike and inform the next
 decision; it is distinct from successful product acceptance. Nothing here
 requires a positive outcome or turns a proposed experiment into a ratified contract.
+
+
+## Device implementation handoff — 2026-11-10
+
+Later user instructions in the Mac device chat authorized Docker-isolated tools,
+firmware, phone provisioning, reuse of the existing Tachikoma artwork, USB backup
+and installation, local audio tests and GPT-Live integration. The user then
+supplied this repository and requested the implementation and all steps taken be
+pushed here, with this chat taking over this part of the work. These later
+authorizations supersede the seed's records-only boundary for device work.
+
+Hardware evidence corrects the original model reference: the connected board's
+factory firmware and working vendor profile identify **ESP32-S3-Touch-AMOLED-1.8
+V2**, 368×448 CO5300/CST820. Original user quotations above remain unchanged.
+See [bring-up findings](device-bringup.md) and [current status](../README.md).
+
+The direct GPT-Live/Responses voice test is an isolated de-risking implementation;
+it has no Unified access and does not narrow the whole-Unified manager goal.
+No persistent manager/direct-focus interaction is ratified by this handoff.
+No server or tailnet change, workspace creation, session takeover or waiting
+question answer was performed. The earlier source-document qualification
+remains useful, but installed-host integration and voice concurrency are unproven.

@@ -1,5 +1,10 @@
 # Workspace development toolkit
 
+Historical Linux no-hardware setup record, preserved unchanged below. The later
+Mac device workspace uses Docker ESP-IDF 5.5.4 and the corrected AMOLED board;
+see [device bring-up](device-bringup.md). These are separate environments and
+validation results. The old toolkit paths are not Mac activation instructions.
+
 Delivered 2026-11-09 for [setup issue #5](https://github.com/colombod/amplifier-unified-pocket-pet/issues/5).
 **Independent verdict: PASS — toolkit compile readiness only.** This is not
 firmware/product acceptance, a connectivity result or a frozen SDK architecture.

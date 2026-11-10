@@ -1,0 +1,103 @@
+{
+  "date": "2026-11-10",
+  "hardware": {
+    "board": "Waveshare ESP32-S3-Touch-AMOLED-1.8 V2",
+    "display": "CO5300 368x448",
+    "touch": "CST820, CST816S-compatible at I2C 0x15",
+    "audio": "ES8311 mono 24 kHz PCM16",
+    "flash_bytes": 16777216,
+    "psram_bytes": 8388608,
+    "bsp_version": "2.0.3"
+  },
+  "toolkit": {
+    "build": "Docker ESP-IDF v5.5.4 linux/arm64",
+    "image_digest": "sha256:f3bc9daebfd8cb4e0afbdced7caac4431c7a862326a5e5587d65c31439549bb5",
+    "asset_exporter": "Pillow 11.3.0 container only",
+    "usb_tools": "project-local esptool 4.11.0 / pyserial 3.5"
+  },
+  "recovery": {
+    "complete_factory_backup_bytes": 16777216,
+    "backup_digest_verified_against_device": true,
+    "full_restore_exercised": true,
+    "factory_display_and_touch_user_confirmed": true,
+    "backup_committed": false
+  },
+  "accepted_audio_baseline": {
+    "version": "0.2.1-amoled-v2-audio",
+    "bytes": 7145024,
+    "sha256": "2266102873fdcd7cfb5624137854150ef4eda2f3a0bc34ee85c930351133fc4f",
+    "user_confirmed_tone_and_recorded_playback": true,
+    "microphone_level": "quieter than tone; occasional clipped peaks"
+  },
+  "voice_trial_0_3_0": {
+    "flash_write_verified": true,
+    "clean_startup_observed": true,
+    "saved_wifi_reconnect_observed": true,
+    "user_initiated_sessions_started": 2,
+    "api_session_started_event_received": true,
+    "output_audio_received": true,
+    "user_heard_speech": false,
+    "failure": "192 KiB playback queue overflow; error overwritten by a concurrent worker update",
+    "session_closed_confirmed": true,
+    "internal_free_bytes_at_stream_start": [
+      96091,
+      95843
+    ],
+    "psram_free_bytes_at_stream_start": 7940820,
+    "unified_integration": false
+  },
+  "current_candidate": {
+    "version": "0.3.3-amoled-v2-live",
+    "bytes": 7343792,
+    "sha256": "c7800890b09ead5e1104cf8bcfca75d01e86caf8ea65786978551310d79befc4",
+    "build_passed": true,
+    "playback_buffer_bytes": 1048576,
+    "application_duration_limit_removed": true,
+    "installed": true,
+    "audible_live_reply_verified": false,
+    "continuous_conversation_verified": false,
+    "capture_queue_bytes": 96000,
+    "independent_audio_workers": true,
+    "microphone_gated_only_on_audible_output": true,
+    "touch_offset_resolved": false,
+    "write_hash_verified": true,
+    "startup_observed": true,
+    "saved_wifi_reconnect_observed": true,
+    "panic_observed": false
+  },
+  "automated_checks": {
+    "setup_page_retry_and_save_gating": "passed",
+    "ap_ipv4_mapped_ipv6_access_bounds": "passed",
+    "websocket_fragment_reassembly_bounds": "passed",
+    "initial_live_session_configuration": "checked",
+    "live_api_calls_from_tests": false
+  },
+  "unimplemented": [
+    "Unified connector",
+    "Tailscale runtime enrollment/connectivity",
+    "existing-session voice round trip",
+    "workspace creation and new-work operations",
+    "attention question/revision round trip",
+    "AEC, barge-in and wakeword"
+  ],
+  "private_material_committed": false,
+  "voice_trial_0_3_2": {
+    "version": "0.3.2-amoled-v2-live",
+    "installed": true,
+    "write_hash_verified": true,
+    "startup_and_saved_wifi_reconnect_observed": true,
+    "settings_navigation_user_confirmed": true,
+    "live_session_started": true,
+    "user_heard_speech": false,
+    "output_bytes_received": 1152000,
+    "output_bytes_submitted_to_codec": 459840,
+    "output_peak": 0,
+    "volume_percent": 100,
+    "session_close_confirmed": true,
+    "failures": [
+      "continuous digital silence incorrectly gated microphone",
+      "coupled capture/network/playback loop fell behind hardware rate",
+      "user reports touch difficulty; offset unconfirmed"
+    ]
+  }
+}

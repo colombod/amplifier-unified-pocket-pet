@@ -12,8 +12,9 @@ established or invented here.
 Pocket Pet is a portable Wi-Fi voice interface to a personal manager across
 Amplifier Unified: existing workspaces and sessions, creating new workspaces,
 starting new work, and bringing things waiting on the human to their attention.
-It uses the fixed Waveshare ESP32-S3-Touch-LCD-1.83 with microphone, speaker and
-touch display. Its animated, ChatGPT-like pet makes the assistant present without
+The connected device was subsequently identified as Waveshare
+ESP32-S3-Touch-AMOLED-1.8 V2 (368×448), with microphone, speaker and touch display;
+the initial LCD-1.83 link was a mismatched reference. Its animated, ChatGPT-like pet makes the assistant present without
 requiring the main computer screen. Voice carries the interaction; touch supports
 explicit context selection.
 The intelligence and session runtime stay with Unified on `amplifier-srv-01`,
