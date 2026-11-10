@@ -12,6 +12,7 @@ not an external approval or a claim that all hardware behavior is proven.
 | An older save can clear newer unsent edits (Copilot r4528466138) | Editing invalidates awaitingSave. The page regression simulates editing during a pending generation, confirms preservation/Done gating, then confirms a new explicit submission can complete normally. |
 | Amplifier not explicitly disabled at boot (restart health investigation) | Hold the exact BSP amplifier pin low before other app setup and during release; no codec/microphone opens at boot. Fresh-boot log and user listening check are separate evidence. |
 | Sparse playback can exhaust hardware DMA (health investigation) | The first 160 ms prebuffer still logged 58 underruns. The current candidate uses 320 ms and voice-only modem-sleep disable/restore, with underrun counts and short fades. Physical audio check still required. |
+| Codec automatically enables PA before output settles (startup-click investigation) | Use the codec driver’s supported no-PA mode, prime zero samples with the amplifier held off, settle/unmute the DAC at zero volume, then enable the exact BSP amplifier pin and restore volume. Hardware start/stop acceptance is pending. |
 | Audio workers depend on sender noticing Stop (manual review) | Workers now check Stop directly, including after the blocking microphone read; cleanup still joins them before freeing the codec. |
 
 ## Other reviewed boundaries

@@ -298,3 +298,19 @@ latency tradeoff; it is not proof that every remaining crackle has that cause.
 Physical speech acceptance remains pending.
 
 Source: [ESP32-S3 Wi-Fi power saving](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-guides/wifi.html#esp32-s3-wi-fi-power-saving-mode).
+
+
+### Clean speech with a remaining startup click, 0.3.8
+
+The user reported 0.3.7 speech was clean apart from one initial crackle. This is
+physical improvement over the preceding 58-underrun trial; no new underrun count
+is inferred because the bounded observer had ended before that user test.
+
+The pinned ES8311 driver enables its configured PA pin when starting the codec,
+before the application can settle output. In 0.3.8 the app uses the driver's
+supported pa_pin=-1 mode and owns the same BSP GPIO46 sequencing: hold it low,
+open/mute the codec at zero volume, clock 80 ms of silent samples through I2S,
+allow DAC settling, then enable the amplifier and restore saved volume. Existing
+cleanup still disables the amplifier on every exit. This adds no microphone or
+API activity on boot. Build and source review pass; startup-click acceptance is
+pending. The saved volume, Wi-Fi and API key are retained.

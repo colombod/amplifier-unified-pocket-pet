@@ -80,7 +80,8 @@ static esp_err_t apply_volume(audio_session_t *a) {
  a->volume=current.volume;return ESP_OK;
 }
 static esp_err_t open_audio(audio_session_t *a,bool mic) {
- esp_err_t err=bsp_i2c_init();if(err!=ESP_OK)return err;
+ esp_err_t err=audio_hardware_quiet();if(err!=ESP_OK)return err;
+ err=bsp_i2c_init();if(err!=ESP_OK)return err;
  i2s_chan_config_t channels=I2S_CHANNEL_DEFAULT_CONFIG(CONFIG_BSP_I2S_NUM,I2S_ROLE_MASTER);channels.auto_clear=true;
  err=i2s_new_channel(&channels,&a->tx,&a->rx);if(err!=ESP_OK)return err;
  i2s_std_config_t bus={.clk_cfg=I2S_STD_CLK_DEFAULT_CONFIG(RATE),
@@ -93,15 +94,27 @@ static esp_err_t open_audio(audio_session_t *a,bool mic) {
  audio_codec_i2c_cfg_t ctrl={.port=BSP_I2C_NUM,.addr=ES8311_CODEC_DEFAULT_ADDR,.bus_handle=bsp_i2c_get_handle()};
  a->ctrl=audio_codec_new_i2c_ctrl(&ctrl);if(!a->data||!a->gpio||!a->ctrl)return ESP_ERR_NO_MEM;
  es8311_codec_cfg_t cfg={.ctrl_if=a->ctrl,.gpio_if=a->gpio,.codec_mode=mic?ESP_CODEC_DEV_WORK_MODE_BOTH:ESP_CODEC_DEV_WORK_MODE_DAC,
-  .pa_pin=BSP_POWER_AMP_IO,.master_mode=false,.use_mclk=true,.hw_gain={.pa_voltage=5.0,.codec_dac_voltage=3.3}};
+  /* Own amplifier sequencing here: the codec otherwise enables it before the
+   * DAC reference/clocks have settled. -1 is the driver's supported no-PA mode. */
+  .pa_pin=-1,.master_mode=false,.use_mclk=true,.hw_gain={.pa_voltage=5.0,.codec_dac_voltage=3.3}};
  a->codec=es8311_codec_new(&cfg);if(!a->codec)return ESP_ERR_NO_MEM;
  esp_codec_dev_cfg_t dev={.dev_type=mic?ESP_CODEC_DEV_TYPE_IN_OUT:ESP_CODEC_DEV_TYPE_OUT,.codec_if=a->codec,.data_if=a->data};
  a->dev=esp_codec_dev_new(&dev);if(!a->dev)return ESP_ERR_NO_MEM;
  esp_codec_dev_sample_info_t format={.sample_rate=RATE,.channel=1,.bits_per_sample=16};
  if(esp_codec_dev_open(a->dev,&format)!=ESP_CODEC_DEV_OK)return ESP_FAIL;
- a->volume=-1;if(apply_volume(a)!=ESP_OK)return ESP_FAIL;
- if(esp_codec_dev_set_out_mute(a->dev,false)!=ESP_CODEC_DEV_OK)return ESP_FAIL;
+ if(esp_codec_dev_set_out_mute(a->dev,true)!=ESP_CODEC_DEV_OK)return ESP_FAIL;
+ if(esp_codec_dev_set_out_vol(a->dev,0)!=ESP_CODEC_DEV_OK)return ESP_FAIL;
  if(mic&&esp_codec_dev_set_in_gain(a->dev,24.0)!=ESP_CODEC_DEV_OK)return ESP_FAIL;
+ /* Clock zeros through the DMA while the external amplifier remains off. */
+ int16_t silence[CHUNK]={0};
+ for(int i=0;i<4;i++)if(esp_codec_dev_write(a->dev,silence,sizeof(silence))!=ESP_CODEC_DEV_OK)return ESP_FAIL;
+ vTaskDelay(pdMS_TO_TICKS(80));
+ if(esp_codec_dev_set_out_mute(a->dev,false)!=ESP_CODEC_DEV_OK)return ESP_FAIL;
+ vTaskDelay(pdMS_TO_TICKS(20));
+ if(gpio_set_level(BSP_POWER_AMP_IO,1)!=ESP_OK)return ESP_FAIL;
+ vTaskDelay(pdMS_TO_TICKS(20));
+ a->volume=-1;if(apply_volume(a)!=ESP_OK)return ESP_FAIL;
+ ESP_LOGI("audio_test","Audio start: silent DMA primed; amplifier enabled after DAC settle");
  return ESP_OK;
 }
 static esp_err_t tone(audio_session_t *a) {

@@ -87,7 +87,7 @@ restore script exist locally; see [recovery](docs/device-bringup.md#recovery-and
 Backups, secrets, raw logs, binaries and generated outputs are excluded from Git.
 
 A later restart exposed speech crackles; the installed health candidate is
-`0.3.7-amoled-v2-health`, with physical acceptance pending. The original milestone
+`0.3.8-amoled-v2-health`, with physical acceptance pending. The original milestone
 tag remains the first spoken baseline, not a certificate of long-term audio health.
 
 The post-restart health/review record is [PR #6 review](docs/pr-6-review.md).

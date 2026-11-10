@@ -47,9 +47,9 @@
     "unified_integration": false
   },
   "current_candidate": {
-    "version": "0.3.7-amoled-v2-health",
-    "bytes": 7353184,
-    "sha256": "c233d635b78611464941a2fcc8e9c7a6f32448cae2472066974bd1d46a374a17",
+    "version": "0.3.8-amoled-v2-health",
+    "bytes": 7353424,
+    "sha256": "5d1164e0ae3c378ed67bf984537855bc15144094af7831bc64feb0ff1dc96ab9",
     "build_passed": true,
     "playback_buffer_bytes": 1048576,
     "application_duration_limit_removed": true,
@@ -79,7 +79,8 @@
     "jitter_buffer_ms": 320,
     "stop_observed_by_audio_workers": true,
     "boot_amplifier_off_log_observed": true,
-    "wifi_power_save_disabled_only_during_voice": true
+    "wifi_power_save_disabled_only_during_voice": true,
+    "amplifier_enabled_after_silent_dma_and_dac_settle": true
   },
   "automated_checks": {
     "setup_page_retry_and_save_gating": "passed",
@@ -260,5 +261,43 @@
     "playback_underruns": 58,
     "transcript_input_chars": 183,
     "transcript_output_chars": 255
+  },
+  "health_trial_0_3_7": {
+    "version": "0.3.7-amoled-v2-health",
+    "bytes": 7353184,
+    "sha256": "c233d635b78611464941a2fcc8e9c7a6f32448cae2472066974bd1d46a374a17",
+    "build_passed": true,
+    "playback_buffer_bytes": 1048576,
+    "application_duration_limit_removed": true,
+    "installed": true,
+    "audible_live_reply_verified": false,
+    "continuous_conversation_verified": "user confirmed talking; long-duration reliability not measured",
+    "capture_queue_bytes": 96000,
+    "independent_audio_workers": true,
+    "microphone_gated_only_on_audible_output": true,
+    "touch_offset_resolved": false,
+    "write_hash_verified": true,
+    "startup_observed": true,
+    "saved_wifi_reconnect_observed": true,
+    "panic_observed": false,
+    "separate_websocket_tx_lock": true,
+    "configure_generation_edit_retention": true,
+    "wifi_rssi_indicators": true,
+    "four_point_touch_alignment": true,
+    "phone_edit_retention_user_verified": true,
+    "touch_alignment_user_verified": false,
+    "startup_greeting": true,
+    "content_free_transcript_counters": true,
+    "saved_key_status_user_verified": true,
+    "conversation_user_verified": false,
+    "post_restart_audio_health_user_verified": "speech clean; one initial click remains",
+    "amplifier_explicitly_off_at_boot": true,
+    "jitter_buffer_ms": 320,
+    "stop_observed_by_audio_workers": true,
+    "boot_amplifier_off_log_observed": true,
+    "wifi_power_save_disabled_only_during_voice": true,
+    "speech_playback_user_verified_clean": true,
+    "startup_click_user_reported": true,
+    "runtime_audio_diagnostics": "observer ended before the user trial; no new underrun count inferred"
   }
 }

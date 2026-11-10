@@ -21,7 +21,7 @@ Repository: https://github.com/colombod/amplifier-unified-pocket-pet
   firmware 0.3.5. Decisions, achievements and lessons: [milestone-1.md](milestone-1.md).
 - PR #6 contains the device implementation plus subsequent health/review fixes.
   Consult its actual merge state and the current main commit before continuing.
-- The health candidate is **0.3.7-amoled-v2-health**. Latest physical verdict,
+- The health candidate is **0.3.8-amoled-v2-health**. Latest physical verdict,
   artifact hash, installation status and limits are in [device-evidence.json](device-evidence.json).
   Do not infer acceptance from the version number alone.
 - [Bring-up history](device-bringup.md) and [PR review](pr-6-review.md) retain
