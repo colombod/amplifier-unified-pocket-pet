@@ -108,3 +108,19 @@ this milestone neither changes servers nor enrolls anything into a tailnet.
 References: [original intent](intent.md), [draft vision](VISION.md),
 [bring-up chronology](device-bringup.md), [voice test](voice-test.md),
 [PR #6](https://github.com/colombod/amplifier-unified-pocket-pet/pull/6).
+
+
+## Reviewed audio baseline
+
+Firmware **0.3.8-amoled-v2-health** subsequently passed the user’s two-start/stop
+check: the initial crackle was gone and speech remained clean. The first milestone
+tag remains immutable; `milestone-1-reviewed` identifies the reviewed health
+baseline. Saved-network retry and pending-save/new-edit review findings were
+fixed and regression-tested before merge.
+
+Two additional device lessons: keep the amplifier off while silent DMA and DAC
+references settle, and treat Wi-Fi modem sleep as a real-time audio latency
+tradeoff. The current code uses a 320 ms jitter buffer and disables modem sleep
+only for a voice session, restoring the prior policy afterward. These changes
+passed the stated user check; they do not certify every router, long-duration
+workload or battery envelope.

@@ -21,7 +21,9 @@ Repository: https://github.com/colombod/amplifier-unified-pocket-pet
   firmware 0.3.5. Decisions, achievements and lessons: [milestone-1.md](milestone-1.md).
 - PR #6 contains the device implementation plus subsequent health/review fixes.
   Consult its actual merge state and the current main commit before continuing.
-- The health candidate is **0.3.8-amoled-v2-health**. Latest physical verdict,
+- The accepted health baseline is **0.3.8-amoled-v2-health**: the user confirmed
+  two clean starts/stops with clean speech. `milestone-1-reviewed` preserves the
+  reviewed baseline. Latest physical verdict,
   artifact hash, installation status and limits are in [device-evidence.json](device-evidence.json).
   Do not infer acceptance from the version number alone.
 - [Bring-up history](device-bringup.md) and [PR review](pr-6-review.md) retain
@@ -124,7 +126,8 @@ content or key should be logged or committed.
 
 ## Remaining evidence limits
 
-Respect the latest physical audio-health verdict before changing the baseline.
+The reported startup/speaking crackle regression passed the user’s final two-start
+check on 0.3.8. Preserve that accepted baseline when extending the system.
 Router outage/return, long-running voice stability, measured latency/CPU envelope,
 physical touch accuracy after calibration and AEC/barge-in are not automatically
 passed by unit tests or milestone acceptance. Existing spikes #1–#4 remain open;

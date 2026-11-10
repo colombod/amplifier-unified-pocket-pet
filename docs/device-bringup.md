@@ -314,3 +314,14 @@ allow DAC settling, then enable the amplifier and restore saved volume. Existing
 cleanup still disables the amplifier on every exit. This adds no microphone or
 API activity on boot. Build and source review pass; startup-click acceptance is
 pending. The saved volume, Wi-Fi and API key are retained.
+
+
+### Final audio-health acceptance
+
+The user confirmed “Yes, clean on both starts” after being asked to start/stop
+voice twice on 0.3.8 and check initial crackle and speech. This closes the reported
+startup/speaking crackle regression for that manual trial. The final bounded USB
+observer ended before the trial, so no new underrun count is inferred. The app’s
+build/flash identity remains unchanged. Both PR findings are fixed and resolved;
+review and acceptance evidence are ready for merge and the LAN-first Unified
+handoff. Long-duration and unexercised hardware cases retain their limits.

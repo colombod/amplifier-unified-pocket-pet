@@ -11,8 +11,8 @@ not an external approval or a claim that all hardware behavior is proven.
 | Saved network stops retrying after failed joins (Copilot r4528466055) | Failed joins schedule bounded 5–60 second backoff while disconnected. Retry admission checks active join, queued commands and recent provisioning activity under the state lock. Native policy tests cover retries, cap, reset, provisioning pause and timer wrap. Physical router outage/return is untested. |
 | An older save can clear newer unsent edits (Copilot r4528466138) | Editing invalidates awaitingSave. The page regression simulates editing during a pending generation, confirms preservation/Done gating, then confirms a new explicit submission can complete normally. |
 | Amplifier not explicitly disabled at boot (restart health investigation) | Hold the exact BSP amplifier pin low before other app setup and during release; no codec/microphone opens at boot. Fresh-boot log and user listening check are separate evidence. |
-| Sparse playback can exhaust hardware DMA (health investigation) | The first 160 ms prebuffer still logged 58 underruns. The current candidate uses 320 ms and voice-only modem-sleep disable/restore, with underrun counts and short fades. Physical audio check still required. |
-| Codec automatically enables PA before output settles (startup-click investigation) | Use the codec driver’s supported no-PA mode, prime zero samples with the amplifier held off, settle/unmute the DAC at zero volume, then enable the exact BSP amplifier pin and restore volume. Hardware start/stop acceptance is pending. |
+| Sparse playback can exhaust hardware DMA (health investigation) | The first 160 ms prebuffer still logged 58 underruns. The current candidate uses 320 ms and voice-only modem-sleep disable/restore, with underrun counts and short fades. The user confirmed clean speech on 0.3.7; final 0.3.8 starts/stops were also clean. |
+| Codec automatically enables PA before output settles (startup-click investigation) | Use the codec driver’s supported no-PA mode, prime zero samples with the amplifier held off, settle/unmute the DAC at zero volume, then enable the exact BSP amplifier pin and restore volume. The user confirmed two clean starts/stops on installed 0.3.8. |
 | Audio workers depend on sender noticing Stop (manual review) | Workers now check Stop directly, including after the blocking microphone read; cleanup still joins them before freeing the codec. |
 
 ## Other reviewed boundaries
@@ -38,3 +38,18 @@ The user authorized merge after a satisfactory review and health check. There is
 no authority to waive a failing physical audio check. Keep unmeasured long-duration
 stability, touch-calibration accuracy and router-outage recovery explicit in the
 handoff; they are not silently reported as passes.
+
+
+## Final verdict — 10 November 2026
+
+Both inline findings are fixed, regression-tested and resolved on GitHub. The
+user confirmed **two clean starts/stops with clean speech** on the installed
+0.3.8 artifact. Build/partition, targeted native/page checks, staged-content
+review and flash verification passed; startup and saved-Wi-Fi reconnect were
+observed. No application source changed after that build and physical acceptance.
+The merge gate is satisfied within this documented prototype scope.
+
+This is user-heard acceptance, not an inferred zero-underrun measurement: the
+bounded observer ended before the last manual trial. Long-duration reliability,
+physical router outage/return and calibration accuracy remain unmeasured. No
+GitHub Actions pass or independent approval is invented from absent checks.

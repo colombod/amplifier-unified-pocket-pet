@@ -22,7 +22,7 @@ conversation: it has no persistent memory or Amplifier Unified access yet.
 | Phone provisioning | Password-protected device Wi-Fi, QR join, phone page at `http://192.168.4.1`, 2.4 GHz scan, required OpenAI key, checked persistence, retry feedback and installed-version labels implemented. Successful save and restart reconnection observed; the user confirmed reconfiguration edits stay intact and the saved key is recognized. iPhone automatic captive-page opening remains unconfirmed. |
 | Wi-Fi status and touch alignment | Home/Settings show link status and RSSI separately from voice state. Four-point affine touch alignment is implemented with independent center validation and NVS persistence; physical accuracy is pending. |
 | Local audio and volume | User confirmed both speaker tone and recorded playback audible at about 70%. Volume persists. Microphone playback is quieter than the tone, with occasional clipped peaks; gain/fidelity still needs tuning. |
-| GPT-Live voice baseline | `0.3.5-amoled-v2-live` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The user has confirmed working spoken conversation. Fresh sessions do not retain prior conversations; long-duration reliability and Unified integration remain unverified. See [voice test](docs/voice-test.md). |
+| GPT-Live voice baseline | `0.3.8-amoled-v2-health` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The user has confirmed working spoken conversation. Fresh sessions do not retain prior conversations; long-duration reliability and Unified integration remain unverified. See [voice test](docs/voice-test.md). |
 | Unified / remote access | No Unified connector, Tailscale enrollment, cross-workspace operations or attention-answer round trip implemented. The direct OpenAI voice test is an isolated hardware spike. |
 
 The [bring-up record](docs/device-bringup.md) includes the failed display route,
@@ -86,9 +86,10 @@ directly expose macOS `/dev/cu.*` ports. A verified complete factory backup and
 restore script exist locally; see [recovery](docs/device-bringup.md#recovery-and-installation).
 Backups, secrets, raw logs, binaries and generated outputs are excluded from Git.
 
-A later restart exposed speech crackles; the installed health candidate is
-`0.3.8-amoled-v2-health`, with physical acceptance pending. The original milestone
-tag remains the first spoken baseline, not a certificate of long-term audio health.
+The installed health baseline is **0.3.8-amoled-v2-health**. After the streaming
+and startup-sequencing fixes, the user confirmed two clean voice starts/stops
+with clean speech. The original milestone tag preserves the first spoken
+baseline; long-duration reliability remains unmeasured.
 
 The post-restart health/review record is [PR #6 review](docs/pr-6-review.md).
 The next implementation context is [Unified handoff](docs/unified-handoff.md);
