@@ -33,6 +33,7 @@
 #define PLAYBACK_CAP (1024*1024)
 #define CAPTURE_CAP 96000
 #define INPUT_BYTES 4800
+#define PLAYBACK_START_BYTES 7680 /* 160 ms at 24 kHz PCM16 mono. */
 static const char *TAG="pet_live";
 static SemaphoreHandle_t status_lock;
 static QueueHandle_t jobs;
@@ -45,6 +46,7 @@ typedef struct {
  atomic_bool audio_stopping;
  atomic_uint speaker_until;
  unsigned returned_peak,captured_peak;
+ unsigned playback_underruns;
  unsigned sent_input_bytes,max_send_ms,input_transcript_chars,output_transcript_chars;
  uint64_t capture_samples,capture_squares;
  StreamBufferHandle_t playback,capture;
@@ -80,8 +82,9 @@ static bool speaker_active(live_connection_t *c) {
 }
 static void capture_audio(void *arg) {
  live_connection_t *c=arg;int16_t pcm[CHUNK];
- while(!atomic_load(&c->audio_stopping) && !atomic_load(&c->failed)) {
+ while(!atomic_load(&c->audio_stopping) && !atomic_load(&c->failed) && !atomic_load(&stop_requested)) {
   if(audio_stream_read(c->audio,pcm,sizeof(pcm))!=ESP_OK){fail(c,"Microphone read failed.");break;}
+  if(atomic_load(&stop_requested))break;
   unsigned peak=0;for(size_t i=0;i<CHUNK;i++){unsigned value=abs((int)pcm[i]);if(value>peak)peak=value;}
   for(size_t i=0;i<CHUNK;i++){int64_t sample=pcm[i];c->capture_squares+=sample*sample;}c->capture_samples+=CHUNK;
   if(peak>c->captured_peak)c->captured_peak=peak;
@@ -91,10 +94,22 @@ static void capture_audio(void *arg) {
  mbedtls_platform_zeroize(pcm,sizeof(pcm));xEventGroupSetBits(c->audio_done,BIT0);vTaskDelete(NULL);
 }
 static void play_audio(void *arg) {
- live_connection_t *c=arg;int16_t pcm[CHUNK];
- while(!atomic_load(&c->audio_stopping) && !atomic_load(&c->failed)) {
-  size_t bytes=xStreamBufferReceive(c->playback,pcm,sizeof(pcm),pdMS_TO_TICKS(20));
-  if(!bytes)continue;
+ live_connection_t *c=arg;int16_t pcm[CHUNK];bool primed=false,fade_in=false;int16_t last=0;
+ while(!atomic_load(&c->audio_stopping) && !atomic_load(&c->failed) && !atomic_load(&stop_requested)) {
+  if(!primed) {
+   if(xStreamBufferBytesAvailable(c->playback)<PLAYBACK_START_BYTES){vTaskDelay(pdMS_TO_TICKS(5));continue;}
+   primed=true;fade_in=true;
+  }
+  size_t bytes=xStreamBufferReceive(c->playback,pcm,sizeof(pcm),0);
+  if(bytes<sizeof(pcm)) {
+   c->playback_underruns++;primed=false;
+   size_t samples=bytes/2;
+   int start=samples?pcm[samples-1]:last;
+   for(size_t i=samples;i<CHUNK;i++){int remaining=240-(int)(i-samples);pcm[i]=remaining>0?start*remaining/240:0;}
+   bytes=sizeof(pcm);
+  }
+  if(fade_in){for(unsigned i=0;i<240;i++)pcm[i]=(int32_t)pcm[i]*i/240;fade_in=false;}
+  last=pcm[CHUNK-1];
   /* Live emits continuous audio, including digital silence. Only audible
    * samples suppress the mic; packet arrival alone must never do so. */
   if(live_pcm_audible(pcm,bytes))atomic_store(&c->speaker_until,(uint32_t)xTaskGetTickCount()+pdMS_TO_TICKS(300));
@@ -259,6 +274,7 @@ cleanup:
  audio_test_status_t audio_status;audio_test_snapshot(&audio_status);
  ESP_LOGI(TAG,"Session audio bytes received=%u played=%u output_peak=%u input_peak=%u volume=%d; finalization=%s",atomic_load(&c->received_bytes),atomic_load(&c->played_bytes),c->returned_peak,c->captured_peak,audio_status.volume,finalized?"confirmed":"unconfirmed");
  ESP_LOGI(TAG,"Input captured=%llu sent=%u rms=%u max_send_ms=%u; transcript character counts input=%u output=%u (content not logged)",c->capture_samples*2,c->sent_input_bytes,c->capture_samples?(unsigned)sqrt((double)c->capture_squares/c->capture_samples):0,c->max_send_ms,c->input_transcript_chars,c->output_transcript_chars);
+ ESP_LOGI(TAG,"Playback jitter buffer=160ms underruns=%u",c->playback_underruns);
  if(c->playback)vStreamBufferDelete(c->playback);
  if(c->capture)vStreamBufferDelete(c->capture);
  if(c->audio_done)vEventGroupDelete(c->audio_done);

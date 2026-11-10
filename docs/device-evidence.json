@@ -47,21 +47,21 @@
     "unified_integration": false
   },
   "current_candidate": {
-    "version": "0.3.5-amoled-v2-live",
-    "bytes": 7350816,
-    "sha256": "d329262c8e3df6e6f28cb83b6bf15ad69347f5fb19e9a9ecc8d6ccc35dbf43b3",
+    "version": "0.3.6-amoled-v2-health",
+    "bytes": 7352176,
+    "sha256": "25ca0d613f9b7e5f7a83542543a198baef9c901dc389f9f40df611270f4a1ba9",
     "build_passed": true,
     "playback_buffer_bytes": 1048576,
     "application_duration_limit_removed": true,
     "installed": true,
-    "audible_live_reply_verified": true,
+    "audible_live_reply_verified": false,
     "continuous_conversation_verified": "user confirmed talking; long-duration reliability not measured",
     "capture_queue_bytes": 96000,
     "independent_audio_workers": true,
     "microphone_gated_only_on_audible_output": true,
     "touch_offset_resolved": false,
     "write_hash_verified": true,
-    "startup_observed": "not recaptured to avoid resetting the accepted live session",
+    "startup_observed": true,
     "saved_wifi_reconnect_observed": true,
     "panic_observed": false,
     "separate_websocket_tx_lock": true,
@@ -73,7 +73,12 @@
     "startup_greeting": true,
     "content_free_transcript_counters": true,
     "saved_key_status_user_verified": true,
-    "conversation_user_verified": true
+    "conversation_user_verified": false,
+    "post_restart_audio_health_user_verified": false,
+    "amplifier_explicitly_off_at_boot": true,
+    "jitter_buffer_ms": 160,
+    "stop_observed_by_audio_workers": true,
+    "boot_amplifier_off_log_observed": true
   },
   "automated_checks": {
     "setup_page_retry_and_save_gating": "passed",
@@ -167,5 +172,46 @@
     "boundary": "standalone spoken conversation; not Unified integration, persisted memory or long-duration performance acceptance",
     "source": "device chat user confirmation",
     "tag": "milestone-1-voice"
+  },
+  "accepted_milestone_1_baseline": {
+    "version": "0.3.5-amoled-v2-live",
+    "bytes": 7350816,
+    "sha256": "d329262c8e3df6e6f28cb83b6bf15ad69347f5fb19e9a9ecc8d6ccc35dbf43b3",
+    "build_passed": true,
+    "playback_buffer_bytes": 1048576,
+    "application_duration_limit_removed": true,
+    "installed": true,
+    "audible_live_reply_verified": true,
+    "continuous_conversation_verified": "user confirmed talking; long-duration reliability not measured",
+    "capture_queue_bytes": 96000,
+    "independent_audio_workers": true,
+    "microphone_gated_only_on_audible_output": true,
+    "touch_offset_resolved": false,
+    "write_hash_verified": true,
+    "startup_observed": "not recaptured to avoid resetting the accepted live session",
+    "saved_wifi_reconnect_observed": true,
+    "panic_observed": false,
+    "separate_websocket_tx_lock": true,
+    "configure_generation_edit_retention": true,
+    "wifi_rssi_indicators": true,
+    "four_point_touch_alignment": true,
+    "phone_edit_retention_user_verified": true,
+    "touch_alignment_user_verified": false,
+    "startup_greeting": true,
+    "content_free_transcript_counters": true,
+    "saved_key_status_user_verified": true,
+    "conversation_user_verified": true
+  },
+  "pr_review_fixes": {
+    "reviewed_commit": "fdd783e3a5193b50d5aff6c38ec5bf9486f5326f",
+    "saved_network_retry": "5 to 60 second bounded backoff; paused while a join, queued command or recent phone provisioning activity is present",
+    "unsent_edit_retention": "editing invalidates the older pending save confirmation",
+    "targeted_tests": "passed",
+    "runtime_router_recovery": "not physically exercised"
+  },
+  "post_milestone_regression": {
+    "user_report": "Crackling after restart, both idle and during playback",
+    "version_observed": "after milestone 0.3.5",
+    "acceptance_reopened": true
   }
 }

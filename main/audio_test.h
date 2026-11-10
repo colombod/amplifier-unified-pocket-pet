@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 typedef struct { bool busy; int volume; char message[112]; } audio_test_status_t;
+esp_err_t audio_hardware_quiet(void);
 void audio_tests_init(void);
 void audio_test_request(bool microphone);
 void audio_test_snapshot(audio_test_status_t *out);

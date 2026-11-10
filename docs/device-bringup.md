@@ -252,3 +252,29 @@ record are kept distinct from automated startup/protocol evidence. The baseline
 is tagged milestone-1-voice; [the milestone record](milestone-1.md) captures the
 core decisions, achievements, limitations and lessons. The next work is Unified
 integration and persistent host-owned conversation, not a replacement chatbot.
+
+
+### Post-restart health and PR review, 0.3.6
+
+After accepting milestone 1, the user restarted the device and reported crackling
+both while idle and during playback. Audio health acceptance was reopened before
+Unified work or merge. The app had not configured the amplifier-enable pin until
+first audio use. The 0.3.6 app holds the BSP’s active-high GPIO46 off before Wi-Fi,
+NVS or display initialization and again during cleanup. Output capability was
+checked in this ESP-IDF target’s SOC_GPIO_VALID_OUTPUT_GPIO_MASK. This addresses
+an uninitialized amplifier input; physical confirmation is required.
+
+Live playback now prebuffers 160 ms, counts underruns, fades in at a start/restart
+and fades toward zero on starvation before buffering again. Capture and playback
+workers directly observe Stop rather than waiting for the network sender. Saved
+volume is retained; local tone and speech are compared at a comfortable setting.
+The build and automated checks pass; crackle-free restart acceptance is pending.
+
+The latest Copilot review on fdd783e identified two valid issues. Saved-network
+joins now retry with 5–60 second bounded backoff even after earlier attempts all
+failed. Recent AP setup activity, an active join or a queued provisioning command
+pauses background retries. New form edits invalidate an older pending save
+confirmation so a finishing prior generation cannot clear unsent replacement
+values. Native retry tests cover backoff, gating and clock wrap; page tests cover
+editing while an earlier save completes. Router-outage recovery itself has not
+been physically exercised. No existing integration spike is closed by these fixes.

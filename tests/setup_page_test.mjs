@@ -37,4 +37,14 @@ postMode='disconnect';await vm.runInContext("$('setup').onsubmit({preventDefault
 await vm.runInContext('poll()',context);assert.equal(node('password').value,'new-dummy-password');
 status={...status,configure_generation:2,settings_saved:true};await vm.runInContext('poll()',context);
 assert.equal(node('password').value,'');assert.equal(node('key').value,'');
+// A user can edit while a previous generation is still connecting.
+node('password').value='submitted-dummy-password';postMode='success';
+await vm.runInContext("$('setup').onsubmit({preventDefault(){}})",context);
+node('password').value='unsent-dummy-password';await vm.runInContext("$('password').oninput()",context);
+status={...status,configure_generation:3,settings_saved:true};await vm.runInContext('poll()',context);
+assert.equal(node('password').value,'unsent-dummy-password');assert.equal(node('done').classList.hidden,true);
+// A new explicit submit owns its own completion and can then clear the fields.
+await vm.runInContext("$('setup').onsubmit({preventDefault(){}})",context);
+status={...status,configure_generation:4};await vm.runInContext('poll()',context);
+assert.equal(node('password').value,'');
 console.log('PASS: detailed rejection, lost ACK, retained entries, unsaved-state gating and confirmed-save generation and edit retention');

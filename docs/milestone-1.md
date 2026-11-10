@@ -81,6 +81,14 @@ accuracy after touch calibration are not certified by this milestone.
 13. **Voice connectivity is only the first product milestone.** A new private
     conversation with no memory does not manage the user's existing work.
 
+## Post-acceptance health finding
+
+A subsequent restart produced crackling at idle and in playback, reported by the
+user. The original milestone tag remains immutable as the first spoken baseline;
+audio health was reopened before merge. Firmware 0.3.6 adds explicit boot/cleanup
+amplifier-off control and buffered playback. Physical restart acceptance is
+pending; see the bring-up and device-evidence records.
+
 ## Direction after the baseline
 
 The user explicitly wants to move forward with **Amplifier Unified integration**.

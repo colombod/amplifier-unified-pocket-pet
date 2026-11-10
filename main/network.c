@@ -22,6 +22,8 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "setup_address.h"
+#include "network_retry.h"
+#include "esp_timer.h"
 
 #define IP_READY BIT0
 #define LINK_LOST BIT1
@@ -33,6 +35,9 @@ static httpd_handle_t server;
 static nvs_handle_t storage;
 static char token[33];
 static bool credentials_present;
+static bool setup_activity_seen;
+static uint32_t setup_activity_at;
+static uint32_t now_ms(void){return (uint32_t)(esp_timer_get_time()/1000);}
 extern const unsigned char setup_html_start[] asm("_binary_setup_html_start");
 extern const unsigned char setup_html_end[] asm("_binary_setup_html_end");
 typedef struct { int kind; char ssid[33], password[64], key[256]; } command_t;
@@ -68,6 +73,7 @@ static bool ap_request(httpd_req_t *req) {
         httpd_resp_send_err(req,HTTPD_403_FORBIDDEN,"Open setup using the device Wi-Fi"); return false;
     }
     httpd_resp_set_hdr(req,"Cache-Control","no-store");
+    xSemaphoreTake(state_lock,portMAX_DELAY);setup_activity_seen=true;setup_activity_at=now_ms();xSemaphoreGive(state_lock);
     httpd_resp_set_hdr(req,"X-Content-Type-Options","nosniff");
     httpd_resp_set_hdr(req,"Content-Security-Policy","default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     return true;
@@ -228,7 +234,7 @@ static void open_ap(void) {
     if(mode!=WIFI_MODE_APSTA) ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     xSemaphoreTake(state_lock,portMAX_DELAY); state.setup=true; xSemaphoreGive(state_lock);
 }
-static void join_network(const command_t *cmd,bool save) {
+static bool join_network(const command_t *cmd,bool save) {
     xSemaphoreTake(state_lock,portMAX_DELAY); state.joining=true; state.connected=false; xSemaphoreGive(state_lock);
     message("Connecting to your Wi-Fi...");
     xEventGroupClearBits(events,IP_READY|LINK_LOST);
@@ -265,25 +271,28 @@ static void join_network(const command_t *cmd,bool save) {
     }
     else { message("Could not connect. Check password or use a 2.4 GHz network."); open_ap(); }
     xSemaphoreTake(state_lock,portMAX_DELAY); state.joining=false; state.connected=ok; if(ok) strlcpy(state.ssid,cmd->ssid,sizeof(state.ssid)); xSemaphoreGive(state_lock);
+    return ok;
 }
 static void worker(void *arg) {
+    network_retry_t retry={0};
     if(credentials_present) {
         command_t cmd={.kind=1};size_t n=sizeof(cmd.ssid);nvs_get_str(storage,"ssid",cmd.ssid,&n);n=sizeof(cmd.password);nvs_get_str(storage,"password",cmd.password,&n);
-        join_network(&cmd,false);memset(&cmd,0,sizeof(cmd));
+        bool ok=join_network(&cmd,false);memset(&cmd,0,sizeof(cmd));if(!ok)network_retry_failed(&retry,now_ms());
     }
     for(;;) {
         command_t cmd={0};
         if(xQueueReceive(commands,&cmd,pdMS_TO_TICKS(1000))==pdTRUE) {
-            if(cmd.kind==0) open_ap();
+            if(cmd.kind==0) {xSemaphoreTake(state_lock,portMAX_DELAY);setup_activity_seen=true;setup_activity_at=now_ms();xSemaphoreGive(state_lock);open_ap();}
             else if(cmd.kind==1) {
                 /* Allow HTTP ACK/TCP delivery before AP+STA channel switching. */
                 vTaskDelay(pdMS_TO_TICKS(1000));
-                open_ap();join_network(&cmd,true);
+                open_ap();bool ok=join_network(&cmd,true);
+                if(ok)network_retry_reset(&retry);else network_retry_failed(&retry,now_ms());
             }
             else if(cmd.kind==2) {
                 vTaskDelay(pdMS_TO_TICKS(1800));
                 network_status_t s;network_snapshot(&s);
-                if(s.connected && s.settings_saved) {esp_wifi_set_mode(WIFI_MODE_STA);xSemaphoreTake(state_lock,portMAX_DELAY);state.setup=false;xSemaphoreGive(state_lock);}
+                if(s.connected && s.settings_saved) {esp_wifi_set_mode(WIFI_MODE_STA);xSemaphoreTake(state_lock,portMAX_DELAY);state.setup=false;setup_activity_seen=false;xSemaphoreGive(state_lock);}
             }
             memset(&cmd,0,sizeof(cmd));
         }
@@ -294,12 +303,26 @@ static void worker(void *arg) {
         }
         if(s.connected && !(xEventGroupGetBits(events)&IP_READY)) {
             xSemaphoreTake(state_lock,portMAX_DELAY);state.connected=false;xSemaphoreGive(state_lock);
-            message("Reconnecting to saved Wi-Fi...");
-            command_t retry={.kind=1};size_t n=sizeof(retry.ssid);
-            esp_err_t err=nvs_get_str(storage,"ssid",retry.ssid,&n);n=sizeof(retry.password);
-            if(err==ESP_OK) err=nvs_get_str(storage,"password",retry.password,&n);
-            if(err==ESP_OK) join_network(&retry,false); else open_ap();
-            memset(&retry,0,sizeof(retry));
+            s.connected=false;message("Wi-Fi disconnected. Saved network will be retried.");
+            network_retry_failed(&retry,now_ms());
+        }
+        if(s.connected)network_retry_reset(&retry);
+        else if(credentials_present) {
+            if(!retry.scheduled)network_retry_failed(&retry,now_ms());
+            xSemaphoreTake(state_lock,portMAX_DELAY);
+            bool due=network_retry_due(&retry,now_ms(),state.connected,state.joining,uxQueueMessagesWaiting(commands)>0,setup_activity_seen,setup_activity_at);
+            if(due)state.joining=true;
+            xSemaphoreGive(state_lock);
+            if(due) {
+                command_t saved={.kind=1};size_t n=sizeof(saved.ssid);
+                esp_err_t err=nvs_get_str(storage,"ssid",saved.ssid,&n);n=sizeof(saved.password);
+                if(err==ESP_OK)err=nvs_get_str(storage,"password",saved.password,&n);
+                ESP_LOGI("pet_net","Retrying saved network; backoff_ms=%u",(unsigned)retry.delay_ms);
+                bool ok=false;if(err==ESP_OK)ok=join_network(&saved,false);
+                else{xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=false;xSemaphoreGive(state_lock);open_ap();}
+                memset(&saved,0,sizeof(saved));
+                if(ok)network_retry_reset(&retry);else network_retry_failed(&retry,now_ms());
+            }
         }
     }
 }

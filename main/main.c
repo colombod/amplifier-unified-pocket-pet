@@ -107,6 +107,8 @@ static void refresh(lv_timer_t *timer) {
     lv_image_set_src(pet,&frames[frame]);tick_count++;
 }
 void app_main(void) {
+    ESP_ERROR_CHECK(audio_hardware_quiet());
+    ESP_LOGI("audio_test","Boot: amplifier held off; codec/microphone not opened");
     /* Never erase user settings as an automatic response to an NVS error. */
     ESP_ERROR_CHECK(nvs_flash_init());
     network_init();audio_tests_init();live_voice_init();

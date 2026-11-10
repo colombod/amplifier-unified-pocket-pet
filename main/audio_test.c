@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "driver/i2s_std.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -26,6 +27,14 @@ static SemaphoreHandle_t lock;
 static audio_test_status_t status;
 static nvs_handle_t volume_store;
 static bool volume_store_ready;
+esp_err_t audio_hardware_quiet(void) {
+ /* GPIO46 is the exact BSP's active-high amplifier enable. Set its latch low
+  * before enabling output; do not leave the amplifier input floating at boot. */
+ esp_err_t err=gpio_set_level(BSP_POWER_AMP_IO,0);if(err!=ESP_OK)return err;
+ gpio_config_t cfg={.pin_bit_mask=1ULL<<BSP_POWER_AMP_IO,.mode=GPIO_MODE_OUTPUT,.pull_down_en=GPIO_PULLDOWN_ENABLE,.intr_type=GPIO_INTR_DISABLE};
+ err=gpio_config(&cfg);if(err==ESP_OK)err=gpio_set_level(BSP_POWER_AMP_IO,0);
+ return err;
+}
 struct audio_session {
  i2s_chan_handle_t tx,rx;
  const audio_codec_data_if_t *data;
@@ -41,6 +50,7 @@ static void update(bool busy,const char *text) {
 }
 void audio_test_snapshot(audio_test_status_t *out) {xSemaphoreTake(lock,portMAX_DELAY);*out=status;xSemaphoreGive(lock);}
 static void close_audio(audio_session_t *a) {
+ gpio_set_level(BSP_POWER_AMP_IO,0);
  if(a->dev){esp_codec_dev_close(a->dev);esp_codec_dev_delete(a->dev);}
  if(a->codec)audio_codec_delete_codec_if(a->codec);
  if(a->ctrl)audio_codec_delete_ctrl_if(a->ctrl);
@@ -48,6 +58,7 @@ static void close_audio(audio_session_t *a) {
  if(a->data)audio_codec_delete_data_if(a->data);
  if(a->tx){i2s_channel_disable(a->tx);i2s_del_channel(a->tx);}
  if(a->rx){i2s_channel_disable(a->rx);i2s_del_channel(a->rx);}
+ gpio_set_level(BSP_POWER_AMP_IO,0);
  memset(a,0,sizeof(*a));
 }
 void audio_test_set_volume(int percent) {
