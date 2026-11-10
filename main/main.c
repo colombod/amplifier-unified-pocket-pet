@@ -12,6 +12,7 @@
 #include "network.h"
 #include "audio_test.h"
 #include "live_voice.h"
+#include "touch_calibration.h"
 
 #define FRAME_BYTES (192*208*2)
 extern const uint8_t pet_pixels[] asm("_binary_tachikoma_rgb565_start");
@@ -19,6 +20,7 @@ static lv_image_dsc_t frames[73];
 static lv_obj_t *pet, *title, *subtitle, *setup_panel, *qr, *wifi_details, *setup_message, *footer;
 static lv_obj_t *audio_panel,*audio_message,*tone_button,*record_button,*audio_back,*volume_label;
 static lv_obj_t *talk_button,*talk_label,*audio_open_button,*settings_panel,*settings_gear,*microphone_icon,*stop_icon;
+static lv_obj_t *wifi_badge,*settings_connection,*settings_key;
 static bool return_to_settings;
 static unsigned tick_count=0, wave_ticks=0;
 static _Atomic unsigned diag_ticks, diag_flush_start, diag_flush_return;
@@ -47,6 +49,7 @@ static void pet_clicked(lv_event_t *event){wave_ticks=24;}
 static void talk_clicked(lv_event_t *event){live_status_t s;live_voice_snapshot(&s);if(s.active)live_voice_stop();else live_voice_start();}
 static void settings_clicked(lv_event_t *event){lv_obj_clear_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);}
 static void settings_closed(lv_event_t *event){lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);}
+static void align_touch_clicked(lv_event_t *event){touch_calibration_begin();}
 static void audio_clicked(lv_event_t *event){lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(audio_panel,LV_OBJ_FLAG_HIDDEN);}
 static void audio_closed(lv_event_t *event){lv_obj_add_flag(audio_panel,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);}
 static void volume_released(lv_event_t *event){audio_test_save_volume();}
@@ -78,6 +81,11 @@ static void refresh(lv_timer_t *timer) {
     if(a.busy){lv_obj_add_state(tone_button,LV_STATE_DISABLED);lv_obj_add_state(record_button,LV_STATE_DISABLED);lv_obj_add_state(audio_back,LV_STATE_DISABLED);}
     else{lv_obj_remove_state(tone_button,LV_STATE_DISABLED);lv_obj_remove_state(record_button,LV_STATE_DISABLED);lv_obj_remove_state(audio_back,LV_STATE_DISABLED);}
     network_status_t s;network_snapshot(&s);
+    const char *signal=s.rssi>=-55?"excellent":s.rssi>=-67?"good":s.rssi>=-75?"fair":"weak";
+    if(s.connected){lv_label_set_text_fmt(wifi_badge,LV_SYMBOL_WIFI "  %d dBm",s.rssi);lv_label_set_text_fmt(settings_connection,"Wi-Fi connected\nSignal %s (%d dBm)",signal,s.rssi);}
+    else{lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Disconnected");lv_label_set_text(settings_connection,s.joining?"Wi-Fi connecting...":"Wi-Fi disconnected");}
+    lv_obj_set_style_text_color(wifi_badge,lv_color_hex(s.connected?0x86efac:0xfbbf24),0);
+    lv_label_set_text_fmt(settings_key,"OpenAI key: %s\nVoice: %s",s.key_saved?"saved":"required",voice.active?"session active":"disconnected");
     bool visible=s.setup&&panel_requested;
     if(visible!=was_setup) {
         was_setup=visible;
@@ -111,6 +119,7 @@ void app_main(void) {
     lv_obj_set_style_text_color(screen,lv_color_hex(0xf1f5f9),0);lv_obj_clear_flag(screen,LV_OBJ_FLAG_SCROLLABLE);
     title=label(screen,"Tachikoma",350,0,12,&lv_font_montserrat_22);
     subtitle=label(screen,"Let's get connected",350,0,42,&lv_font_montserrat_16);
+    wifi_badge=label(screen,"Wi-Fi",330,0,80,&lv_font_montserrat_12);
     for(unsigned i=0;i<73;i++) {
         frames[i].header.magic=LV_IMAGE_HEADER_MAGIC;frames[i].header.cf=LV_COLOR_FORMAT_RGB565;frames[i].header.stride=192*2;frames[i].header.w=192;frames[i].header.h=208;
         frames[i].data_size=FRAME_BYTES;frames[i].data=pet_pixels+i*FRAME_BYTES;
@@ -185,12 +194,15 @@ void app_main(void) {
     lv_obj_set_style_bg_color(settings_panel,lv_color_hex(0x0f172a),0);lv_obj_set_style_border_width(settings_panel,0,0);
     lv_obj_set_style_pad_all(settings_panel,0,0);lv_obj_remove_flag(settings_panel,LV_OBJ_FLAG_SCROLLABLE);
     label(settings_panel,"Settings",340,0,24,&lv_font_montserrat_22);
-    label(settings_panel,"Make Tachikoma yours",330,0,65,&lv_font_montserrat_16);
-    footer=button(settings_panel,"Wi-Fi & OpenAI key",0,0,280,setup_clicked);lv_obj_align(footer,LV_ALIGN_TOP_MID,0,135);
-    audio_open_button=button(settings_panel,"Audio / volume",0,0,280,audio_clicked);lv_obj_align(audio_open_button,LV_ALIGN_TOP_MID,0,200);
-    label(settings_panel,version,340,0,290,&lv_font_montserrat_14);
+    settings_connection=label(settings_panel,"",330,0,66,&lv_font_montserrat_16);
+    settings_key=label(settings_panel,"",330,0,114,&lv_font_montserrat_14);
+    footer=button(settings_panel,"Wi-Fi & OpenAI key",0,0,280,setup_clicked);lv_obj_align(footer,LV_ALIGN_TOP_MID,0,168);
+    audio_open_button=button(settings_panel,"Audio / volume",0,0,280,audio_clicked);lv_obj_align(audio_open_button,LV_ALIGN_TOP_MID,0,230);
+    lv_obj_t *alignment=button(settings_panel,"Touch alignment",0,0,280,align_touch_clicked);lv_obj_align(alignment,LV_ALIGN_TOP_MID,0,292);
+    label(settings_panel,version,340,0,345,&lv_font_montserrat_14);
     button(settings_panel,"Back to Tachikoma",0,-20,280,settings_closed);
     lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);
+    touch_calibration_init(bsp_display_get_input_dev(),screen);
     lv_timer_create(refresh,120,NULL);refresh(NULL);
     bsp_display_unlock();
     xTaskCreate(display_diagnostics,"display_diag",3072,NULL,2,NULL);

@@ -13,8 +13,9 @@ retain the distinction between the goal and a proven integration.
 | Correct display and touch profile | Connected board is **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**, 368×448 CO5300/CST820. Original LCD-1.83 link was mismatched. User confirmed factory recovery and corrected pet QR screen. |
 | Animated Tachikoma | Existing user-owned ChatGPT artwork preserved; 73 RGB565 frames mapped in flash. Idle, tap-wave and thinking animations implemented. |
 | Phone provisioning | Password-protected device Wi-Fi, QR join, phone page at `http://192.168.4.1`, 2.4 GHz scan, required OpenAI key, checked persistence, retry feedback and installed-version labels implemented. Successful save and restart reconnection observed. iPhone automatic captive-page opening remains unconfirmed. |
+| Wi-Fi status and touch alignment | Home/Settings show link status and RSSI separately from voice state. Four-point affine touch alignment is implemented with independent center validation and NVS persistence; physical accuracy is pending. |
 | Local audio and volume | User confirmed both speaker tone and recorded playback audible at about 70%. Volume persists. Microphone playback is quieter than the tone, with occasional clipped peaks; gain/fidelity still needs tuning. |
-| GPT-Live candidate | `0.3.3-amoled-v2-live` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The corrected build separates audio workers and gates the microphone only on audible output; a complete audible reply remains **unverified**. See [voice test](docs/voice-test.md). |
+| GPT-Live candidate | `0.3.4-amoled-v2-live` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The corrected build also enables separate WebSocket transmit locking after a microphone-queue failure; a complete audible reply remains **unverified**. See [voice test](docs/voice-test.md). |
 | Unified / remote access | No Unified connector, Tailscale enrollment, cross-workspace operations or attention-answer round trip implemented. The direct OpenAI voice test is an isolated hardware spike. |
 
 The [bring-up record](docs/device-bringup.md) includes the failed display route,
@@ -29,8 +30,9 @@ the Mac firmware workspace uses the Docker workflow below.
 2. If no page opens automatically, browse to `http://192.168.4.1` while still on that Wi-Fi.
 3. Select a 2.4 GHz network and enter its password and your required OpenAI API key.
 4. Wait until settings are confirmed saved, then choose Done. Subsequent network changes can retain the saved key.
-5. In **Settings → Audio / volume**, adjust speaker level and run the local tone or three-second record/playback test.
-6. On the pet screen, the round **microphone** starts the voice session; the square **Stop** ends it.
+5. If touch positions are offset, open **Settings → Touch alignment**, tap each ring center and lift, then check the fourth center point.
+6. In **Settings → Audio / volume**, adjust speaker level and run the local tone or three-second record/playback test.
+7. On the pet screen, the round **microphone** starts the voice session; the square **Stop** ends it.
 
 The setup page is reachable only through the device AP; it never returns the saved
 key. Provisioning changes require a per-boot token. Failed joins keep setup
@@ -57,11 +59,12 @@ unchanged source sheet; the output is `build-amoled/esp32_pet.bin`.
 node tests/setup_page_test.mjs
 docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/setup_address_test.c -o /tmp/setup_address_test && /tmp/setup_address_test'
 docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/live_protocol_test.c -o /tmp/live_protocol_test && /tmp/live_protocol_test'
+docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/touch_alignment_test.c -lm -o /tmp/touch_alignment_test && /tmp/touch_alignment_test'
 ```
 
 These checks cover setup retry/save behavior, AP address checks including mapped
 IPv6, and bounded WebSocket reassembly across TCP splits and continuation frames.
-They do not call OpenAI or prove physical audio quality.
+Touch-transform native tests also cover offset, scale/swap and rejected degenerate points. These checks do not call OpenAI or prove physical audio quality.
 
 For macOS USB flashing, reproduce the allowed project-local tools with:
 

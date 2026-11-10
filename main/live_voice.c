@@ -82,7 +82,7 @@ static void capture_audio(void *arg) {
   unsigned peak=0;for(size_t i=0;i<CHUNK;i++){unsigned value=abs((int)pcm[i]);if(value>peak)peak=value;}
   if(peak>c->captured_peak)c->captured_peak=peak;
   if(speaker_active(c))memset(pcm,0,sizeof(pcm));
-  if(xStreamBufferSend(c->capture,pcm,sizeof(pcm),0)!=sizeof(pcm)){fail(c,"Microphone network queue full. Check connection.");break;}
+  if(xStreamBufferSend(c->capture,pcm,sizeof(pcm),0)!=sizeof(pcm)){fail(c,"Mic stream cannot keep up. Tap Start voice to retry.");break;}
  }
  mbedtls_platform_zeroize(pcm,sizeof(pcm));xEventGroupSetBits(c->audio_done,BIT0);vTaskDelete(NULL);
 }
@@ -187,7 +187,7 @@ static void run_session(void) {
   * Never enable HTTP/transport debug logs: they may contain authorization. */
  esp_websocket_client_config_t config={.uri="wss://api.openai.com/v1/live/sessions",.headers=headers,
   .crt_bundle_attach=esp_crt_bundle_attach,.disable_auto_reconnect=true,.network_timeout_ms=5000,
-  .buffer_size=4096,.task_stack=8192,.task_prio=5,.ping_interval_sec=15,.pingpong_timeout_sec=30};
+  .buffer_size=8192,.task_stack=8192,.task_prio=5,.ping_interval_sec=15,.pingpong_timeout_sec=30};
  c->ws=esp_websocket_client_init(&config);mbedtls_platform_zeroize(headers,sizeof(headers));
  if(!c->ws){set_state(LIVE_ERROR,"Cannot prepare secure voice connection.");goto cleanup;}
  esp_websocket_register_events(c->ws,WEBSOCKET_EVENT_ANY,websocket_event,c);

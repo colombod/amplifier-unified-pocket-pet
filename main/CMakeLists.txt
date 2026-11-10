@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "network.c" "audio_test.c" "live_voice.c" INCLUDE_DIRS "."
+idf_component_register(SRCS "main.c" "network.c" "audio_test.c" "live_voice.c" "touch_calibration.c" INCLUDE_DIRS "."
     REQUIRES esp_driver_i2s esp_codec_dev esp_app_format esp_wifi esp_event esp_netif esp_http_server nvs_flash json lwip esp_websocket_client mbedtls esp_timer
     EMBED_FILES "setup.html")
 # Execute only after IDF's early component-dependency pass has returned.

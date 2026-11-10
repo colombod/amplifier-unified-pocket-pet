@@ -47,9 +47,9 @@
     "unified_integration": false
   },
   "current_candidate": {
-    "version": "0.3.3-amoled-v2-live",
-    "bytes": 7343792,
-    "sha256": "c7800890b09ead5e1104cf8bcfca75d01e86caf8ea65786978551310d79befc4",
+    "version": "0.3.4-amoled-v2-live",
+    "bytes": 7349504,
+    "sha256": "95f9a19bb6101f00adcc4f7bd889078623c865ecd502e20d98be3ebbf6fa22f9",
     "build_passed": true,
     "playback_buffer_bytes": 1048576,
     "application_duration_limit_removed": true,
@@ -63,14 +63,23 @@
     "write_hash_verified": true,
     "startup_observed": true,
     "saved_wifi_reconnect_observed": true,
-    "panic_observed": false
+    "panic_observed": false,
+    "separate_websocket_tx_lock": true,
+    "configure_generation_edit_retention": true,
+    "wifi_rssi_indicators": true,
+    "four_point_touch_alignment": true,
+    "phone_edit_retention_user_verified": false,
+    "touch_alignment_user_verified": false
   },
   "automated_checks": {
     "setup_page_retry_and_save_gating": "passed",
     "ap_ipv4_mapped_ipv6_access_bounds": "passed",
     "websocket_fragment_reassembly_bounds": "passed",
     "initial_live_session_configuration": "checked",
-    "live_api_calls_from_tests": false
+    "live_api_calls_from_tests": false,
+    "setup_reconfiguration_edit_retention": "passed",
+    "touch_affine_transform_bounds": "passed",
+    "build_warning": "One managed LVGL-port deprecated touch-API warning; no application compiler errors"
   },
   "unimplemented": [
     "Unified connector",
@@ -99,5 +108,17 @@
       "coupled capture/network/playback loop fell behind hardware rate",
       "user reports touch difficulty; offset unconfirmed"
     ]
+  },
+  "voice_trial_0_3_3": {
+    "version": "0.3.3-amoled-v2-live",
+    "user_reported_error": "Microphone queue full",
+    "session_started": true,
+    "session_closed_confirmed": true,
+    "output_bytes_received": 268800,
+    "output_bytes_submitted_to_codec": 268800,
+    "output_peak": 0,
+    "input_peak": 32767,
+    "user_heard_reply": false,
+    "wifi_loss_established": false
   }
 }

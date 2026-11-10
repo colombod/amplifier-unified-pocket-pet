@@ -4,6 +4,8 @@
 #include "esp_err.h"
 typedef struct {
     bool setup, connected, joining, key_saved, settings_saved;
+    unsigned configure_generation;
+    int rssi;
     char ap_ssid[32], ap_password[17], message[96], ssid[33];
 } network_status_t;
 void network_init(void);

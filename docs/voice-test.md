@@ -1,10 +1,10 @@
 # First GPT-Live device test
 
-Firmware: **0.3.3-amoled-v2-live**. This is an isolated device audio/network test,
+Firmware: **0.3.4-amoled-v2-live**. This is an isolated device audio/network test,
 not Amplifier Unified integration. The voice model is **gpt-live-1**, voice Marin;
 managed Responses delegation uses **gpt-6-luna** separately for reasoning, with
 no tools or Unified access. It does not silently fall back to legacy Realtime or
-another voice model. The initial 0.3.0 trial reached session.started and received output audio, but overflowed its smaller playback buffer. The 0.3.2 trial returned digital silence and exposed microphone gating and pacing bugs. Independent audio workers and audible-speech gating in 0.3.3 remain to be checked.
+another voice model. The initial 0.3.0 trial reached session.started and received output audio, but overflowed its smaller playback buffer. The 0.3.2 trial returned digital silence and exposed microphone gating and pacing bugs. The 0.3.3 trial then hit a capture queue overflow. The corrected 0.3.4 duplex locking remains to be checked.
 
 ## Run on the device
 
@@ -23,6 +23,10 @@ a fresh conversation; there is no persisted/resumed transcript or automatic retr
 Input becomes silence while audible speaker output plays and for a 300 ms tail, to prevent
 self-echo without claiming AEC. Wait for Listening before speaking again. This
 tradeoff prevents barge-in in this test and is not a final interaction policy.
+
+Wi-Fi connectivity and RSSI are visible on the pet screen and in Settings.
+Voice-session state and whether a key is saved are separate Settings indicators.
+A capture-queue error does not establish that Wi-Fi disconnected.
 
 If an error appears, retain the exact displayed error/code and firmware version,
 without sharing the API key or network password. HTTP rejection may mean key,

@@ -16,6 +16,6 @@ while time.monotonic()<until:
  raw.write(chunk);raw.flush();pending+=chunk
  while b'\n' in pending:
   line,pending=pending.split(b'\n',1);text=line.decode('utf-8','replace').strip()
-  if 'pet_net:' in text or 'pet_live:' in text or 'audio_test:' in text or 'Tachikoma UI ready' in text or 'App version:' in text or 'Guru Meditation' in text or 'ESP_ERROR_CHECK failed' in text:
+  if 'pet_net:' in text or 'pet_touch:' in text or 'pet_live:' in text or 'audio_test:' in text or 'Tachikoma UI ready' in text or 'App version:' in text or 'Guru Meditation' in text or 'ESP_ERROR_CHECK failed' in text:
    print(text,flush=True)
 raw.close();s.close();print('Observation ended.',flush=True)

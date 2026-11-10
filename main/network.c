@@ -118,6 +118,9 @@ static esp_err_t status_get(httpd_req_t *req) {
     cJSON_AddBoolToObject(o,"joining",s.joining);
     cJSON_AddBoolToObject(o,"key_saved",s.key_saved);
     cJSON_AddBoolToObject(o,"settings_saved",s.settings_saved);
+    cJSON_AddNumberToObject(o,"configure_generation",s.configure_generation);
+    cJSON_AddNumberToObject(o,"rssi",s.rssi);
+    cJSON_AddStringToObject(o,"ssid",s.ssid);
     cJSON_AddStringToObject(o,"message",s.message);
     cJSON_AddStringToObject(o,"token",token);
     return json_reply(req,o);
@@ -172,7 +175,7 @@ static esp_err_t configure(httpd_req_t *req) {
     strlcpy(cmd.ssid,ssid->valuestring,sizeof(cmd.ssid)); strlcpy(cmd.password,pass->valuestring,sizeof(cmd.password)); strlcpy(cmd.key,key->valuestring,sizeof(cmd.key));
     /* Wipe the parsed secret strings before returning their allocations. */
     memset(pass->valuestring,0,strlen(pass->valuestring)); memset(key->valuestring,0,strlen(key->valuestring)); cJSON_Delete(json);
-    xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=true;state.settings_saved=false;xSemaphoreGive(state_lock);
+    xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=true;state.settings_saved=false;state.configure_generation++;xSemaphoreGive(state_lock);
     message("Settings received. Connecting to Wi-Fi...");
     ESP_LOGI("pet_net","Configuration request accepted");
     BaseType_t queued=xQueueSend(commands,&cmd,0); memset(&cmd,0,sizeof(cmd));
@@ -285,6 +288,10 @@ static void worker(void *arg) {
             memset(&cmd,0,sizeof(cmd));
         }
         network_status_t s;network_snapshot(&s);
+        wifi_ap_record_t ap_info;
+        if(s.connected && esp_wifi_sta_get_ap_info(&ap_info)==ESP_OK) {
+            xSemaphoreTake(state_lock,portMAX_DELAY);state.rssi=ap_info.rssi;xSemaphoreGive(state_lock);
+        }
         if(s.connected && !(xEventGroupGetBits(events)&IP_READY)) {
             xSemaphoreTake(state_lock,portMAX_DELAY);state.connected=false;xSemaphoreGive(state_lock);
             message("Reconnecting to saved Wi-Fi...");
@@ -299,6 +306,7 @@ static void worker(void *arg) {
 void network_close_setup(void) {command_t cmd={.kind=2};xQueueSend(commands,&cmd,0);}
 void network_open_setup(void) {command_t cmd={.kind=0};xQueueSend(commands,&cmd,0);}
 void network_init(void) {
+    state.rssi=-127;
     state_lock=xSemaphoreCreateMutex();events=xEventGroupCreate();commands=xQueueCreate(2,sizeof(command_t));
     assert(state_lock&&events&&commands);
     ESP_ERROR_CHECK(nvs_open("pet_setup",NVS_READWRITE,&storage));

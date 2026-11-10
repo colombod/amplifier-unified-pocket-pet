@@ -185,3 +185,38 @@ The user also reported difficult taps, possibly an offset. The official BSP uses
 unmeasured calibration transform was invented. Expanded gear, voice and button
 hit areas are included. Whether large Settings buttons are offset as well is
 still awaiting a user observation; touch accuracy is not claimed resolved.
+
+
+### Duplex lock, reconfiguration editing and touch alignment, 0.3.4
+
+The 0.3.3 hardware trial reached session.started but stopped with the microphone
+queue full. Returned audio was still silence; playback now kept pace (268,800
+bytes received and submitted), while microphone peak was 32767. The session
+closed with confirmation. The “check connection” wording incorrectly suggested
+that this software queue failure proved Wi-Fi loss; both Wi-Fi and API startup
+had succeeded.
+
+The pinned WebSocket client's default shared RX/TX lock allows continuous reads
+to delay uploads. The 0.3.4 build enables its documented separate-TX-lock option
+and increases the transport buffer to fit a complete input event. This is a
+specific implementation correction; runtime voice acceptance is still pending.
+
+The user reported that phone text boxes cleared while typing on an already
+configured device. Status polling had treated the previous committed settings
+as a new save. The server now exposes a per-boot configure generation; the page
+clears fields only when its current submission advances that generation and
+is confirmed saved. Repeated polls and uncertain submissions against the old
+generation preserve edits; regression tests cover both. Changing Wi-Fi with a
+blank key preserves the existing NVS key, and the page now states that clearly.
+
+The device now separates Wi-Fi link/signal status (RSSI in dBm plus a qualitative
+label) from saved-key and voice-session state. The home screen has a Wi-Fi badge;
+Settings includes those details. Signal samples update in the network worker.
+
+The user confirmed offset affects large Settings buttons too. Touch alignment
+wraps the vendor LVGL input callback without changing managed drivers: three
+raw taps fit an affine transform, and a fourth center tap independently checks
+it within 25 pixels. Only a passing transform replaces the current alignment;
+it is saved in its own NVS namespace. Holding then lifting cancels. Native tests
+cover offset, swapped/scaled axes and degenerate points. Physical alignment and
+button accuracy remain to be verified by the user.
