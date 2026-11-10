@@ -1,0 +1,14 @@
+services:
+  idf:
+    build: .
+    image: esp32-pet-dev:5.5.4
+    platform: linux/arm64
+    working_dir: /project
+    volumes:
+      - .:/project
+      - component-cache:/component-cache
+    environment:
+      IDF_COMPONENT_CACHE_PATH: /component-cache
+    command: ["idf.py", "build"]
+volumes:
+  component-cache:
