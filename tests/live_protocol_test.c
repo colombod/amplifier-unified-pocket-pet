@@ -3,6 +3,9 @@
 #include "live_protocol.h"
 #include "assistant_config.h"
 int main(void) {
+ int16_t pcm[480]={0};assert(!live_pcm_audible(pcm,sizeof(pcm)));assert(live_pcm_peak(pcm,sizeof(pcm))==0);
+ pcm[30]=249;assert(!live_pcm_audible(pcm,sizeof(pcm)));pcm[30]=-250;assert(live_pcm_audible(pcm,sizeof(pcm)));
+ pcm[30]=INT16_MIN;assert(live_pcm_peak(pcm,sizeof(pcm))==32768);
  char out[32];live_message_t m={0};
  assert(live_message_feed(&m,out,sizeof(out),1,true,0,7,"{\"a",3)==0);
  assert(live_message_feed(&m,out,sizeof(out),1,true,3,7,"\":1}",4)==1);

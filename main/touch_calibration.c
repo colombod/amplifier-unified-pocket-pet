@@ -4,6 +4,8 @@
 #include "nvs.h"
 #include "esp_log.h"
 static lv_indev_read_cb_t original_read;
+static lv_indev_t *touch_input;
+static lv_indev_mode_t original_mode;
 static lv_obj_t *panel,*target_ring,*help,*progress;
 static bool collecting,result_visible,pressed,mapped,store_ready;
 static unsigned stage;
@@ -43,7 +45,7 @@ static void calibrated_read(lv_indev_t *input,lv_indev_data_t *data) {
  if(collecting || result_visible) {
   if(down){last_raw=raw;if(!pressed)press_time=lv_tick_get();}
   if(!down && pressed) {
-   if(result_visible){result_visible=false;lv_obj_add_flag(panel,LV_OBJ_FLAG_HIDDEN);}
+   if(result_visible){result_visible=false;lv_obj_add_flag(panel,LV_OBJ_FLAG_HIDDEN);lv_indev_set_mode(input,original_mode);}
    else if(lv_tick_elaps(press_time)>1500)finish("Alignment cancelled.\nPrevious alignment kept.");
    else advance(last_raw);
   }
@@ -54,12 +56,14 @@ static void calibrated_read(lv_indev_t *input,lv_indev_data_t *data) {
 }
 void touch_calibration_begin(void) {
  stage=0;pressed=false;collecting=true;result_visible=false;
+ lv_indev_set_mode(touch_input,LV_INDEV_MODE_TIMER);
  lv_label_set_text(help,"Tap the center of each ring, then lift.");
  lv_label_set_text(progress,"Point 1 of 4\nHold then lift to cancel.");
  lv_obj_set_pos(target_ring,44,120);lv_obj_remove_flag(target_ring,LV_OBJ_FLAG_HIDDEN);
  lv_obj_remove_flag(panel,LV_OBJ_FLAG_HIDDEN);lv_obj_move_foreground(panel);
 }
 void touch_calibration_init(lv_indev_t *input,lv_obj_t *screen) {
+ touch_input=input;original_mode=lv_indev_get_mode(input);
  store_ready=nvs_open("pet_touch",NVS_READWRITE,&store)==ESP_OK;
  stored_map_t saved;size_t length=sizeof(saved);
  if(store_ready && nvs_get_blob(store,"map",&saved,&length)==ESP_OK && length==sizeof(saved) && saved.version==1) {

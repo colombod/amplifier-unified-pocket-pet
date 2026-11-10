@@ -6,16 +6,23 @@ The animated Tachikoma, microphone, speaker and touch display provide a screen-o
 companion. [Original intent](docs/intent.md) and the [draft vision](docs/VISION.md)
 retain the distinction between the goal and a proven integration.
 
+## Milestone 1 — user-confirmed spoken conversation
+
+On 10 November 2026 the user confirmed they can talk with the assistant. Firmware
+**0.3.5-amoled-v2-live** is the milestone baseline. This is a standalone voice
+conversation: it has no persistent memory or Amplifier Unified access yet.
+[Decisions, achievements and device lessons](docs/milestone-1.md).
+
 ## Current implementation — 10 November 2026
 
 | Capability | Actual evidence |
 | --- | --- |
 | Correct display and touch profile | Connected board is **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**, 368×448 CO5300/CST820. Original LCD-1.83 link was mismatched. User confirmed factory recovery and corrected pet QR screen. |
 | Animated Tachikoma | Existing user-owned ChatGPT artwork preserved; 73 RGB565 frames mapped in flash. Idle, tap-wave and thinking animations implemented. |
-| Phone provisioning | Password-protected device Wi-Fi, QR join, phone page at `http://192.168.4.1`, 2.4 GHz scan, required OpenAI key, checked persistence, retry feedback and installed-version labels implemented. Successful save and restart reconnection observed. iPhone automatic captive-page opening remains unconfirmed. |
+| Phone provisioning | Password-protected device Wi-Fi, QR join, phone page at `http://192.168.4.1`, 2.4 GHz scan, required OpenAI key, checked persistence, retry feedback and installed-version labels implemented. Successful save and restart reconnection observed; the user confirmed reconfiguration edits stay intact and the saved key is recognized. iPhone automatic captive-page opening remains unconfirmed. |
 | Wi-Fi status and touch alignment | Home/Settings show link status and RSSI separately from voice state. Four-point affine touch alignment is implemented with independent center validation and NVS persistence; physical accuracy is pending. |
 | Local audio and volume | User confirmed both speaker tone and recorded playback audible at about 70%. Volume persists. Microphone playback is quieter than the tone, with occasional clipped peaks; gain/fidelity still needs tuning. |
-| GPT-Live candidate | `0.3.4-amoled-v2-live` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The corrected build also enables separate WebSocket transmit locking after a microphone-queue failure; a complete audible reply remains **unverified**. See [voice test](docs/voice-test.md). |
+| GPT-Live voice baseline | `0.3.5-amoled-v2-live` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The user has confirmed working spoken conversation. Fresh sessions do not retain prior conversations; long-duration reliability and Unified integration remain unverified. See [voice test](docs/voice-test.md). |
 | Unified / remote access | No Unified connector, Tailscale enrollment, cross-workspace operations or attention-answer round trip implemented. The direct OpenAI voice test is an isolated hardware spike. |
 
 The [bring-up record](docs/device-bringup.md) includes the failed display route,

@@ -2,6 +2,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdint.h>
+static inline unsigned live_pcm_peak(const void *data,size_t length) {
+ const uint8_t *bytes=data;unsigned peak=0;
+ for(size_t i=0;i+1<length;i+=2){int value=(int16_t)((unsigned)bytes[i]|((unsigned)bytes[i+1]<<8));unsigned amplitude=value<0?-value:value;if(amplitude>peak)peak=amplitude;}
+ return peak;
+}
+static inline bool live_pcm_audible(const void *data,size_t length) {return live_pcm_peak(data,length)>=250;}
 
 /* Bounds both TCP-buffer splits and actual RFC6455 continuation frames.
  * Control frames may be interleaved without changing the JSON message. */

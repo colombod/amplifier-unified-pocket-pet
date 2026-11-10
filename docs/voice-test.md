@@ -1,10 +1,10 @@
 # First GPT-Live device test
 
-Firmware: **0.3.4-amoled-v2-live**. This is an isolated device audio/network test,
+Firmware: **0.3.5-amoled-v2-live**. This is an isolated device audio/network test,
 not Amplifier Unified integration. The voice model is **gpt-live-1**, voice Marin;
 managed Responses delegation uses **gpt-6-luna** separately for reasoning, with
 no tools or Unified access. It does not silently fall back to legacy Realtime or
-another voice model. The initial 0.3.0 trial reached session.started and received output audio, but overflowed its smaller playback buffer. The 0.3.2 trial returned digital silence and exposed microphone gating and pacing bugs. The 0.3.3 trial then hit a capture queue overflow. The corrected 0.3.4 duplex locking remains to be checked.
+another voice model. The initial 0.3.0 trial reached session.started and received output audio, but overflowed its smaller playback buffer. The 0.3.2 trial returned digital silence and exposed microphone gating and pacing bugs. The 0.3.3 trial then hit a capture queue overflow. A short 0.3.4 trial had no queue error but still returned silence; the user subsequently confirmed working spoken conversation in the milestone baseline.
 
 ## Run on the device
 
@@ -68,3 +68,12 @@ never served to the phone or retrieved to the Mac for API testing.
 The checked documentation specifies a distinct Live wire protocol. Native parser
 and build checks are necessary but do not prove endpoint availability for this key
 or an audible response. No live API call is made by the automated checks.
+
+
+## Milestone acceptance
+
+The user confirmed on 10 November 2026 that they can talk with the assistant and
+called this milestone 1. This is physical user acceptance of the standalone
+spoken path. It does not imply durable memory, a Unified connection, a measured
+latency/resource envelope, full-duplex AEC or long-duration robustness. See
+[milestone-1.md](milestone-1.md). New Talk sessions currently start fresh.

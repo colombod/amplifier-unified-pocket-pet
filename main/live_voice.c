@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -44,6 +45,8 @@ typedef struct {
  atomic_bool audio_stopping;
  atomic_uint speaker_until;
  unsigned returned_peak,captured_peak;
+ unsigned sent_input_bytes,max_send_ms,input_transcript_chars,output_transcript_chars;
+ uint64_t capture_samples,capture_squares;
  StreamBufferHandle_t playback,capture;
  StaticStreamBuffer_t playback_meta,capture_meta;
  EventGroupHandle_t audio_done;
@@ -80,6 +83,7 @@ static void capture_audio(void *arg) {
  while(!atomic_load(&c->audio_stopping) && !atomic_load(&c->failed)) {
   if(audio_stream_read(c->audio,pcm,sizeof(pcm))!=ESP_OK){fail(c,"Microphone read failed.");break;}
   unsigned peak=0;for(size_t i=0;i<CHUNK;i++){unsigned value=abs((int)pcm[i]);if(value>peak)peak=value;}
+  for(size_t i=0;i<CHUNK;i++){int64_t sample=pcm[i];c->capture_squares+=sample*sample;}c->capture_samples+=CHUNK;
   if(peak>c->captured_peak)c->captured_peak=peak;
   if(speaker_active(c))memset(pcm,0,sizeof(pcm));
   if(xStreamBufferSend(c->capture,pcm,sizeof(pcm),0)!=sizeof(pcm)){fail(c,"Mic stream cannot keep up. Tap Start voice to retry.");break;}
@@ -93,8 +97,7 @@ static void play_audio(void *arg) {
   if(!bytes)continue;
   /* Live emits continuous audio, including digital silence. Only audible
    * samples suppress the mic; packet arrival alone must never do so. */
-  unsigned peak=0;for(size_t i=0;i<bytes/2;i++){unsigned value=abs((int)pcm[i]);if(value>peak)peak=value;}
-  if(peak>=250)atomic_store(&c->speaker_until,(uint32_t)xTaskGetTickCount()+pdMS_TO_TICKS(300));
+  if(live_pcm_audible(pcm,bytes))atomic_store(&c->speaker_until,(uint32_t)xTaskGetTickCount()+pdMS_TO_TICKS(300));
   if(audio_stream_write(c->audio,pcm,bytes)!=ESP_OK){fail(c,"Speaker playback failed.");break;}
   atomic_fetch_add(&c->played_bytes,bytes);
  }
@@ -116,10 +119,15 @@ static void handle_message(live_connection_t *c) {
    fail(c,"Invalid voice audio received.");goto done;
   }
   atomic_fetch_add(&c->received_bytes,count);
-  unsigned peak=0;for(size_t i=0;i<count;i+=2){int value=abs((int)(int16_t)((unsigned)c->decoded[i]|((unsigned)c->decoded[i+1]<<8)));if((unsigned)value>peak)peak=value;}
+  unsigned peak=live_pcm_peak(c->decoded,count);
   if(peak>c->returned_peak)c->returned_peak=peak;
   if(xStreamBufferSend(c->playback,c->decoded,count,0)!=count)fail(c,"Speaker buffer full. Tap Talk to retry.");
   if(peak>=250)atomic_store(&c->thinking,false);
+ } else if(!strcmp(type->valuestring,"session.input_transcript.delta") || !strcmp(type->valuestring,"session.output_transcript.delta")) {
+  const cJSON *delta=cJSON_GetObjectItemCaseSensitive(root,"delta");
+  if(cJSON_IsString(delta)){if(!strcmp(type->valuestring,"session.input_transcript.delta"))c->input_transcript_chars+=strlen(delta->valuestring);else c->output_transcript_chars+=strlen(delta->valuestring);}
+ } else if(!strcmp(type->valuestring,"session.commentary.appended")) {
+  ESP_LOGI(TAG,"Greeting instruction acknowledged; speech not yet confirmed");
  } else if(!strcmp(type->valuestring,"session.delegation.created")) {
   atomic_store(&c->thinking,true);ESP_LOGI(TAG,"Reasoning backend requested");
  } else if(!strcmp(type->valuestring,"error")) {
@@ -209,6 +217,7 @@ static void run_session(void) {
  c->audio_tasks|=BIT1;
  ESP_LOGI(TAG,"Audio streaming ready; internal_free=%u psram_free=%u",(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),(unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
  set_state(LIVE_LISTENING,"Listening. Say hello to Tachikoma.");
+ if(!send_text(c,PET_GREETING_EVENT))goto cleanup;
  int64_t started=esp_timer_get_time();
  while(!atomic_load(&stop_requested) && !atomic_load(&c->failed) && !atomic_load(&c->closed) && atomic_load(&c->connected)) {
   size_t input_bytes=xStreamBufferReceive(c->capture,c->input,INPUT_BYTES,pdMS_TO_TICKS(100));
@@ -221,7 +230,9 @@ static void run_session(void) {
   memcpy(c->input_event,prefix,sizeof(prefix)-1);
   if(mbedtls_base64_encode((unsigned char*)c->input_event+sizeof(prefix)-1,7000-sizeof(prefix)-3,&count,c->input,input_bytes)!=0){fail(c,"Audio encoding failed.");break;}
   memcpy(c->input_event+sizeof(prefix)-1+count,"\"}",3);
+  int64_t send_started=esp_timer_get_time();
   if(!send_text(c,c->input_event))break;
+  c->sent_input_bytes+=input_bytes;unsigned send_ms=(esp_timer_get_time()-send_started)/1000;if(send_ms>c->max_send_ms)c->max_send_ms=send_ms;
   set_state(speaking?LIVE_SPEAKING:atomic_load(&c->thinking)?LIVE_THINKING:LIVE_LISTENING,
    speaking?"Speaking. Mic resumes after playback.":atomic_load(&c->thinking)?"Thinking...":"Listening. Tap Stop to finish.");
   xSemaphoreTake(status_lock,portMAX_DELAY);status.seconds=(now-started)/1000000;xSemaphoreGive(status_lock);
@@ -247,6 +258,7 @@ cleanup:
  if(c->ws){esp_websocket_client_stop(c->ws);esp_websocket_client_destroy(c->ws);}
  audio_test_status_t audio_status;audio_test_snapshot(&audio_status);
  ESP_LOGI(TAG,"Session audio bytes received=%u played=%u output_peak=%u input_peak=%u volume=%d; finalization=%s",atomic_load(&c->received_bytes),atomic_load(&c->played_bytes),c->returned_peak,c->captured_peak,audio_status.volume,finalized?"confirmed":"unconfirmed");
+ ESP_LOGI(TAG,"Input captured=%llu sent=%u rms=%u max_send_ms=%u; transcript character counts input=%u output=%u (content not logged)",c->capture_samples*2,c->sent_input_bytes,c->capture_samples?(unsigned)sqrt((double)c->capture_squares/c->capture_samples):0,c->max_send_ms,c->input_transcript_chars,c->output_transcript_chars);
  if(c->playback)vStreamBufferDelete(c->playback);
  if(c->capture)vStreamBufferDelete(c->capture);
  if(c->audio_done)vEventGroupDelete(c->audio_done);

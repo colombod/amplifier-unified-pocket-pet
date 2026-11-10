@@ -220,3 +220,35 @@ it within 25 pixels. Only a passing transform replaces the current alignment;
 it is saved in its own NVS namespace. Holding then lifting cancels. Native tests
 cover offset, swapped/scaled axes and degenerate points. Physical alignment and
 button accuracy remain to be verified by the user.
+
+
+### Provisioning acceptance and isolated greeting check, 0.3.5
+
+The user confirmed that the fresh 0.3.4 phone page retains typed values and shows
+OpenAI key saved. A new configuration request and settings commit were observed.
+A 0.3.4 voice trial started and closed with confirmation without a capture-queue
+error, but output peak remained zero (556,800 bytes received; 430,080 submitted).
+This does not prove an audible reply or resolve microphone recognition.
+
+Version **0.3.5-amoled-v2-live** supplies an English greeting developer message at
+startup and a one-time commentary request after session.started, following the
+official Live lifecycle guide. An acknowledgement alone is not spoken-output
+proof. Only aggregate captured/sent byte counts, RMS, send timing and transcript
+character counts are logged; content remains unlogged. Native tests now protect
+against classifying silent PCM as audible output. Touch alignment temporarily
+polls in timer mode so release detection does not depend on controller interrupt
+behavior while normal LVGL presses are suppressed. Build and tests pass;
+greeting, conversation and physical touch acceptance remain pending.
+
+
+### Milestone 1 accepted by the user
+
+After the 0.3.5 app-only installation passed flash hash verification, the user
+confirmed they can talk with the assistant and called this milestone 1. They also
+explicitly identified its limitation: it is a private chat without memory. No
+new USB observer was opened at that point, because opening the port can reset an
+active voice conversation. The user's audible acceptance and the installation
+record are kept distinct from automated startup/protocol evidence. The baseline
+is tagged milestone-1-voice; [the milestone record](milestone-1.md) captures the
+core decisions, achievements, limitations and lessons. The next work is Unified
+integration and persistent host-owned conversation, not a replacement chatbot.
