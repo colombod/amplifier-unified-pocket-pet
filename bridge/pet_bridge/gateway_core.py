@@ -53,7 +53,7 @@ _JOIN_S = 5.0
 
 # Fixed vocabularies for the PUBLIC retained metadata: nothing arbitrary is ever echoed.
 _OUTCOMES = frozenset({"accepted", "rejected", "uncertain", "refused"})
-_STATUSES = frozenset({"speak", "pending", "not_spoken"})
+_STATUSES = frozenset({"speak", "ready", "pending", "not_spoken"})
 _SAFE_REASONS = frozenset(
     {
         "accepted",
@@ -648,6 +648,7 @@ class UnifiedOps:
         self._client_factory = client_factory
         self._monotonic = monotonic
         self._binding = binding
+        self._observed_reply: tuple[str, companion.DetailWindow] | None = None
 
     def __repr__(self) -> str:
         return "UnifiedOps(<hidden>)"
@@ -742,6 +743,35 @@ class UnifiedOps:
                 raise
         return self._bridge.begin_turn()
 
+    def begin_after_timeout(self, command_id: str, closed: threading.Event) -> str:
+        """Recheck this call's timed-out command before starting a distinct turn."""
+        if closed.is_set():
+            raise core.BridgeError("stopped")
+        attachment, reason = self._attachment()
+        if reason is not None:
+            raise core.BridgeError(reason)
+        state = self._bridge.timed_out_reply_state(command_id, self._binding)
+        if state == "pending":
+            try:
+                window = companion.detail_window(self._client(), attachment, self._session_id)
+            except CompanionError:
+                raise core.BridgeError("reply_pending") from None
+            # The credential/host pin can change during the read.
+            _attachment, reason = self._attachment()
+            if reason is not None:
+                raise core.BridgeError(reason)
+            if closed.is_set():
+                raise core.BridgeError("stopped")
+            if not self._bridge.settle_timed_out_reply(command_id, self._binding, window):
+                raise core.BridgeError("reply_pending")
+        elif state != "cleared":
+            raise core.BridgeError("reply_pending")
+        # Recheck epoch/binding atomically with the ordinary turn gate, including
+        # uncertainty and journal faults.
+        if closed.is_set():
+            raise core.BridgeError("stopped")
+        return self._bridge.begin_after_timed_out_reply(command_id, self._binding)
+
     def _reconcile(self, *, pre_dial: bool = False) -> tuple[str, ...]:
         """One read of the conversation; the ids of sends it proves were delivered."""
         attachment, reason = self._attachment()
@@ -774,6 +804,11 @@ class UnifiedOps:
         return "appended"
 
     def abandon(self, turn_id: str) -> None:
+        self._bridge.abandon_turn(turn_id)
+
+    def timeout_reply(self, turn_id: str) -> None:
+        # Serialized behind any observation/claim and before new input.
+        self._observed_reply = None
         self._bridge.abandon_turn(turn_id)
 
     def seal(self, turn_id: str) -> core.TranscriptPreview:
@@ -833,10 +868,40 @@ class UnifiedOps:
             session_id=self._session_id,
         )
 
+    def observe_reply(self, turn_id: str) -> core.ReplyResult:
+        """A conversational poll never consumes or exports reply text."""
+        self._observed_reply = None
+        attachment, reason = self._attachment()
+        if reason is not None:
+            return core.ReplyResult(turn_id, "not_spoken", reason, True, -1)
+        try:
+            window = companion.detail_window(self._client(), attachment, self._session_id)
+        except CompanionError as err:
+            return core.ReplyResult(turn_id, "pending", err.code, False, -1)
+        _attachment, reason = self._attachment()
+        if reason is not None:
+            return core.ReplyResult(turn_id, "not_spoken", reason, True, -1)
+        result = self._bridge.observe_reply(turn_id, window, session_id=self._session_id)
+        if result.status == "ready":
+            self._observed_reply = (turn_id, window)
+        return result
+
+    def claim_observed_reply(self, turn_id: str) -> core.ReplyResult:
+        observed, self._observed_reply = self._observed_reply, None
+        _attachment, reason = self._attachment()
+        if reason is not None or observed is None or observed[0] != turn_id:
+            return core.ReplyResult(turn_id, "not_spoken", reason or "reply_unavailable", False, -1)
+        window = observed[1]
+        return self._bridge.poll_reply(
+            turn_id, window.as_page(), coverage_complete=window.coverage_complete,
+            newest_tail=window, session_id=self._session_id,
+        )
+
     def epoch_current(self, epoch: int) -> bool:
         return self._bridge.epoch_current(epoch)
 
     def stop(self) -> None:
+        self._observed_reply = None
         self._bridge.stop()
 
     def resume(self) -> None:
@@ -1364,6 +1429,7 @@ class PetSession:
         self._clock = clock
         self._new_event_id = new_event_id
         self._state = _AWAIT_START
+        self._closed_for_recovery = threading.Event()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._timers: dict[str, asyncio.Task[Any]] = {}
         self._connect_task: asyncio.Task[Any] | None = None
@@ -1389,6 +1455,7 @@ class PetSession:
         self._device_code = 1000
         self._accepted_t: float | None = None
         self._turn_id: str | None = None
+        self._timed_out_turn: str | None = None
         self._turn_used = False
         self._begin_pending = False
         self._stager = gs.TranscriptStager()
@@ -1921,6 +1988,7 @@ class PetSession:
         """
         if self._state in (_CLOSING, _CLOSED):
             return
+        self._closed_for_recovery.set()
         self._settle_unsent_send()
         now = self._clock.now()
         hard = now + gs.CLOSE_DEADLINE_S
@@ -2300,6 +2368,7 @@ class PetSession:
             "seal": lambda: self._on_seal_result(ok, value),
             "preflight": lambda: self._on_preflight_result(ok, value),
             "poll": lambda: self._on_poll_result(ok, value),
+            "claim_reply": lambda: self._on_poll_result(ok, value),
             "epoch_pre": lambda: self._on_epoch_pre(ok, value),
             "epoch_gate": lambda: self._on_epoch_gate(ok, value),
             "converse_abandon": lambda: self._on_converse_abandon(ok),
@@ -2328,6 +2397,7 @@ class PetSession:
                 unresolved = getattr(value, "code", None) == "uncertain_unresolved"
                 self._converse_notice("send_uncertain" if unresolved else "busy")
                 return
+            self._timed_out_turn = None
             self._turn_id = value
             self._seal_attempt()
             return
@@ -2479,17 +2549,21 @@ class PetSession:
         limit = gs.CONVERSE_REPLY_MAX_S if self._converse else gs.POLL_MAX_S
         if self._clock.now() + _EPS >= self._send_accept_t + limit:
             if self._converse:
-                self._converse_notice("reply_unavailable")
+                self._converse_timeout()
                 return
             self._fail("deadline")
             return
         self._poll_inflight = True
         turn = self._turn_str()
-        self._submit("poll", lambda: self._ops.poll(turn), "poll")
+        action = self._ops.observe_reply if self._converse else self._ops.poll
+        self._submit("poll", lambda: action(turn), "poll")
 
     def _on_poll_result(self, ok: bool, value: Any) -> None:
         self._poll_inflight = False
         if self._state != _AWAIT_REPLY or self._contaminated:
+            return
+        if self._converse and self._clock.now() + _EPS >= self._send_accept_t + gs.CONVERSE_REPLY_MAX_S:
+            self._converse_timeout()
             return
         if not ok:
             if self._converse:
@@ -2504,7 +2578,11 @@ class PetSession:
                 return
             self._fail("reply_unavailable")
             return
-        if value.status == "pending":
+        if value.status == "ready" and self._converse:
+            self._poll_inflight = True
+            turn = self._turn_str()
+            self._submit("poll", lambda: self._ops.claim_observed_reply(turn), "claim_reply")
+        elif value.status == "pending":
             self._arm("poll", gs.POLL_INTERVAL_S)
         elif value.status == "speak" and isinstance(value.text, str):
             self._speak_pending = True
@@ -2524,6 +2602,9 @@ class PetSession:
     # -- speaking ----------------------------------------------------------------------
     def _on_epoch_pre(self, ok: bool, value: Any) -> None:
         if self._state != _AWAIT_REPLY or self._contaminated:
+            return
+        if self._converse and self._clock.now() + _EPS >= self._send_accept_t + gs.CONVERSE_REPLY_MAX_S:
+            self._converse_timeout()
             return
         if not ok or value is not True:  # the epoch moved on: nothing is spoken
             self._reply_text = None
@@ -3052,12 +3133,20 @@ class PetSession:
         elif now + _EPS >= ready and self._stager.text().strip():
             self._sealing = True  # freezes segmentation BEFORE async begin
             self._begin_pending = True
-            self._submit("begin", self._ops.begin, "begin")
+            previous = self._timed_out_turn
+            if previous is None:
+                self._submit("begin", self._ops.begin, "begin")
+            else:
+                self._submit(
+                    "begin",
+                    lambda: self._ops.begin_after_timeout(previous, self._closed_for_recovery),
+                    "begin",
+                )
         else:
             self._requests_refused += 1
             self._converse_notice("not_sent")  # delegation without recognised words
 
-    def _converse_notice(self, code: str) -> None:
+    def _converse_notice(self, code: str, *, timed_out: bool = False) -> None:
         if not self._emit(gs.build_converse_notice(code)):
             return
         self._notice_code = code
@@ -3069,7 +3158,8 @@ class PetSession:
         # Abandon ONLY that capture, never resolve an uncertain journal entry.
         if self._turn_id is not None:
             turn = self._turn_id
-            self._submit("abandon", lambda: self._ops.abandon(turn), "converse_abandon")
+            action = self._ops.timeout_reply if timed_out else self._ops.abandon
+            self._submit("abandon", lambda: action(turn), "converse_abandon")
         else:
             self._on_converse_abandon(True)
 
@@ -3146,10 +3236,14 @@ class PetSession:
         else:
             self._arm("converse_render", 0.1)
 
+    def _converse_timeout(self) -> None:
+        self._timed_out_turn = self._turn_id
+        self._converse_notice("reply_unavailable", timed_out=True)
+
     def _converse_reply_timeout(self) -> None:
         if (self._state == _AWAIT_REPLY
                 and self._clock.now() + _EPS >= self._send_accept_t + gs.CONVERSE_REPLY_MAX_S):
-            self._converse_notice("reply_unavailable")
+            self._converse_timeout()
 
 
 # --STAGE-MARKER--

@@ -1332,9 +1332,9 @@ class CanaryFlowTest(FlowCase):
                 self.assertNotIn(secret, view)
         # The credential store holds the token BY DESIGN (a private fixture, mode 0600):
         # it is deliberately not part of the absence claim above.
-        # "spoken" records that the reply text was CLAIMED and RELEASED to the speaker path
-        # (the journal's vocabulary); it is not evidence that anything was heard.
-        self.assertEqual(self.record(turn).get("reply_outcome"), "spoken")
+        # A core claim releases text to the rendering path; it does not prove
+        # that the user heard audio, or even that the gateway played any.
+        self.assertEqual(self.record(turn).get("reply_outcome"), "claimed_for_render")
 
 
 # =================================================================================

@@ -6,13 +6,16 @@ import base64
 import contextlib
 import io
 import json
+import threading
 import unittest
 from dataclasses import replace
+from unittest import mock
 
 from pet_bridge import companion, core
 from pet_bridge import gateway_state as gs
 from pet_bridge import gateway_provider as gp
 from pet_bridge.companion import Preflight
+from pet_bridge.journal import JournalError
 from pet_bridge.transport import Response
 
 from . import test_gateway_core as old
@@ -676,6 +679,26 @@ class RealConversationFlowTest(flow.FlowCase):
             self.assertEqual(self.record(command)["state"], "COMPLETE")
         self.assertEqual(len(set(json.loads(p["body"])["id"] for p in self.client.posts)), 2)
 
+    async def test_real_terminal_unspoken_reply_still_closes_before_next_request(self):
+        self.client.reply_text = "x" * 4001
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(1)
+        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
+        self.assertEqual(self.record(first)["state"], "COMPLETE")
+        self.assertEqual(self.record(first)["reply_outcome"], "long_reply_not_spoken")
+        await self.render(fs)
+        self.client.reply_text = REPLY_TEXT
+        await self.request(fs, 2)
+        self.assertEqual(len(self.client.posts), 2)
+        self.assertFalse(any(
+            "x" * 100 in frame["content"]
+            for frame in fs.provider.of_type("session.commentary.append")
+        ))
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
     async def test_real_long_history_incomplete_tail_speaks_and_completes_once(self):
         self.client.history_rows = [
             assistant_row("gen-old", "older", id=f"history-{i}") for i in range(639)
@@ -729,7 +752,7 @@ class RealConversationFlowTest(flow.FlowCase):
         self.assertEqual((await fs.finish()).requests_uncertain, 0)
         self.assertEqual(len(self.client.posts), 1)  # no resend
 
-    async def test_real_reply_timeout_next_request_busy_late_finish_unpolled_next_call_suppresses(self):
+    async def test_real_reply_timeout_still_pending_stays_busy_next_call_suppresses(self):
         self.client.reply_pending = True
         fs = await self.begin_conversation()
         await self.request(fs, 1)
@@ -739,10 +762,10 @@ class RealConversationFlowTest(flow.FlowCase):
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
         reads = len(self.client.named("detail"))
         await self.render(fs)
-        self.client.reply_pending = False  # host eventually finishes, but no more polling
+        # A fresh read still shows working: retain the intentional busy fence.
         await self.request(fs, 2)
         self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "busy")
-        self.assertEqual(len(self.client.named("detail")), reads)
+        self.assertGreater(len(self.client.named("detail")), reads)
         self.assertEqual(len(self.client.posts), 1)
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
         await self.render(fs)
@@ -760,36 +783,498 @@ class RealConversationFlowTest(flow.FlowCase):
         await fs2.feed('{"type":"pet.stop"}')
         await fs2.finish()
 
-    async def test_real_poll_already_inflight_at_timeout_can_consume_without_speaking(self):
+    async def test_real_poll_inflight_at_timeout_cannot_release_or_claim_speech(self):
         self.client.reply_text = REPLY_TEXT
+        self.client.echo_sent_text = True
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
         # Hold a genuine core poll beyond the timeout. Use the flow harness's
         # blocked-worker signal so its settle hook does not await that worker.
         gate = self.hold_posts()
-        real_poll = self.ops.poll
+        real_poll = self.ops.observe_reply
         def delayed_poll(turn):
             if not gate.wait(timeout=10):
                 raise AssertionError("offline poll gate not released")
             return real_poll(turn)
-        self.ops.poll = delayed_poll
+        self.ops.observe_reply = delayed_poll
         await self.clock.advance(180)
         self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
         gate.set()
         await self.quiesce()
-        # Core claims before returning; the session discards the late result.
-        self.assertEqual(self.record(first)["state"], "COMPLETE")
-        self.assertTrue(self.record(first)["reply_consumed"])
+        # Observation never claims or exports the reply: fresh proof is needed.
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertFalse(self.record(first).get("reply_consumed", False))
+        self.assertNotEqual(self.record(first).get("reply_outcome"), "claimed_for_render")
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
             ["No reply is available yet."],
         )
         await self.render(fs)
         await self.request(fs, 2)
-        self.assertEqual(len(self.client.posts), 2)  # gate was released by that late poll
+        self.assertEqual(len(self.client.posts), 2)  # fresh proof, not the late poll
+        self.assertEqual(self.record(first)["state"], "SUPPRESSED")
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
         self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_real_timeout_unproven_and_foreign_details_stay_blocked(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        real_request = self.client.request
+        cases = (
+            "working", "wrong_input", "wrong_text", "ambiguous", "shared_generation",
+            "foreign", "missing_status", "failed", "unavailable", "partial",
+            "no_own", "wrong_generation", "later_unresolved", "truncated_input",
+        )
+        for index, case in enumerate(cases, 2):
+            def request(origin, route, **kwargs):
+                if route.name != "detail":
+                    return real_request(origin, route, **kwargs)
+                if case == "unavailable":
+                    return Response(503, b"")
+                if case == "partial":
+                    self.client.partial = True
+                    try:
+                        return real_request(origin, route, **kwargs)
+                    finally:
+                        self.client.partial = False
+                own = flow.user_row(first, text="request 1")
+                rows = [own, flow.assistant_row("gen-1", REPLY_TEXT)]
+                if case == "working":
+                    own["inputStatus"].update(phase="working", basis="generation_started")
+                elif case == "wrong_input":
+                    own["inputStatus"]["inputId"] = "different"
+                elif case == "wrong_text":
+                    own["text"] = "different request"
+                elif case == "ambiguous":
+                    own["nativeInputAmbiguous"] = True
+                elif case == "shared_generation":
+                    rows.insert(1, flow.user_row("another-input"))
+                elif case == "foreign":
+                    own["sessionId"] = "foreign-session"
+                elif case == "missing_status":
+                    del own["inputStatus"]
+                elif case == "failed":
+                    own["inputStatus"].update(phase="failed", basis="generation_failed")
+                elif case == "no_own":
+                    rows.pop(0)
+                elif case == "wrong_generation":
+                    rows[-1]["generationId"] = "unrelated-generation"
+                elif case == "later_unresolved":
+                    rows.append(flow.user_row("later", generation=None))
+                elif case == "truncated_input":
+                    own["textDetail"] = {"truncated": True}
+                return flow.json_response(flow.page(rows))
+            self.client.request = request
+            await self.request(fs, index)
+            self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "busy", case)
+            self.assertEqual(len(self.client.posts), 1, case)
+            record = self.record(first)
+            self.assertEqual(record["state"], "ACCEPTED", case)
+            self.assertFalse(record.get("reply_consumed", False), case)
+            self.assertNotEqual(record.get("reply_outcome"), "claimed_for_render", case)
+            await self.render(fs)
+        self.client.request = real_request
+        await self.request(fs, len(cases) + 2)
+        self.assertEqual(len(self.client.posts), 2)
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertNotIn(REPLY_TEXT, [
+            frame["content"] for frame in fs.provider.of_type("session.commentary.append")
+        ])
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def _late_unrenderable_reply_does_not_prevent_distinct_request(self, text):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        self.client.reply_text = text
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        await self.request(fs, 2)
+        self.assertEqual(len(self.client.posts), 2)
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertEqual(
+            [frame["content"] for frame in fs.provider.of_type("session.commentary.append")],
+            ["No reply is available yet."],
+        )
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_real_timeout_long_reply_proves_completion_without_speech(self):
+        await self._late_unrenderable_reply_does_not_prevent_distinct_request("x" * 4001)
+
+    async def test_real_timeout_empty_reply_proves_completion_without_speech(self):
+        await self._late_unrenderable_reply_does_not_prevent_distinct_request("")
+
+    async def test_real_timeout_invalid_reply_proves_completion_without_speech(self):
+        await self._late_unrenderable_reply_does_not_prevent_distinct_request(None)
+
+    async def test_real_timeout_validated_incomplete_tail_remains_busy(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        self.client.history_rows = [
+            assistant_row("gen-old", "older", id=f"history-{i}") for i in range(639)
+        ]
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        await self.request(fs, 2)
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "busy")
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_real_timeout_journal_write_failure_stays_closed(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        with mock.patch.object(self.journal, "put", side_effect=JournalError("journal_io_error")):
+            await self.request(fs, 2)
+        self.assertTrue(self.bridge.status()["faulted"])
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertEqual(len(self.client.posts), 1)
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_real_timeout_recovery_does_not_bypass_busy_preflight(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        self.client.listing_status = "working"
+        self.client.listing_execution = True
+        await self.request(fs, 2)
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "busy")
+        await self.render(fs)
+        self.client.listing_status = "idle"
+        self.client.listing_execution = False
+        await self.request(fs, 3)
+        posted = [json.loads(post["body"])["args"]["text"] for post in self.client.posts]
+        self.assertEqual(posted, ["request 1", "request 3"])
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_real_timeout_binding_or_epoch_change_during_detail_fails_closed(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        real_request = self.client.request
+        def changed_attachment(origin, route, **kwargs):
+            response = real_request(origin, route, **kwargs)
+            if route.name == "detail":
+                attached = self.store.load_attachment(self.binding.credential_ref)
+                self.store.save_attachment(replace(attached, host_instance_id=INSTANCE_2))
+            return response
+        self.client.request = changed_attachment
+        await self.request(fs, 2)
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertEqual(len(self.client.posts), 1)
+        await self.render(fs)
+        attached = self.store.load_attachment(self.binding.credential_ref)
+        self.store.save_attachment(replace(attached, host_instance_id=self.binding.host_instance_id))
+        def changed_epoch(origin, route, **kwargs):
+            response = real_request(origin, route, **kwargs)
+            if route.name == "detail":
+                self.bridge.stop()
+                self.bridge.resume()
+            return response
+        self.client.request = changed_epoch
+        await self.request(fs, 3)
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "busy")
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_observation_cache_is_exact_one_use_and_stop_safe(self):
+        self.client.reply_text = REPLY_TEXT
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        turn = self.client.last_command
+        observed = await self.runner.run("poll", lambda: self.ops.observe_reply(turn))
+        self.assertEqual((observed.status, observed.text), ("ready", None))
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertFalse(self.record(turn).get("reply_consumed", False))
+        wrong = flow.IdFactory(501)()
+        result = await self.runner.run("poll", lambda: self.ops.claim_observed_reply(wrong))
+        self.assertIsNone(result.text)
+        result = await self.runner.run("poll", lambda: self.ops.claim_observed_reply(turn))
+        self.assertIsNone(result.text)  # wrong-id claim took the cache once
+        observed = await self.runner.run("poll", lambda: self.ops.observe_reply(turn))
+        self.assertEqual(observed.status, "ready")
+        await self.runner.run("stop", self.ops.stop, urgent=True)
+        result = await self.runner.run("poll", lambda: self.ops.claim_observed_reply(turn))
+        self.assertIsNone(result.text)
+        self.assertFalse(self.record(turn).get("reply_consumed", False))
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def _other_command_blocks_after_late_completion(self, state):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        other = flow.IdFactory(900)()
+        record = dict(self.record(first))
+        record.update(command_id=other, state=state, event_ids=["other-e"])
+        self.journal.put(f"cmd-{other}.json", record)
+        before = self.record(other)
+        await self.request(fs, 2)
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertEqual(self.record(other), before)
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(
+            fs.device.of_type("pet.converse.notice")[-1]["code"],
+            "send_uncertain" if state == "UNCERTAIN" else "busy",
+        )
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+        await self.runner.wait_idle()
+        self.assertFalse(await self.runner.run("pre_dial_admission", self.ops.pre_dial_admission))
+        self.assertEqual(self.record(other), before)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_other_prepared_command_blocks_late_recovery_and_predial(self):
+        await self._other_command_blocks_after_late_completion("PREPARED")
+
+    async def test_other_attempted_command_blocks_late_recovery_and_predial(self):
+        await self._other_command_blocks_after_late_completion("ATTEMPTED")
+
+    async def test_other_uncertain_command_blocks_late_recovery_and_predial(self):
+        await self._other_command_blocks_after_late_completion("UNCERTAIN")
+
+    async def test_real_timeout_unknown_journal_commit_faults_even_if_record_changed(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        real_put = self.journal.put
+        def unknown_commit(name, record):
+            if record.get("reply_outcome") == "late_reply_not_spoken":
+                real_put(name, record)
+                raise JournalError("journal_persist_unknown")
+            return real_put(name, record)
+        with mock.patch.object(self.journal, "put", side_effect=unknown_commit):
+            await self.request(fs, 2)
+        self.assertEqual(self.record(first)["state"], "SUPPRESSED")
+        self.assertTrue(self.bridge.status()["faulted"])
+        self.assertEqual(len(self.client.posts), 1)
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def _close_during_timeout_proof(self, *, disconnect):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        gate = self.hold_posts()
+        entered = threading.Event()
+        real_request = self.client.request
+        def blocked_request(origin, route, **kwargs):
+            if route.name == "detail":
+                entered.set()
+                if not gate.wait(timeout=10):
+                    raise AssertionError("offline read gate not released")
+            return real_request(origin, route, **kwargs)
+        self.client.request = blocked_request
+        await self.request(fs, 2)
+        self.assertTrue(entered.wait(timeout=2))
+        if disconnect:
+            fs.device.disconnect()
+        else:
+            await fs.feed('{"type":"pet.stop"}')
+        result = await fs.finish()
+        gate.set()
+        await self.runner.wait_idle()
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertTrue(self.bridge.status()["stopped"])
+        self.assertEqual(result.replies_rendered, 0)
+        record = self.record(first)
+        self.assertEqual(record["state"], "ACCEPTED")
+        self.assertFalse(record.get("reply_consumed", False))
+        self.assertNotEqual(record.get("reply_outcome"), "claimed_for_render")
+        self.assertNotIn(REPLY_TEXT, [
+            frame["content"] for frame in fs.provider.of_type("session.commentary.append")
+        ])
+
+    async def test_real_timeout_stop_during_proof_never_sends_new_input(self):
+        await self._close_during_timeout_proof(disconnect=False)
+
+    async def test_real_timeout_disconnect_during_proof_never_sends_new_input(self):
+        await self._close_during_timeout_proof(disconnect=True)
+
+    async def test_real_claim_crossing_timeout_is_not_spoken_and_requires_new_proof(self):
+        self.client.reply_text = REPLY_TEXT
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        gate = self.hold_posts()
+        entered = threading.Event()
+        claim = self.ops.claim_observed_reply
+        def blocked_claim(turn):
+            entered.set()
+            if not gate.wait(timeout=10):
+                raise AssertionError("offline claim gate not released")
+            return claim(turn)
+        self.ops.claim_observed_reply = blocked_claim
+        await self.clock.advance(180)
+        self.assertTrue(entered.is_set())
+        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
+        gate.set()
+        await self.quiesce()
+        self.assertEqual(self.record(first)["state"], "COMPLETE")
+        self.assertEqual(self.record(first)["reply_outcome"], "claimed_for_render")
+        await self.render(fs)
+        await self.request(fs, 2)
+        self.assertEqual(len(self.client.posts), 2)
+        self.assertEqual(self.record(first)["state"], "SUPPRESSED")
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertNotIn(REPLY_TEXT, [
+            frame["content"] for frame in fs.provider.of_type("session.commentary.append")
+        ])
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_terminal_long_reply_claim_crossing_timeout_recovers(self):
+        self.client.echo_sent_text = True
+        self.client.reply_text = "x" * 4001
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        gate = self.hold_posts()
+        entered = threading.Event()
+        claim = self.ops.claim_observed_reply
+        def blocked_claim(turn):
+            entered.set()
+            if not gate.wait(timeout=10):
+                raise AssertionError("offline claim gate not released")
+            return claim(turn)
+        self.ops.claim_observed_reply = blocked_claim
+        await self.clock.advance(180)
+        self.assertTrue(entered.is_set())
+        gate.set()
+        await self.quiesce()
+        self.assertEqual(self.record(first)["reply_outcome"], "long_reply_not_spoken")
+        await self.render(fs)
+        await self.request(fs, 2)
+        self.assertEqual(len(self.client.posts), 2)
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertFalse(any(
+            "x" * 100 in frame["content"]
+            for frame in fs.provider.of_type("session.commentary.append")
+        ))
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+
+    async def test_legacy_and_new_terminal_journals_never_replay_speech_after_restart(self):
+        self.client.reply_pending = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+        await self.runner.wait_idle()
+        original = self.record(first)
+        for state, outcome, consumed in (
+            ("COMPLETE", "spoken", True),
+            ("COMPLETE", "claimed_for_render", True),
+            ("SUPPRESSED", "late_reply_not_spoken", False),
+        ):
+            with self.subTest(outcome=outcome):
+                record = dict(original)
+                record.update(state=state, reply_outcome=outcome, reply_consumed=consumed)
+                self.journal.put(f"cmd-{first}.json", record)
+                restarted = core.Bridge(
+                    self.journal,
+                    flow.transport.HttpsTransport(self.store, lambda: self.client),
+                    clock=lambda: flow.WALL0 + self.clock.now(),
+                    new_id=flow.IdFactory(3000), monotonic=self.clock.now,
+                )
+                result = restarted.poll_reply(
+                    first, flow.page([flow.user_row(first), assistant_row("gen-1", REPLY_TEXT)]),
+                    coverage_complete=True, session_id=flow.SESSION_ID,
+                )
+                self.assertEqual(result.status, "not_spoken")
+                self.assertIsNone(result.text)
+                self.assertEqual(len(self.client.posts), 1)
+
+    async def test_new_input_racing_late_proof_is_not_queued_or_duplicated(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        await self.render(fs)
+        self.client.reply_pending = False
+        gate = self.hold_posts()
+        entered = threading.Event()
+        real_request = self.client.request
+        def blocked_request(origin, route, **kwargs):
+            if route.name == "detail":
+                entered.set()
+                if not gate.wait(timeout=10):
+                    raise AssertionError("offline read gate not released")
+            return real_request(origin, route, **kwargs)
+        self.client.request = blocked_request
+        await self.request(fs, 2)
+        self.assertTrue(entered.wait(timeout=2))
+        await fs.push(old.delta("e3", "request 3", 3000, 3500))
+        await fs.push(old.delegation("d3"))
+        gate.set()
+        await self.quiesce()
+        posted = [json.loads(post["body"])["args"]["text"] for post in self.client.posts]
+        self.assertEqual(posted, ["request 1", "request 2"])
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertNotIn(REPLY_TEXT, [
+            frame["content"] for frame in fs.provider.of_type("session.commentary.append")
+        ])
         await fs.feed('{"type":"pet.stop"}')
         await fs.finish()
 
@@ -993,3 +1478,38 @@ class ConversationServerTest(server.GatewayCase):
         self.assertIsNone(summary.confirm_job)
         self.assertEqual(self.h.runner.held_results(), ())
         self.assertEqual(self.h.ops.count("confirm"), 1)
+
+
+class PublicLateRecoveryControl(flow.FlowCase):
+    async def test_public_baseline_timeout_exact_completion_allows_only_new_request(self):
+        self.client.reply_pending = True
+        self.client.echo_sent_text = True
+        self.client.reply_text = REPLY_TEXT
+        fs = self.new_session()
+        fs.go()
+        await fs.feed(flow.ASSISTANT_START)
+        await fs.feed(BEGIN)
+        await fs.push(old.delta("e1", "request 1", 1000, 1500))
+        await fs.push(old.delegation("d1"))
+        await self.clock.advance(1.5)
+        first = self.client.last_command
+        await self.clock.advance(180)
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        fs.provider.push_audio(AUDIO_CANARY)
+        await self.quiesce()
+        for _ in range(16):
+            fs.provider.push_audio(bytes(4800))
+            await self.quiesce()
+            await self.clock.advance(0.1)
+        self.client.reply_pending = False
+        await fs.push(old.delta("e2", "request 2", 2000, 2500))
+        await fs.push(old.delegation("d2"))
+        await self.clock.advance(1.5)
+        self.assertEqual(len(self.client.posts), 2)
+        self.assertNotEqual(self.client.last_command, first)
+        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        self.assertNotIn(REPLY_TEXT, [
+            frame["content"] for frame in fs.provider.of_type("session.commentary.append")
+        ])
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()

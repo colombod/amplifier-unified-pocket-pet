@@ -144,7 +144,10 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class ReplyResult:
-    """``status`` is speak, pending or not_spoken.  ``text`` only when speak."""
+    """``status`` is speak, ready, pending or not_spoken; text only when speak.
+
+    ``ready`` is a non-consuming conversational observation, not a render claim.
+    """
 
     command_id: str
     status: str
@@ -1036,7 +1039,112 @@ class Bridge:
                     return ()
             return self.reconcile_delivered(page, session_id=session_id)
 
+    def timed_out_reply_state(self, command_id: str, expected: Binding | None) -> str:
+        """Eligibility of this exact same-epoch timeout; no cleanup or mutation."""
+        with self._lock:
+            if (
+                expected is None or self._faulted or self._stopped
+                or self._binding != expected or self._turn is not None
+                or self._inflight is not None
+            ):
+                return "blocked"
+            record = self._cmd(command_id)
+            if (
+                record is None or record["binding"] != asdict(expected)
+                or record["epoch"] != self._epoch
+            ):
+                return "blocked"
+            if record["state"] == "ACCEPTED" or (
+                record["state"] == "COMPLETE"
+                and record.get("reply_outcome") == "claimed_for_render"
+                and record.get("reply_consumed") is True
+            ) or (
+                record["state"] == "COMPLETE"
+                and record.get("reply_outcome") in {
+                    "long_reply_not_spoken", "reply_invalid", "no_reply_text",
+                }
+                and record.get("reply_consumed") is False
+            ):
+                return "pending"
+            if (
+                record["state"] == "SUPPRESSED"
+                and record.get("reply_outcome") == "late_reply_not_spoken"
+            ):
+                return "cleared"
+            return "blocked"
+
+    def settle_timed_out_reply(
+        self, command_id: str, expected: Binding | None, window: DetailWindow
+    ) -> bool:
+        """Close only a timed-out reply with full, exact positive completion proof."""
+        with self._lock:
+            if self.timed_out_reply_state(command_id, expected) != "pending":
+                return False
+            assert expected is not None
+            if type(window) is not DetailWindow or not window.coverage_complete:
+                return False
+            page = window.as_page()
+            if not window.proves_newest_tail(page, expected.session_id):
+                return False
+            record = self._cmd(command_id)
+            assert record is not None
+            if not input_delivered(
+                page, command_id=command_id, text_sha256=record.get("text_sha256")
+            ):
+                return False
+            decision = evaluate_reply(
+                page, command_id=command_id, session_id=expected.session_id,
+                coverage_complete=True, newest_tail=window,
+            )
+            # These reply-text outcomes are produced only AFTER all correlation,
+            # completion, generation-boundary and exclusivity checks. Other
+            # terminal reasons (invalid/ambiguous status, etc.) prove no such
+            # completion and must never open the gate.
+            text_only_terminal = decision.terminal and decision.reason in {
+                "long_reply_not_spoken", "reply_invalid", "no_reply_text",
+            }
+            if decision.status != "speak" and not text_only_terminal:
+                return False
+            try:
+                self._transition(
+                    self._name(command_id), record, "SUPPRESSED",
+                    reason="late_reply_not_spoken",
+                    reply_outcome="late_reply_not_spoken",
+                    reply_consumed=record.get("reply_consumed", False),
+                )
+            except BridgeError:
+                self._faulted = True
+                return False
+            return True
+
+    def begin_after_timed_out_reply(self, command_id: str, expected: Binding | None) -> str:
+        """Atomically recheck the timeout's epoch and all ordinary turn gates."""
+        with self._lock:
+            if self.timed_out_reply_state(command_id, expected) != "cleared":
+                raise BridgeError("reply_pending")
+            return self.begin_turn()
+
     # -- reply ---------------------------------------------------------------------
+    def observe_reply(
+        self, command_id: str, window: DetailWindow, *, session_id: str
+    ) -> ReplyResult:
+        """Evaluate without consuming, closing, or releasing reply text."""
+        with self._lock:
+            record = self._poll_precheck(command_id, session_id)
+            if isinstance(record, ReplyResult):
+                return record
+            decision = evaluate_reply(
+                window.as_page(), command_id=command_id, session_id=session_id,
+                coverage_complete=window.coverage_complete, newest_tail=window,
+            )
+            if decision.status == "speak":
+                return self._reply(command_id, "ready", "reply_complete", False, record["epoch"])
+            if decision.terminal:
+                # The event loop separately commits terminal closure before the
+                # deadline. Observation alone must never open the gate.
+                return self._reply(command_id, "ready", decision.reason, False, record["epoch"])
+            return self._reply(command_id, decision.status, decision.reason, False, record["epoch"])
+
     @staticmethod
     def _reply(
         command_id: Any,
@@ -1144,7 +1252,7 @@ class Bridge:
                 self._name(command_id),
                 record,
                 "COMPLETE",
-                reply_outcome="spoken",
+                reply_outcome="claimed_for_render",
                 reply_consumed=True,
             )
         except BridgeError:

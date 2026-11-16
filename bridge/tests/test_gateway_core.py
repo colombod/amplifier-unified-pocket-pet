@@ -308,6 +308,26 @@ class RunnerTest(RunnerCase):
         for leak in ("lowercasecanarycode", "TEXTCANARY", "canaryreasonxyz"):
             self.assertNotIn(leak, text)
 
+    async def test_ready_observation_metadata_is_fixed_and_private(self):
+        cases = (
+            ("ready", "reply_complete", "ready:reply_complete"),
+            ("ready", "reply_invalid", "ready:reply_invalid"),
+            ("ready", "no_reply_text", "ready:no_reply_text"),
+            ("ready", "CANARY_REASON", "ready:other"),
+            ("CANARY_STATUS", "reply_complete", "other:reply_complete"),
+            ("speak", "reply_complete", "speak:reply_complete"),
+            ("pending", "generation_running", "pending:generation_running"),
+            ("not_spoken", "reply_invalid", "not_spoken:reply_invalid"),
+        )
+        for status, reason, expected in cases:
+            result = ReplyResult("CANARY_ID", status, reason, False, 3, "CANARY_TEXT")
+            self.assertIs(await self.runner.run("poll", lambda: result, retain=False), result)
+            last = self.runner.retained()[-1]
+            self.assertEqual((last.op, last.outcome, last.code), ("poll", "ok", expected))
+            self.assertEqual(self.runner.held_results(), ())
+            for secret in ("CANARY_ID", "CANARY_TEXT", "CANARY_STATUS", "CANARY_REASON"):
+                self.assertNotIn(secret, repr(self.runner.retained()))
+
     async def test_t_core_run_threads_exactly_one_thread_and_no_executor(self):
         baseline = threading.active_count()  # the fixture runner is already running
         extra = gc.CoreRunner()

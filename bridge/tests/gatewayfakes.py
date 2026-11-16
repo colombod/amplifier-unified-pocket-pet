@@ -401,6 +401,9 @@ class FakeOps:
         scripted = self._enter("begin", ())
         return TURN if scripted is None else scripted
 
+    def begin_after_timeout(self, turn_id: str, closed: threading.Event) -> str:
+        return self.begin()
+
     def stage(self, turn_id: str, segments: Any) -> str:
         scripted = self._enter("stage", (turn_id, tuple(segments)))
         if scripted is None:
@@ -410,6 +413,9 @@ class FakeOps:
 
     def abandon(self, turn_id: str) -> None:
         self._enter("abandon", (turn_id,))
+
+    def timeout_reply(self, turn_id: str) -> None:
+        self.abandon(turn_id)
 
     def seal(self, turn_id: str) -> core.TranscriptPreview:
         scripted = self._enter("seal", (turn_id,))
@@ -438,6 +444,12 @@ class FakeOps:
                 turn_id, "speak", "reply_complete", True, self.epoch, REPLY_TEXT
             )
         return scripted
+
+    def observe_reply(self, turn_id: str) -> core.ReplyResult:
+        return self.poll(turn_id)
+
+    def claim_observed_reply(self, turn_id: str) -> core.ReplyResult:
+        return self.poll(turn_id)
 
     def epoch_current(self, epoch: int) -> bool:
         scripted = self._enter("epoch_current", (epoch,))

@@ -1107,6 +1107,127 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         await asyncio.wait_for(retry, 5)
         await until(lambda: not self.gw.busy)
 
+    async def test_predial_proof_then_same_call_late_reply_recovers_without_replay(self):
+        old = await self._create_uncertain()
+        self.client.echo_sent_text = True
+        self.client.post_response = None
+        self.client.reply_pending = True
+        old_answer = "OLD-LATE-REPLY-CANARY"
+        new_answer = "NEW-DISTINCT-REPLY-CANARY"
+        self.client.reply_text = old_answer
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual((self.dials, len(self.client.posts)), (2, 1))
+        self.assertEqual(self.record(old)["state"], "ACCEPTED")
+        device.feed({"type": "pet.converse.begin"})
+        await self.quiesce()
+        provider = self.providers[-1]
+        provider.push(delta("e2", "request 2", 1000, 1500))
+        provider.push(delegation("d2"))
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        timed_out = self.client.last_command
+        self.assertNotEqual(old, timed_out)
+        self.assertEqual(len(self.client.posts), 2)
+        await self.clock.advance(180)
+        self.assertEqual(device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
+        provider.push_audio(gf.AUDIO_CANARY)
+        await self.quiesce()
+        for _ in range(16):
+            provider.push_audio(bytes(4800))
+            await self.quiesce()
+            await self.clock.advance(0.1)
+        self.client.reply_pending = False
+        provider.push(delta("e3", "request 3", 2000, 2500))
+        provider.push(delegation("d3"))
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        posts = [json.loads(p["body"]) for p in self.client.posts]
+        self.assertEqual([p["args"]["text"] for p in posts],
+                         ["hello world", "request 2", "request 3"])
+        self.assertEqual(len({p["id"] for p in posts}), 3)
+        self.assertEqual(self.record(timed_out)["reply_outcome"], "late_reply_not_spoken")
+        self.assertEqual(self.dials, 2)  # same call: no extra provider dial
+        self.assertNotIn(old_answer, [
+            frame["content"] for frame in provider.of_type("session.commentary.append")
+        ])
+        self.client.reply_text = new_answer
+        await self.clock.advance(1)
+        self.assertEqual(
+            [frame["content"] for frame in provider.of_type("session.commentary.append")],
+            ["No reply is available yet.", new_answer],
+        )
+        provider.push_audio(gf.AUDIO_CANARY)
+        await self.quiesce()
+        for _ in range(16):
+            provider.push_audio(bytes(4800))
+            await self.quiesce()
+            await self.clock.advance(0.1)
+        self.assertEqual(device.of_type("pet.converse.state")[-1]["state"], "listening")
+        self.assertEqual(self.record(posts[-1]["id"])["state"], "COMPLETE")
+        self.assertEqual((self.dials, len(self.client.posts)), (2, 3))
+        device.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+
+    async def test_late_reply_proof_disconnect_retains_custody_until_read_finishes(self):
+        self.client.echo_sent_text = True
+        self.client.reply_pending = True
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        device.feed({"type": "pet.converse.begin"})
+        await self.quiesce()
+        provider = self.providers[-1]
+        provider.push(delta("e1", "request 1", 1000, 1500))
+        provider.push(delegation("d1"))
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        old = self.client.last_command
+        await self.clock.advance(180)
+        provider.push_audio(gf.AUDIO_CANARY)
+        await self.quiesce()
+        for _ in range(16):
+            provider.push_audio(bytes(4800))
+            await self.quiesce()
+            await self.clock.advance(0.1)
+        self.client.reply_pending = False
+        gate = self.hold_posts()
+        entered = threading.Event()
+        actual = self.client.request
+        def held_request(origin, route, **kwargs):
+            if route.name == "detail":
+                entered.set()
+                if not gate.wait(10):
+                    raise AssertionError("synthetic proof gate timed out")
+            return actual(origin, route, **kwargs)
+        self.client.request = held_request
+        provider.push(delta("e2", "request 2", 2000, 2500))
+        provider.push(delegation("d2"))
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        await until(entered.is_set)
+        device.disconnect()
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(srv.request_for())).status, 409)
+        self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+        gate.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(old)["state"], "ACCEPTED")
+        self.assertFalse(self.record(old).get("reply_consumed", False))
+        self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+        self.assertNotIn(self.client.reply_text, [
+            frame["content"] for frame in provider.of_type("session.commentary.append")
+        ])
+
     async def test_complete_older_page_proof_is_promoted_before_dial(self):
         turn = await self._create_uncertain()
         rows = [flow.user_row(turn, text=self.client.last_text)]
