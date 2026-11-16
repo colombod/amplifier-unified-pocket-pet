@@ -1,10 +1,15 @@
 """Synthetic, offline security and atomicity checks for public cache preparation."""
+import contextlib
+import builtins
+import http.client
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import stat
+import struct
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -25,6 +30,15 @@ def zip_bytes(entries):
             for name, data in entries:
                 archive.writestr(name, data)
     return output.getvalue()
+
+
+def change_zip_header(raw, local_offset, central_offset, value):
+    data = bytearray(raw)
+    local = data.index(b"PK\x03\x04")
+    central = data.index(b"PK\x01\x02")
+    struct.pack_into("<H", data, local + local_offset, value)
+    struct.pack_into("<H", data, central + central_offset, value)
+    return bytes(data)
 
 
 class PrepareTest(unittest.TestCase):
@@ -70,6 +84,19 @@ class PrepareTest(unittest.TestCase):
     def run_prepare(self, downloader=None):
         with mock.patch.object(prep, "inputs", return_value=(self.packages, self.pins)):
             prep.prepare(self.dest, downloader or self.download)
+
+    def run_cli(self, downloader):
+        real_prepare = prep.prepare
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with (mock.patch.object(prep, "inputs", return_value=(self.packages, self.pins)),
+              mock.patch.object(prep, "prepare", side_effect=lambda path: real_prepare(path, downloader)),
+              mock.patch.object(sys, "argv", ["prepare_components.py", "--prepare", str(self.dest)]),
+              contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout)):
+            result = prep.main()
+        if result:
+            self.assertNotIn("Prepared verified offline cache:", stdout.getvalue())
+        return result, stderr.getvalue()
 
     def test_real_lock_and_pins_agree(self):
         packages, pins = prep.inputs()
@@ -148,6 +175,109 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaises(OSError):
             self.run_prepare(fail)
         self.assertFalse(self.dest.exists())
+
+    def test_cli_reports_bad_registry_and_checksum_json_without_publishing(self):
+        for location in ("registry", "checksum"):
+            for raw in (b"null", b"[]"):
+                with self.subTest(location=location, raw=raw):
+                    self.dest = self.parent / (location + str(len(list(self.parent.iterdir()))))
+                    def download(url, limit):
+                        if url.endswith("/fixture.json"):
+                            return raw if location == "registry" else self.metadata
+                        return raw if location == "checksum" else self.zipped
+                    result, stderr = self.run_cli(download)
+                    self.assertEqual(result, 1)
+                    self.assertIn("Preparation failed:", stderr)
+                    self.assertIn("partial stage retained", stderr)
+                    self.assertNotIn("Traceback", stderr)
+                    self.assertFalse(self.dest.exists())
+
+    def test_cli_reports_encrypted_and_unsupported_archives_without_publishing(self):
+        compressed = io.BytesIO()
+        with zipfile.ZipFile(compressed, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("nested/file.txt", self.body)
+        corrupt = bytearray(compressed.getvalue())
+        name_len, extra_len = struct.unpack_from("<HH", corrupt, 26)
+        corrupt[30 + name_len + extra_len] ^= 0xff
+        cases = (
+            ("encrypted", change_zip_header(self.zipped, 6, 8, 1)),
+            ("unsupported", change_zip_header(self.zipped, 8, 10, 99)),
+            ("unsupported-version", change_zip_header(self.zipped, 4, 6, 99)),
+            ("truncated", self.zipped[:-10]),
+            ("corrupt-deflate", bytes(corrupt)),
+        )
+        for label, archive in cases:
+            with self.subTest(label=label):
+                self.dest = self.parent / label
+                def download(url, limit):
+                    if url.endswith("/fixture.json"):
+                        return self.metadata
+                    return self.meta if url.endswith("CHECKSUMS.json") else archive
+                result, stderr = self.run_cli(download)
+                self.assertEqual(result, 1)
+                self.assertIn("Preparation failed:", stderr)
+                self.assertIn("partial stage retained", stderr)
+                self.assertNotIn("Traceback", stderr)
+                self.assertFalse(self.dest.exists())
+
+    def test_cli_reports_incomplete_http_response_without_publishing(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = "https://components-file.espressif.com/components/public/fixture.json"
+        response.length = None
+        response.read.side_effect = http.client.IncompleteRead(b"partial", 1)
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(prep.urllib.request, "build_opener", return_value=opener):
+            result, stderr = self.run_cli(prep.fetch)
+        self.assertEqual(result, 1)
+        self.assertIn("Preparation failed:", stderr)
+        self.assertIn("partial stage retained", stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_cli_rejects_silent_short_read_with_valid_registry_prefix(self):
+        wire = (b"HTTP/1.1 200 OK\r\nContent-Length: " +
+                str(len(self.metadata) + 10).encode() + b"\r\n\r\n" + self.metadata)
+        sock = mock.Mock()
+        sock.makefile.return_value = io.BytesIO(wire)
+        response = http.client.HTTPResponse(sock)
+        response.begin()
+        response.geturl = lambda: "https://components-file.espressif.com/components/public/fixture.json"
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(prep.urllib.request, "build_opener", return_value=opener):
+            result, stderr = self.run_cli(prep.fetch)
+        self.assertEqual(result, 1)
+        self.assertIn("Preparation failed:", stderr)
+        self.assertIn("partial stage retained", stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertFalse(self.dest.exists())
+
+    def test_optional_codecs_may_be_missing_at_import(self):
+        original_import = builtins.__import__
+        for codec in ("zlib", "lzma"):
+            with self.subTest(codec=codec):
+                def without_codec(name, *args, **kwargs):
+                    if name == codec:
+                        raise ImportError("synthetic unavailable codec")
+                    return original_import(name, *args, **kwargs)
+                spec = importlib.util.spec_from_file_location("prepare_without_codec", SCRIPT)
+                module = importlib.util.module_from_spec(spec)
+                with mock.patch.object(builtins, "__import__", side_effect=without_codec):
+                    spec.loader.exec_module(module)
+                folder = self.parent / ("without-" + codec)
+                folder.mkdir()
+                module.extract(self.zipped,
+                               {"nested/file.txt": (len(self.body), module.digest(self.body))},
+                               folder)
+                self.assertEqual((folder / "nested/file.txt").read_bytes(), self.body)
+
+    def test_unexpected_programming_error_is_not_masked(self):
+        with (mock.patch.object(prep, "load_json", side_effect=RuntimeError("bug")),
+              self.assertRaisesRegex(RuntimeError, "bug")):
+            prep.registry_urls(self.metadata, "public/fixture", "1.0.0", self.hash)
 
     def test_racing_destination_is_not_overwritten(self):
         real_publish = prep.publish

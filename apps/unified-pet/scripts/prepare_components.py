@@ -8,6 +8,7 @@ This is preparation only; the firmware build never invokes this script.
 import argparse
 import ctypes
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -20,6 +21,16 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+try:
+    import lzma
+except ImportError:
+    lzma = None
+
+try:
+    import zlib
+except ImportError:
+    zlib = None
+
 APP = Path(__file__).resolve().parents[1]
 LOCK_SHA = "ee9197346a7f843fc9b0e913280b9d15d8a3dec7497eb85239124433179ab2b1"
 PINS_SHA = "3616d451349f84de0ac624ae80ce56943720901a3b95295f76b30676e292ea44"
@@ -31,6 +42,11 @@ MAX_FILE = 64 * 1024 * 1024
 HEX = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9_]+/[a-z0-9_]+$")
 VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:~[0-9]+)?$")
+ZIP_READ_ERRORS = (NotImplementedError, RuntimeError, EOFError)
+if zlib is not None:
+    ZIP_READ_ERRORS += (zlib.error,)
+if lzma is not None:
+    ZIP_READ_ERRORS += (lzma.LZMAError,)
 
 
 class PreparationError(Exception):
@@ -95,7 +111,8 @@ def rows_hash(rows):
 
 def validate_manifest(raw, component_hash, pin):
     manifest = load_json(raw)
-    if manifest.get("version") != "1.0" or manifest.get("algorithm") != "sha256":
+    if (not isinstance(manifest, dict) or manifest.get("version") != "1.0" or
+            manifest.get("algorithm") != "sha256"):
         raise PreparationError("Unexpected checksum format")
     files = manifest.get("files")
     if not isinstance(files, list) or len(files) != pin["files"] - 2:
@@ -141,18 +158,30 @@ def fetch(url, limit):
     # Avoid loading credentials or proxy configuration from the user's home.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), SameHostRedirect())
     request = urllib.request.Request(url, headers={"User-Agent": "unified-pet-build-preparation/1"})
-    with opener.open(request, timeout=60) as response:
-        check_url(response.geturl())
-        data = response.read(limit + 1)
+    try:
+        with opener.open(request, timeout=60) as response:
+            check_url(response.geturl())
+            expected_length = response.length
+            if expected_length is not None:
+                if type(expected_length) is not int or expected_length < 0:
+                    raise PreparationError("Invalid HTTP response length")
+                if expected_length > limit:
+                    raise PreparationError("Download exceeds size limit")
+            data = response.read(limit + 1)
+    except http.client.HTTPException as exc:
+        raise PreparationError("Incomplete or invalid HTTP response") from exc
     if len(data) > limit:
         raise PreparationError("Download exceeds size limit")
+    if expected_length is not None and len(data) != expected_length:
+        raise PreparationError("Incomplete HTTP response")
     return data
 
 
 def registry_urls(raw, full_name, version, component_hash):
     metadata = load_json(raw)
     namespace, component = full_name.split("/")
-    if metadata.get("name") != component or metadata.get("namespace") != namespace:
+    if (not isinstance(metadata, dict) or metadata.get("name") != component or
+            metadata.get("namespace") != namespace):
         raise PreparationError("Registry component identity differs from lock")
     versions = metadata.get("versions")
     if not isinstance(versions, list):
@@ -180,13 +209,19 @@ def registry_urls(raw, full_name, version, component_hash):
 
 def extract(raw_zip, expected, folder):
     seen = set()
-    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw_zip))
+    except NotImplementedError as exc:
+        raise PreparationError("Unsupported ZIP archive version") from exc
+    with archive:
         for entry in archive.infolist():
             is_dir = entry.is_dir()
             path = safe_path(entry.filename[:-1] if is_dir else entry.filename)
             if path in seen:
                 raise PreparationError(f"Duplicate archive entry: {path}")
             seen.add(path)
+            if entry.flag_bits & 1:
+                raise PreparationError("Encrypted archive entries are not supported")
             kind = stat.S_IFMT(entry.external_attr >> 16)
             if kind not in (0, stat.S_IFDIR if is_dir else stat.S_IFREG):
                 raise PreparationError(f"Non-regular archive entry: {path}")
@@ -200,9 +235,16 @@ def extract(raw_zip, expected, folder):
             target.parent.mkdir(parents=True, exist_ok=True)
             sha = hashlib.sha256()
             written = 0
-            with archive.open(entry) as source, target.open("xb") as out:
+            try:
+                source = archive.open(entry)
+            except ZIP_READ_ERRORS as exc:
+                raise PreparationError("Invalid or unsupported archive data") from exc
+            with source, target.open("xb") as out:
                 while True:
-                    chunk = source.read(1024 * 1024)
+                    try:
+                        chunk = source.read(1024 * 1024)
+                    except ZIP_READ_ERRORS as exc:
+                        raise PreparationError("Invalid or unsupported archive data") from exc
                     if not chunk:
                         break
                     written += len(chunk)
