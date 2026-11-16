@@ -1174,6 +1174,161 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         await asyncio.wait_for(task, 5)
         await until(lambda: not self.gw.busy)
 
+    async def test_cumulative_history_requires_exact_late_generation_before_next_turn(self):
+        # The first send lost its acknowledgement and was not initially proven.
+        first = await self._create_uncertain()
+        self.assertEqual(self.record(first)["state"], "UNCERTAIN")
+        self.client.post_response = None
+        actual_request = self.client.request
+        mode = "working"
+        snapshots = []
+        generations = ("gen-first", "gen-late", "gen-fresh")
+        answers = ("first answer", "late answer", "fresh answer")
+
+        def cumulative_detail(origin, route, *, headers=None, body=b""):
+            if route.name != "detail":
+                return actual_request(origin, route, headers=headers, body=body)
+            posts = [json.loads(post["body"]) for post in self.client.posts]
+            rows = []
+            for index, post in enumerate(posts):
+                generation = generations[index]
+                user = flow.user_row(
+                    post["id"], generation=generation, text=post["args"]["text"],
+                    id=f"input-{index}",
+                )
+                answer_generation = generation
+                if index == 1:
+                    if mode == "working":
+                        user["inputStatus"].update(
+                            phase="working", basis="generation_started"
+                        )
+                        user["inputStatus"].pop("endedAt")
+                    elif mode == "wrong_text":
+                        user["text"] = "different input"
+                    elif mode == "ambiguous_generation":
+                        user["generationId"] = "gen-conflicting"
+                    elif mode == "wrong_reply_generation":
+                        answer_generation = "gen-other"
+                rows.append(user)
+                if index == 1 and mode == "decoy":
+                    rows.append(flow.user_row(
+                        "other-input", generation="gen-decoy", id="decoy",
+                        nativeInputId=post["id"],
+                    ))
+                rows.append(flow.assistant_row(
+                    answer_generation, answers[index], id=f"answer-{index}"
+                ))
+            if len(posts) == 3:
+                rows.append(flow.assistant_row(
+                    "gen-unrelated", "newer decoy answer", id="answer-decoy"
+                ))
+            snapshots.append(rows)
+            return af.json_response(flow.page(rows))
+
+        self.client.request = cumulative_detail
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertEqual(self.record(first)["reason"], "observed_in_conversation")
+        self.assertEqual([row["inputId"] for row in snapshots[0] if row["role"] == "user"],
+                         [first])
+        self.assertEqual((self.dials, len(self.client.posts)), (2, 1))
+        device.feed({"type": "pet.converse.begin"})
+        await self.quiesce()
+        provider = self.providers[-1]
+
+        async def request(index):
+            provider.push(delta(f"e{index}", f"request {index}", index * 1000, index * 1000 + 500))
+            provider.push(delegation(f"d{index}"))
+            await self.quiesce()
+            await self.clock.advance(1.5)
+
+        async def render_notice():
+            provider.push_audio(gf.AUDIO_CANARY)
+            await self.quiesce()
+            for _ in range(16):
+                provider.push_audio(bytes(4800))
+                await self.quiesce()
+                await self.clock.advance(0.1)
+
+        await request(2)
+        late = self.client.last_command
+        self.assertNotEqual(first, late)
+        self.assertEqual(self.record(first)["state"], "SUPPRESSED")
+        self.assertEqual(self.record(late)["state"], "ACCEPTED")
+        await self.clock.advance(180)
+        self.assertEqual(device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
+        await render_notice()
+
+        # A completed older generation, wrong text, wrong answer generation,
+        # ambiguous generation and native-input decoy do not settle the late input.
+        for index, mode in enumerate(
+            ("working", "wrong_text", "wrong_reply_generation", "ambiguous_generation", "decoy"), 3
+        ):
+            with self.subTest(mode=mode):
+                reads = len(snapshots)
+                notice_count = len(device.of_type("pet.converse.notice"))
+                await request(index)
+                self.assertGreater(len(snapshots), reads)
+                rows = snapshots[-1]
+                self.assertEqual(rows[0]["inputId"], first)
+                self.assertEqual(rows[1]["generationId"], generations[0])
+                self.assertEqual(rows[2]["inputId"], late)
+                self.assertEqual(rows[2]["inputStatus"]["generationId"], generations[1])
+                if mode == "wrong_text":
+                    self.assertEqual(rows[2]["text"], "different input")
+                elif mode == "wrong_reply_generation":
+                    self.assertEqual(rows[3]["generationId"], "gen-other")
+                elif mode == "ambiguous_generation":
+                    self.assertEqual(rows[2]["generationId"], "gen-conflicting")
+                elif mode == "decoy":
+                    self.assertEqual(rows[3]["nativeInputId"], late)
+                self.assertEqual(len(self.client.posts), 2)
+                self.assertEqual(self.record(late)["state"], "ACCEPTED")
+                self.assertFalse(self.record(late).get("reply_consumed", False))
+                self.assertEqual(len(device.of_type("pet.converse.notice")), notice_count + 1)
+                self.assertEqual(device.of_type("pet.converse.notice")[-1]["code"], "busy")
+                await render_notice()
+                self.assertEqual(device.of_type("pet.converse.state")[-1]["state"], "listening")
+
+        mode = "complete"
+        await request(8)
+        posts = [json.loads(post["body"]) for post in self.client.posts]
+        self.assertEqual([post["args"]["text"] for post in posts],
+                         ["hello world", "request 2", "request 8"])
+        self.assertEqual(len({post["id"] for post in posts}), 3)
+        self.assertEqual(self.record(late)["reply_outcome"], "late_reply_not_spoken")
+        self.assertEqual(self.dials, 2)
+        await self.clock.advance(1)
+        rows = snapshots[-1]
+        self.assertEqual([row["inputId"] for row in rows if row["role"] == "user"],
+                         [post["id"] for post in posts])
+        self.assertEqual([row["generationId"] for row in rows if row["role"] == "assistant"],
+                         [*generations, "gen-unrelated"])
+        self.assertEqual([row["text"] for row in rows if row["role"] == "assistant"],
+                         [*answers, "newer decoy answer"])
+        commentary = [frame["content"] for frame in provider.of_type("session.commentary.append")]
+        for forbidden in (answers[0], answers[1], "newer decoy answer"):
+            self.assertFalse(any(forbidden in frame for frame in commentary))
+        self.assertEqual(commentary.count(answers[2]), 1)
+        prior_audio = len(device.of_type("session.output_audio.delta"))
+        await render_notice()
+        self.assertGreater(len(device.of_type("session.output_audio.delta")), prior_audio)
+        self.assertEqual(device.of_type("pet.converse.state")[-1]["state"], "listening")
+        self.assertEqual(self.record(posts[2]["id"])["state"], "COMPLETE")
+        self.assertEqual((self.dials, len(self.client.posts)), (2, 3))
+        device.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.gw.last_outcome.conversation.replies_rendered, 1)
+        commentary = [frame["content"] for frame in provider.of_type("session.commentary.append")]
+        self.assertEqual(commentary, ["No reply is available yet."] +
+                         ["That conversation is busy."] * 5 + [answers[2]])
+
     async def test_late_reply_proof_disconnect_retains_custody_until_read_finishes(self):
         self.client.echo_sent_text = True
         self.client.reply_pending = True
