@@ -423,14 +423,15 @@ do not publish or share them without reviewing and redacting them.
 
 These checks do not start a paid call, access the device or prove a fresh setup.
 From the repository root, with the gateway Python environment described in the
-[service instructions](../bridge/deploy/README.md):
+[service instructions](../bridge/deploy/README.md), set `PET_PYTHON` to that
+environment's Python executable as in the pairing steps above:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s bridge/tests -t bridge -q
+PYTHONDONTWRITEBYTECODE=1 "$PET_PYTHON" -B -m unittest discover -s bridge/tests -t bridge -q
 node apps/unified-pet/tests/setup_page_test.mjs
 node apps/unified-pet/tests/setup_bridge_page_test.mjs
 node apps/unified-pet/tests/setup_unified_page_test.mjs
-PYTHONDONTWRITEBYTECODE=1 python3 -B apps/unified-pet/tests/ui_contract_test.py
+PYTHONDONTWRITEBYTECODE=1 "$PET_PYTHON" -B apps/unified-pet/tests/ui_contract_test.py
 ```
 
 The full bridge suite and these app setup/UI checks passed on the maintainer's

@@ -2,7 +2,7 @@
 
 ## Source: quotations from initial workspace chat 2026-11-09
 
-User source session: `5d83ab07-c4fb-4d06-9df1-881014048096`.
+User source session: initial workspace chat (identifier redacted).
 These are task-relevant user excerpts supplied from that conversation, not
 assistant conclusions. Spelling and quoted wording are retained as supplied,
 except that a server hostname is explicitly redacted for privacy.
@@ -64,7 +64,7 @@ create a private repo in colombod call it amplifier-unified-pocket-pet, we will 
 
 ### 10. Whole-Unified manager scope clarification
 
-Date: 2026-11-09. Source session: `5d83ab07-c4fb-4d06-9df1-881014048096`.
+Date: 2026-11-09. Source session: initial workspace chat (identifier redacted).
 Latest user message supplied from that conversation; no message ID asserted.
 
 ```text
@@ -207,7 +207,7 @@ remains useful, but installed-host integration and voice concurrency are unprove
 
 ## Connection and session-list clarification — 2026-11-10
 
-Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+Original user wording supplied from the initial workspace chat (identifier redacted)
 on 2026-11-10 (including the literal leading backslashes):
 
 ```text
@@ -230,7 +230,7 @@ across workspaces, new work and attention with a separate chatbot.
 
 ## LAN-first clarification — 2026-11-10
 
-Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+Original user wording supplied from the initial workspace chat (identifier redacted)
 on 2026-11-10:
 
 ```text
@@ -253,7 +253,7 @@ their UI location is still unselected.
 
 ## Existing phone setup and Tailscale sequencing question — 2026-11-10
 
-Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+Original user wording supplied from the initial workspace chat (identifier redacted)
 on 2026-11-10:
 
 ```text
@@ -290,7 +290,7 @@ this is not a new fixed day/attempt limit or a claim of device connectivity.
 
 ## Reuse existing key setup approach — 2026-11-10
 
-Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+Original user wording supplied from the initial workspace chat (identifier redacted)
 on 2026-11-10, in chronological order:
 
 ```text

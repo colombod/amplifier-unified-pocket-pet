@@ -269,7 +269,7 @@ Root must retain recovery settings privately, settle affected host work and
 perform the supported restart outside active execution; no restart was requested.
 Changing files alone would not prove adoption by the running process.
 
-**Next technical owner:** root session `5d83ab07-c4fb-4d06-9df1-881014048096`.
+**Next technical owner:** original root session (identifier redacted).
 Resolve the certificate/trust choice and safe restart boundary, then qualify the
 new LAN socket, served IP identity, supported HTTP response and actual device
 reachability before owner-approved pairing. Earlier tool-path failures remain

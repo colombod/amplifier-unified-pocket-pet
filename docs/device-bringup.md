@@ -7,7 +7,7 @@ No private flash dump, credentials, raw serial capture or recorded speech is inc
 
 ## Environment and artwork
 
-The user authorized `/Users/colombod/workspaces/esp32-pet` and Docker-isolated
+The user authorized a local workspace (path redacted) and Docker-isolated
 tooling. ESP-IDF 5.5.4 runs in the official Linux ARM64 image pinned to
 `sha256:f3bc9daebfd8cb4e0afbdced7caac4431c7a862326a5e5587d65c31439549bb5`.
 CMake, Ninja, Xtensa compiler and managed dependencies stay in Docker. Pillow
