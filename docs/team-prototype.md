@@ -534,10 +534,13 @@ If the outcome is unknown, inspect the conversation and preserve the journal
 rather than repeating an action. A response arriving after the wait limit may
 not be spoken.
 
-In the current reconnect source, a connection failure without an HTTP status can
-receive bounded retries even when its cause is a certificate or TLS error.
-Retries do not disable certificate verification, but cannot yet distinguish
-every permanent security or configuration failure from a temporary outage.
+In the current reconnect source, a confirmed certificate-verification failure
+or an evidenced but inconclusive TLS failure prevents automatic replacement.
+Ordinary connection loss remains eligible for bounded retry. If a failed
+connection supplies no error evidence at all, it can still retry; this does
+not establish that every permanent security or configuration failure can be
+distinguished. Retries do not disable certificate verification. These checks
+are offline evidence, not proof of TLS behavior on the installed device.
 
 The draft gateway source checks for unresolved sends before opening a new paid
 provider connection. When eligible, it may read up to four pages of the bound
