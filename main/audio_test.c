@@ -3,6 +3,7 @@
  * This adapter owns its codec/I2S resources; the shared BSP I2C bus stays alive.
  */
 #include "audio_test.h"
+#include "tailnet_spike.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -18,11 +19,12 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #define RATE 24000
 #define CHUNK 480
-static QueueHandle_t jobs;
+static TaskHandle_t worker_task;
+static bool worker_finished;
+static bool pending_mic;
 static SemaphoreHandle_t lock;
 static audio_test_status_t status;
 static nvs_handle_t volume_store;
@@ -178,23 +180,42 @@ cleanup:
  free(clip);return result;
 }
 static void worker(void *arg) {
- for(;;) {
-  bool mic;if(xQueueReceive(jobs,&mic,portMAX_DELAY)!=pdTRUE)continue;
-  audio_session_t a={0};update(true,"Preparing audio...");
-  esp_err_t err=open_audio(&a,mic);
-  if(err==ESP_OK){update(true,mic?"Listening for 3 seconds...":"Playing a short tone...");err=mic?microphone(&a):tone(&a);}
-  if(err==ESP_OK)vTaskDelay(pdMS_TO_TICKS(120)); /* Drain queued speaker DMA before muting. */
-  close_audio(&a);
-  if(err==ESP_OK)update(false,mic?"Did you hear your voice clearly?":"Did you hear the tone?");
-  else {char text[112];snprintf(text,sizeof(text),"Audio test failed: %s",esp_err_to_name(err));update(false,text);}
-  ESP_LOGI("audio_test","%s test result=%s",mic?"microphone":"speaker",esp_err_to_name(err));
- }
+ (void)arg;
+ xSemaphoreTake(lock,portMAX_DELAY);bool mic=pending_mic;xSemaphoreGive(lock);
+ audio_session_t a={0};update(true,"Preparing audio...");
+ esp_err_t err=open_audio(&a,mic);
+ if(err==ESP_OK){update(true,mic?"Listening for 3 seconds...":"Playing a short tone...");err=mic?microphone(&a):tone(&a);}
+ if(err==ESP_OK)vTaskDelay(pdMS_TO_TICKS(120)); /* Drain queued speaker DMA before muting. */
+ close_audio(&a);
+ if(err==ESP_OK)update(true,mic?"Did you hear your voice clearly?":"Did you hear the tone?");
+ else {char text[112];snprintf(text,sizeof(text),"Audio test failed: %s",esp_err_to_name(err));update(true,text);}
+ ESP_LOGI("audio_test","%s test result=%s",mic?"microphone":"speaker",esp_err_to_name(err));
+ xSemaphoreTake(lock,portMAX_DELAY);worker_finished=true;xSemaphoreGive(lock);
+ for(;;)vTaskSuspend(NULL);
 }
-void audio_test_request(bool mic) {
+void audio_test_reap_finished(void) {
+ if(!lock)return;
  xSemaphoreTake(lock,portMAX_DELAY);
- if(!status.busy){status.busy=true;strlcpy(status.message,"Preparing audio...",sizeof(status.message));if(xQueueSend(jobs,&mic,0)!=pdTRUE){status.busy=false;strlcpy(status.message,"Audio is busy. Try again.",sizeof(status.message));}}
+ if(worker_finished&&worker_task&&eTaskGetState(worker_task)==eSuspended) {
+  vTaskDelete(worker_task);
+  worker_task=NULL;worker_finished=false;status.busy=false;
+  tailnet_spike_audio_release();
+ }
  xSemaphoreGive(lock);
 }
-void audio_tests_init(void) {lock=xSemaphoreCreateMutex();jobs=xQueueCreate(1,sizeof(bool));assert(lock&&jobs);uint8_t initial=60;volume_store_ready=nvs_open("pet_audio",NVS_READWRITE,&volume_store)==ESP_OK;
+void audio_test_request(bool mic) {
+ if(!tailnet_spike_audio_acquire())return;
+ xSemaphoreTake(lock,portMAX_DELAY);
+ if(worker_task||status.busy){tailnet_spike_audio_release();xSemaphoreGive(lock);return;}
+ pending_mic=mic;worker_finished=false;status.busy=true;
+ strlcpy(status.message,"Preparing audio...",sizeof(status.message));
+ if(xTaskCreate(worker,"audio_test",6144,NULL,4,&worker_task)!=pdPASS) {
+  worker_task=NULL;worker_finished=false;status.busy=false;
+  strlcpy(status.message,"Cannot start audio worker.",sizeof(status.message));
+  tailnet_spike_audio_release();
+ }
+ xSemaphoreGive(lock);
+}
+void audio_tests_init(void) {lock=xSemaphoreCreateMutex();assert(lock);uint8_t initial=60;volume_store_ready=nvs_open("pet_audio",NVS_READWRITE,&volume_store)==ESP_OK;
  if(volume_store_ready){uint8_t saved;if(nvs_get_u8(volume_store,"volume",&saved)==ESP_OK && saved<=100)initial=saved;}
- audio_test_set_volume(initial);update(false,"Start with the speaker test.");assert(xTaskCreate(worker,"audio_test",6144,NULL,4,NULL)==pdPASS);}
+ audio_test_set_volume(initial);update(false,"Start with the speaker test.");}

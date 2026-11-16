@@ -1,0 +1,18 @@
+[Unit]
+Description=Pocket voice gateway for Amplifier Unified
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@BRIDGE_DIR@
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@PYTHON@ -B -m pet_bridge serve --config "@CONFIG@" --event-log "@EVENT_LOG@"
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+# Allow session close and the bounded host HTTP operation to settle before SIGKILL.
+TimeoutStopSec=240s
+
+[Install]
+WantedBy=default.target

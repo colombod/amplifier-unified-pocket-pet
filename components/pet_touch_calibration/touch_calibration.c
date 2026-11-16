@@ -3,6 +3,9 @@
 #include <string.h>
 #include "nvs.h"
 #include "esp_log.h"
+#ifndef PET_TOUCH_STORE_NAMESPACE
+#define PET_TOUCH_STORE_NAMESPACE "pet_touch"
+#endif
 static lv_indev_read_cb_t original_read;
 static lv_indev_t *touch_input;
 static lv_indev_mode_t original_mode;
@@ -64,9 +67,14 @@ void touch_calibration_begin(void) {
 }
 void touch_calibration_init(lv_indev_t *input,lv_obj_t *screen) {
  touch_input=input;original_mode=lv_indev_get_mode(input);
- store_ready=nvs_open("pet_touch",NVS_READWRITE,&store)==ESP_OK;
+ store_ready=nvs_open(PET_TOUCH_STORE_NAMESPACE,NVS_READWRITE,&store)==ESP_OK;
  stored_map_t saved;size_t length=sizeof(saved);
- if(store_ready && nvs_get_blob(store,"map",&saved,&length)==ESP_OK && length==sizeof(saved) && saved.version==1) {
+ esp_err_t loaded=store_ready?nvs_get_blob(store,"map",&saved,&length):ESP_FAIL;
+ if(loaded==ESP_ERR_NVS_NOT_FOUND && strcmp(PET_TOUCH_STORE_NAMESPACE,"pet_touch")) {
+  nvs_handle_t legacy;loaded=nvs_open("pet_touch",NVS_READONLY,&legacy);
+  if(loaded==ESP_OK){length=sizeof(saved);loaded=nvs_get_blob(legacy,"map",&saved,&length);nvs_close(legacy);}
+ }
+ if(loaded==ESP_OK && length==sizeof(saved) && saved.version==1) {
   touch_point_t test=touch_map_apply(&saved.map,(touch_point_t){184,224});
   if(isfinite(test.x)&&isfinite(test.y)&&fabsf(test.x)<1000&&fabsf(test.y)<1000){current=saved.map;mapped=true;}
  }

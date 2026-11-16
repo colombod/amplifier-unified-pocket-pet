@@ -1,4 +1,5 @@
 #include "live_voice.h"
+#include "tailnet_spike.h"
 #include "live_protocol.h"
 #include "assistant_config.h"
 #include "audio_test.h"
@@ -22,7 +23,6 @@
 #include "mbedtls/platform_util.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/event_groups.h"
@@ -38,7 +38,8 @@
 #define PLAYBACK_START_BYTES (48000*PLAYBACK_START_MS/1000)
 static const char *TAG="pet_live";
 static SemaphoreHandle_t status_lock;
-static QueueHandle_t jobs;
+static TaskHandle_t worker_task;
+static bool worker_finished;
 static live_status_t status;
 static atomic_bool stop_requested;
 typedef struct {
@@ -305,19 +306,38 @@ cleanup:
  free(c);
 }
 static void worker(void *arg) {
- for(;;){bool job;if(xQueueReceive(jobs,&job,portMAX_DELAY)!=pdTRUE)continue;run_session();
-  xSemaphoreTake(status_lock,portMAX_DELAY);status.active=false;xSemaphoreGive(status_lock);}
+ (void)arg;
+ xSemaphoreTake(status_lock,portMAX_DELAY);xSemaphoreGive(status_lock);
+ run_session();
+ xSemaphoreTake(status_lock,portMAX_DELAY);worker_finished=true;xSemaphoreGive(status_lock);
+ for(;;)vTaskSuspend(NULL);
+}
+void live_voice_reap_finished(void) {
+ if(!status_lock)return;
+ xSemaphoreTake(status_lock,portMAX_DELAY);
+ if(worker_finished&&worker_task&&eTaskGetState(worker_task)==eSuspended) {
+  vTaskDelete(worker_task);
+  worker_task=NULL;worker_finished=false;status.active=false;
+  tailnet_spike_audio_release();
+ }
+ xSemaphoreGive(status_lock);
 }
 void live_voice_start(void) {
+ if(!tailnet_spike_audio_acquire())return;
  audio_test_status_t audio;audio_test_snapshot(&audio);
  xSemaphoreTake(status_lock,portMAX_DELAY);
- if(!status.active && !audio.busy){status.active=true;status.seconds=0;status.state=LIVE_CONNECTING;strlcpy(status.message,"Preparing voice...",sizeof(status.message));atomic_store(&stop_requested,false);bool job=true;
-  if(xQueueSend(jobs,&job,0)!=pdTRUE){status.active=false;status.state=LIVE_ERROR;strlcpy(status.message,"Voice worker is busy.",sizeof(status.message));}}
+ if(worker_task||status.active||audio.busy){tailnet_spike_audio_release();xSemaphoreGive(status_lock);return;}
+ worker_finished=false;status.active=true;status.seconds=0;status.state=LIVE_CONNECTING;
+ strlcpy(status.message,"Preparing voice...",sizeof(status.message));atomic_store(&stop_requested,false);
+ if(xTaskCreate(worker,"pet_live",12288,NULL,4,&worker_task)!=pdPASS) {
+  worker_task=NULL;worker_finished=false;status.active=false;status.state=LIVE_ERROR;
+  strlcpy(status.message,"Cannot start voice worker.",sizeof(status.message));
+  tailnet_spike_audio_release();
+ }
  xSemaphoreGive(status_lock);
 }
 void live_voice_stop(void) {atomic_store(&stop_requested,true);}
 void live_voice_init(void) {
- status_lock=xSemaphoreCreateMutex();jobs=xQueueCreate(1,sizeof(bool));assert(status_lock&&jobs);
+ status_lock=xSemaphoreCreateMutex();assert(status_lock);
  set_state(LIVE_OFF,"Tap Talk to start voice.");
- assert(xTaskCreate(worker,"pet_live",12288,NULL,4,NULL)==pdPASS);
 }

@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -24,9 +25,15 @@
 #include "setup_address.h"
 #include "network_retry.h"
 #include "esp_timer.h"
+#include "setup_tailscale.h"
 
 #define IP_READY BIT0
 #define LINK_LOST BIT1
+#define SETUP_PAUSED BIT2
+#define SETUP_RESTORED BIT3
+#define SETUP_FAILED BIT4
+static atomic_bool dns_pause,dns_stopped;
+static bool restore_ap;
 static network_status_t state;
 static SemaphoreHandle_t state_lock;
 static EventGroupHandle_t events;
@@ -65,6 +72,31 @@ static void wifi_event(void *ctx, esp_event_base_t base, int32_t id, void *data)
         xEventGroupClearBits(events,IP_READY); xEventGroupSetBits(events,LINK_LOST);
     }
 }
+esp_err_t network_copy_tailscale_auth_key(char *out,size_t capacity) {
+    return setup_tailscale_copy(storage,out,capacity);
+}
+esp_err_t network_copy_unified_target(setup_unified_target_t *out) {
+    return setup_unified_copy(storage,out);
+}
+esp_err_t network_pause_setup(uint32_t timeout_ms) {
+    xSemaphoreTake(state_lock,portMAX_DELAY);
+    bool ok=!state.setup_paused&&!state.joining&&!uxQueueMessagesWaiting(commands);
+    if(ok)state.setup_paused=true;
+    xSemaphoreGive(state_lock);
+    if(!ok)return ESP_ERR_INVALID_STATE;
+    xEventGroupClearBits(events,SETUP_PAUSED|SETUP_RESTORED|SETUP_FAILED);
+    command_t cmd={.kind=3};
+    if(xQueueSend(commands,&cmd,0)!=pdTRUE)return ESP_FAIL;
+    EventBits_t b=xEventGroupWaitBits(events,SETUP_PAUSED|SETUP_FAILED,pdFALSE,pdFALSE,pdMS_TO_TICKS(timeout_ms));
+    return b&SETUP_PAUSED?ESP_OK:b&SETUP_FAILED?ESP_FAIL:ESP_ERR_TIMEOUT;
+}
+esp_err_t network_resume_setup(uint32_t timeout_ms) {
+    xEventGroupClearBits(events,SETUP_RESTORED|SETUP_FAILED);
+    command_t cmd={.kind=4};
+    if(xQueueSend(commands,&cmd,0)!=pdTRUE)return ESP_FAIL;
+    EventBits_t b=xEventGroupWaitBits(events,SETUP_RESTORED|SETUP_FAILED,pdFALSE,pdFALSE,pdMS_TO_TICKS(timeout_ms));
+    return b&SETUP_RESTORED?ESP_OK:b&SETUP_FAILED?ESP_FAIL:ESP_ERR_TIMEOUT;
+}
 /* Setup endpoints are reachable only through the device's temporary AP. */
 static bool ap_request(httpd_req_t *req) {
     struct sockaddr_storage local={0}; socklen_t size=sizeof(local);
@@ -80,6 +112,10 @@ static bool ap_request(httpd_req_t *req) {
 }
 static bool mutation_allowed(httpd_req_t *req) {
     if(!ap_request(req)) return false;
+    network_status_t s;network_snapshot(&s);
+    if(s.setup_paused) {
+        httpd_resp_send_err(req,HTTPD_403_FORBIDDEN,"Setup paused for local test");return false;
+    }
     char supplied[40]={0};
     if(httpd_req_get_hdr_value_str(req,"X-Setup-Token",supplied,sizeof(supplied))!=ESP_OK || strcmp(supplied,token)) {
         httpd_resp_send_err(req,HTTPD_403_FORBIDDEN,"Reload the setup page"); return false;
@@ -123,12 +159,20 @@ static esp_err_t status_get(httpd_req_t *req) {
     cJSON_AddBoolToObject(o,"connected",s.connected);
     cJSON_AddBoolToObject(o,"joining",s.joining);
     cJSON_AddBoolToObject(o,"key_saved",s.key_saved);
+    cJSON_AddBoolToObject(o,"tailscale_key_saved",s.tailscale_key_saved);
     cJSON_AddBoolToObject(o,"settings_saved",s.settings_saved);
     cJSON_AddNumberToObject(o,"configure_generation",s.configure_generation);
     cJSON_AddNumberToObject(o,"rssi",s.rssi);
     cJSON_AddStringToObject(o,"ssid",s.ssid);
     cJSON_AddStringToObject(o,"message",s.message);
     cJSON_AddStringToObject(o,"token",token);
+    setup_unified_target_t target;
+    esp_err_t target_err=network_copy_unified_target(&target);
+    if(target_err==ESP_OK||target_err==ESP_ERR_NVS_NOT_FOUND) {
+        cJSON_AddStringToObject(o,"unified_host",target.host);
+        cJSON_AddNumberToObject(o,"unified_port",target.port);
+    }
+    cJSON_AddBoolToObject(o,"unified_target_valid",target_err==ESP_OK);
     return json_reply(req,o);
 }
 static esp_err_t scan_get(httpd_req_t *req) {
@@ -166,7 +210,38 @@ static esp_err_t configure(httpd_req_t *req) {
         int n=httpd_req_recv(req,body+have,req->content_len-have);
         if(n<=0) { free(body); return ESP_FAIL; } have+=n;
     }
-    cJSON *json=cJSON_ParseWithLength(body,have); memset(body,0,have); free(body);
+    cJSON *json=setup_parse_json(body,have); memset(body,0,have); free(body);
+    if(!json)return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Invalid setup JSON");
+    cJSON *action=cJSON_GetObjectItemCaseSensitive(json,"action");
+    unsigned actions=0;
+    for(cJSON *i=json->child;i;i=i->next)if(i->string&&!strcmp(i->string,"action"))actions++;
+    if(actions>1){cJSON_Delete(json);return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Duplicate setup action");}
+    if(action) {
+        if(cJSON_IsString(action)&&!strcmp(action->valuestring,"unified_target")) {
+            esp_err_t e=setup_unified_save(storage,json);cJSON_Delete(json);
+            if(e!=ESP_OK)return httpd_resp_send_err(req,e==ESP_ERR_INVALID_ARG?HTTPD_400_BAD_REQUEST:HTTPD_500_INTERNAL_SERVER_ERROR,"Unified target save not confirmed");
+            cJSON *reply=cJSON_CreateObject();cJSON_AddBoolToObject(reply,"unified_target_saved",true);
+            return json_reply(req,reply);
+        }
+        if(!cJSON_IsString(action) || strcmp(action->valuestring,"tailscale_key")) {
+            cJSON_Delete(json);
+            return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Unknown setup action");
+        }
+        /* Synchronous key-only persistence: no station/OpenAI prerequisites,
+         * queue command, reconnect, or inference from a previous Wi-Fi save. */
+        network_status_t current;network_snapshot(&current);
+        bool saved=current.tailscale_key_saved;
+        esp_err_t err=setup_tailscale_save(storage,json,&saved);
+        cJSON_Delete(json);
+        if(err==ESP_ERR_INVALID_ARG)
+            return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Tailscale auth key must be a string of at most 255 bytes");
+        if(err!=ESP_OK)
+            return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Tailscale key save not confirmed. Keep setup open and retry.");
+        xSemaphoreTake(state_lock,portMAX_DELAY);state.tailscale_key_saved=saved;xSemaphoreGive(state_lock);
+        cJSON *reply=cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply,"tailscale_key_saved",saved);
+        return json_reply(req,reply);
+    }
     cJSON *ssid=cJSON_GetObjectItemCaseSensitive(json,"ssid"), *pass=cJSON_GetObjectItemCaseSensitive(json,"password"), *key=cJSON_GetObjectItemCaseSensitive(json,"key");
     network_status_t saved; network_snapshot(&saved);
     bool valid=cJSON_IsString(ssid)&&cJSON_IsString(pass)&&cJSON_IsString(key);
@@ -197,27 +272,36 @@ static esp_err_t finish(httpd_req_t *req) {
     if(xQueueSend(commands,&cmd,0)!=pdTRUE) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Try again");
     return httpd_resp_sendstr(req,"{}");
 }
-static void start_server(void) {
+static esp_err_t start_server(void) {
     httpd_config_t cfg=HTTPD_DEFAULT_CONFIG(); cfg.uri_match_fn=httpd_uri_match_wildcard;
     cfg.stack_size=8192; cfg.max_uri_handlers=6; cfg.lru_purge_enable=true;
     cfg.max_open_sockets=4;cfg.recv_wait_timeout=4;cfg.send_wait_timeout=4;
-    ESP_ERROR_CHECK(httpd_start(&server,&cfg));
+    esp_err_t err=httpd_start(&server,&cfg);if(err!=ESP_OK)return err;
     httpd_uri_t routes[]={
         {.uri="/status",.method=HTTP_GET,.handler=status_get},
         {.uri="/networks",.method=HTTP_GET,.handler=scan_get},
         {.uri="/configure",.method=HTTP_POST,.handler=configure},
         {.uri="/finish",.method=HTTP_POST,.handler=finish},
         {.uri="/*",.method=HTTP_GET,.handler=page}};
-    for(size_t i=0;i<sizeof(routes)/sizeof(routes[0]);i++) ESP_ERROR_CHECK(httpd_register_uri_handler(server,&routes[i]));
+    for(size_t i=0;i<sizeof(routes)/sizeof(routes[0]);i++) {
+        err=httpd_register_uri_handler(server,&routes[i]);
+        if(err!=ESP_OK){httpd_stop(server);server=NULL;return err;}
+    }
+    return ESP_OK;
 }
 /* Small captive DNS responder; answer IPv4 questions, retain the original question. */
 static void dns_task(void *arg) {
+  for(;;) {
+    while(atomic_load(&dns_pause)){atomic_store(&dns_stopped,true);vTaskDelay(pdMS_TO_TICKS(50));}
+    atomic_store(&dns_stopped,false);
     int fd=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
     if(fd<0) { vTaskDelete(NULL); return; }
     struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons(53),.sin_addr.s_addr=inet_addr("192.168.4.1")};
     if(bind(fd,(struct sockaddr*)&addr,sizeof(addr))!=0) { close(fd); vTaskDelete(NULL); return; }
+    struct timeval timeout={.tv_sec=0,.tv_usec=100000};
+    setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
     unsigned char b[512];
-    for(;;) {
+    while(!atomic_load(&dns_pause)) {
         struct sockaddr_in peer; socklen_t len=sizeof(peer); int n=recvfrom(fd,b,sizeof(b)-16,0,(struct sockaddr*)&peer,&len);
         if(n<12 || b[4]!=0 || b[5]!=1 || (b[2]&0x80)) continue;
         int end=12;
@@ -228,6 +312,8 @@ static void dns_task(void *arg) {
         if(ipv4) { const unsigned char answer[]={0xc0,0x0c,0,1,0,1,0,0,0,0,0,4,192,168,4,1};memcpy(b+n,answer,16);n+=16; }
         sendto(fd,b,n,0,(struct sockaddr*)&peer,len);
     }
+    close(fd);atomic_store(&dns_stopped,true);
+  }
 }
 static void open_ap(void) {
     wifi_mode_t mode;ESP_ERROR_CHECK(esp_wifi_get_mode(&mode));
@@ -282,7 +368,28 @@ static void worker(void *arg) {
     for(;;) {
         command_t cmd={0};
         if(xQueueReceive(commands,&cmd,pdMS_TO_TICKS(1000))==pdTRUE) {
-            if(cmd.kind==0) {xSemaphoreTake(state_lock,portMAX_DELAY);setup_activity_seen=true;setup_activity_at=now_ms();xSemaphoreGive(state_lock);open_ap();}
+            if(cmd.kind==3) {
+                network_status_t prior;network_snapshot(&prior);restore_ap=prior.setup;
+                esp_err_t e=server?httpd_stop(server):ESP_OK;
+                if(e==ESP_OK)server=NULL;
+                atomic_store(&dns_pause,true);
+                for(unsigned i=0;i<10&&!atomic_load(&dns_stopped);i++)vTaskDelay(pdMS_TO_TICKS(50));
+                if(!atomic_load(&dns_stopped))e=ESP_ERR_TIMEOUT;
+                if(e==ESP_OK)e=esp_wifi_set_mode(WIFI_MODE_STA);
+                if(e==ESP_OK){xSemaphoreTake(state_lock,portMAX_DELAY);state.setup=false;xSemaphoreGive(state_lock);}
+                xEventGroupSetBits(events,e==ESP_OK?SETUP_PAUSED:SETUP_FAILED);
+            }
+            else if(cmd.kind==4) {
+                esp_err_t e=start_server();
+                if(e==ESP_OK && restore_ap)e=esp_wifi_set_mode(WIFI_MODE_APSTA);
+                if(e==ESP_OK) {
+                    atomic_store(&dns_pause,false);
+                    xSemaphoreTake(state_lock,portMAX_DELAY);state.setup=restore_ap;state.setup_paused=false;xSemaphoreGive(state_lock);
+                }
+                xEventGroupSetBits(events,e==ESP_OK?SETUP_RESTORED:SETUP_FAILED);
+            }
+            else if(state.setup_paused) { /* queued UI commands remain fenced */ }
+            else if(cmd.kind==0) {xSemaphoreTake(state_lock,portMAX_DELAY);setup_activity_seen=true;setup_activity_at=now_ms();xSemaphoreGive(state_lock);open_ap();}
             else if(cmd.kind==1) {
                 /* Allow HTTP ACK/TCP delivery before AP+STA channel switching. */
                 vTaskDelay(pdMS_TO_TICKS(1000));
@@ -307,7 +414,7 @@ static void worker(void *arg) {
             network_retry_failed(&retry,now_ms());
         }
         if(s.connected)network_retry_reset(&retry);
-        else if(credentials_present) {
+        else if(credentials_present && !s.setup_paused) {
             if(!retry.scheduled)network_retry_failed(&retry,now_ms());
             xSemaphoreTake(state_lock,portMAX_DELAY);
             bool due=network_retry_due(&retry,now_ms(),state.connected,state.joining,uxQueueMessagesWaiting(commands)>0,setup_activity_seen,setup_activity_at);
@@ -326,13 +433,14 @@ static void worker(void *arg) {
         }
     }
 }
-void network_close_setup(void) {command_t cmd={.kind=2};xQueueSend(commands,&cmd,0);}
-void network_open_setup(void) {command_t cmd={.kind=0};xQueueSend(commands,&cmd,0);}
+void network_close_setup(void) {network_status_t s;network_snapshot(&s);if(s.setup_paused)return;command_t cmd={.kind=2};xQueueSend(commands,&cmd,0);}
+void network_open_setup(void) {network_status_t s;network_snapshot(&s);if(s.setup_paused)return;command_t cmd={.kind=0};xQueueSend(commands,&cmd,0);}
 void network_init(void) {
     state.rssi=-127;
     state_lock=xSemaphoreCreateMutex();events=xEventGroupCreate();commands=xQueueCreate(2,sizeof(command_t));
     assert(state_lock&&events&&commands);
     ESP_ERROR_CHECK(nvs_open("pet_setup",NVS_READWRITE,&storage));
+    state.tailscale_key_saved=setup_tailscale_saved(storage);
     size_t n=0; credentials_present=nvs_get_str(storage,"ssid",NULL,&n)==ESP_OK&&n>1;
     state.key_saved=nvs_get_str(storage,"api_key",NULL,&n)==ESP_OK;
     uint8_t mac[6];ESP_ERROR_CHECK(esp_read_mac(mac,ESP_MAC_WIFI_SOFTAP));
@@ -369,5 +477,5 @@ void network_init(void) {
     if(credentials_present && state.key_saved) ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     state.setup=!(credentials_present && state.key_saved);message(credentials_present?"Connecting to saved Wi-Fi...":"Let's connect Tachikoma");
-    start_server();xTaskCreate(dns_task,"setup_dns",3072,NULL,3,NULL);xTaskCreate(worker,"network",6144,NULL,4,NULL);
+    ESP_ERROR_CHECK(start_server());xTaskCreate(dns_task,"setup_dns",3072,NULL,3,NULL);xTaskCreate(worker,"network",6144,NULL,4,NULL);
 }

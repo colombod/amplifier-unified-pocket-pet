@@ -4,7 +4,8 @@
 
 User source session: `5d83ab07-c4fb-4d06-9df1-881014048096`.
 These are task-relevant user excerpts supplied from that conversation, not
-assistant conclusions. Spelling and quoted wording are retained as supplied.
+assistant conclusions. Spelling and quoted wording are retained as supplied,
+except that a server hostname is explicitly redacted for privacy.
 No message identifiers are asserted.
 
 ### 1. Objective
@@ -22,7 +23,7 @@ this is the device i will be using <https://docs.waveshare.com/ESP32-S3-Touch-LC
 ### 3. Server, voice and attention
 
 ```text
-so unified runs on the amplifier-srv-01 server, the service is there. i cann have hte device to conenct via wifi (but we need to investigate hte option of using a tail scale connection so it can be reached from outside world) then the device will use htescreen to be like a chatgpt pet and innteract with me only as voice gateway to the amplifeir unified, help me work with teh worksapces, runnign sessions and give attention toteh thigsn waiting on me
+so unified runs on the [server hostname redacted] server, the service is there. i cann have hte device to conenct via wifi (but we need to investigate hte option of using a tail scale connection so it can be reached from outside world) then the device will use htescreen to be like a chatgpt pet and innteract with me only as voice gateway to the amplifeir unified, help me work with teh worksapces, runnign sessions and give attention toteh thigsn waiting on me
 ```
 
 ### 4. Availability context
@@ -203,3 +204,116 @@ No persistent manager/direct-focus interaction is ratified by this handoff.
 No server or tailnet change, workspace creation, session takeover or waiting
 question answer was performed. The earlier source-document qualification
 remains useful, but installed-host integration and voice concurrency are unproven.
+
+## Connection and session-list clarification — 2026-11-10
+
+Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+on 2026-11-10 (including the literal leading backslashes):
+
+```text
+\\ok sounds good, remmer that then we would need a place to configure the conenction with the pet adn see the session list
+```
+
+**Interpretation (not original wording):** the user accepts the proposed next
+connection-and-exact-session proof spike and explicitly requires a place to
+configure the pet connection and see the session list. This does not ratify a
+final transport, UI location, global-manager design or the whole vision, nor
+authorize code changes or flashing.
+
+**Assistant proposals, not user-chosen implementation:** phone/browser pairing
+and connection settings (server, pairing, reconnect and status), plus a small
+paginated pet session picker. The user specified a place and a list, not these
+implementation choices. The next proof remains actual voice into one chosen
+existing persistent Unified conversation, preserving the working voice baseline;
+it does not replace the broader microphone/speaker/touch personal-manager goal
+across workspaces, new work and attention with a separate chatbot.
+
+## LAN-first clarification — 2026-11-10
+
+Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+on 2026-11-10:
+
+```text
+unified is on same lan as the pet, so  we have 2 way, step1 we cahn sue the ip directly and later step 2 use tailscale
+```
+
+```text
+then your ip is where whe server is
+```
+
+**Interpretation (not original wording):** qualify the running Unified server's
+actual LAN address for the first persistent-conversation integration spike;
+Tailscale is a later reachability step, not a prerequisite. The assistant must
+investigate that host rather than ask the user to invent or supply another URL.
+Using a numeric address does not waive HTTPS identity verification, change the
+owner-approval requirement, or authorize interruption of active chats. This
+diagnostic changed no server configuration, certificates, firewall or firmware.
+Connection configuration and the real-host session list remain requirements;
+their UI location is still unselected.
+
+## Existing phone setup and Tailscale sequencing question — 2026-11-10
+
+Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+on 2026-11-10:
+
+```text
+the place to configure the amplifeir usinfied address and port must be where the rest of the configuration si doen usign the phone for simplicity, andsince it is not a csecret is ok to load the curent calues when iopenign the setup apge omn teh pet device
+```
+
+**Requirement interpretation (not original wording):** reuse the pet's existing
+phone-served setup page alongside the other configuration for Unified address
+and port, not a separate settings app. Prefill these nonsecret fields from saved
+values when the page opens. This settles the connection-field location left open
+above; the accepted session-list/selection goal remains, but picker placement is
+not settled by this clarification. Unified fields are next-spike scope, not an
+implementation claim. Tokens and passwords must not be exposed.
+
+**Assistant engineering proposal, not an explicit user decision:** preserve
+pending user edits if an asynchronous saved-value prefill arrives.
+
+Original user wording from the same session and date:
+
+```text
+then i am wondering if is not better to test imemdaitely hte tailscale pat
+```
+
+**Interpretation (not original wording):** consider testing the Tailscale path
+now, potentially resequencing the earlier LAN-first decision retained above.
+This question does not ratify native embedded Tailscale architecture, choose a
+gateway or approve firmware flashing. The earlier LAN findings remain evidence;
+no LAN server mutation has started.
+
+**Assistant recommendation, pending implementation choice:** probe Tailscale
+early rather than reconfigure LAN first, because portability is a major risk.
+See the [handoff's diagnosis and latest next-spike scope](unified-handoff.md#latest-next-spike-scope--2026-11-10);
+this is not a new fixed day/attempt limit or a claim of device connectivity.
+
+## Reuse existing key setup approach — 2026-11-10
+
+Original user wording supplied from session `5d83ab07-c4fb-4d06-9df1-881014048096`
+on 2026-11-10, in chronological order:
+
+```text
+ok so. if first we get teh key secrest stored via hte phione setup interface, then that can be used for the tial scale test
+```
+
+```text
+teh code is already storying the onpeai api key
+```
+
+```text
+followsame appraoch
+```
+
+**Accepted interpretation (not original wording):** extend the already-existing
+OpenAI API-key phone-entry/NVS-storage approach for a Tailscale auth key; a future
+Tailscale connectivity test reads that saved key. This chooses reuse of the
+existing pattern for this increment, not a new security migration, deployment
+or enrollment approval. It does not waive every security check. Ordinary NVS
+storage is unencrypted; that known limit is not a new request to fix it.
+
+**Assistant working decision, not an additional user quotation:** saving the key
+does not automatically enroll or connect the device. The existing requirements
+for Unified address/port on the phone page, saved nonsecret-value prefill and
+session-list/selection remain; a key-only increment does not cancel them.
+This correction does not ratify the full vision or prove device connectivity.

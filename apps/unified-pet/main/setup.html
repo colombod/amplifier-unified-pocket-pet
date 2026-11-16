@@ -1,0 +1,134 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Meet Tachikoma</title>
+<style>:root{color-scheme:dark;font:17px system-ui;background:#0f172a;color:#f1f5f9}*{box-sizing:border-box}body{margin:0 auto;padding:28px 20px 60px;max-width:480px}h1{font-size:32px;letter-spacing:-1px;margin:12px 0}p{line-height:1.55;color:#bdcde4}.mark{font-size:38px}label{display:block;font-weight:650;margin:22px 0 8px}input,select,button{font:inherit;border-radius:14px;min-height:50px;padding:12px;width:100%;border:1px solid #475569;background:#18243c;color:inherit}button{background:#67d6ff;color:#081526;font-weight:750;border:0;margin-top:20px;cursor:pointer}button.secondary{background:transparent;color:#b8d9f2;border:1px solid #475569;margin-top:10px}button:disabled{opacity:.5}small{display:block;color:#b4c3da;line-height:1.5;margin-top:8px}.row{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:14px}.row input{width:20px;min-height:20px;margin:0}.row label{margin:0;font-weight:400}.notice{padding:14px;border:1px solid #435b77;border-radius:14px;margin-top:24px;white-space:pre-wrap}.hidden{display:none!important}a{color:#8fe1ff}#key{font-family:monospace}</style>
+<div class="mark" aria-hidden="true">✦</div><h1>Meet Tachikoma.</h1><p>A little companion. Let’s get it connected.</p><small id="firmware">Firmware __FIRMWARE_VERSION__</small>
+<form id="setup"><label for="network">1 · Choose your Wi-Fi</label><select id="network"><option value="">Looking for networks…</option></select><small>Use a 2.4 GHz home network. 5 GHz and enterprise sign-ins aren’t supported in this first build.</small><button class="secondary" id="rescan" type="button">Look again</button>
+<div id="manual-wrap" class="hidden"><label for="manual">Network name</label><input id="manual" maxlength="32" autocomplete="off" placeholder="Enter the exact Wi-Fi name"></div>
+<label for="password">Wi-Fi password</label><input id="password" type="password" maxlength="63" autocomplete="new-password"><div class="row"><input id="show" type="checkbox"><label for="show">Show Wi-Fi password</label></div>
+<label for="key">2 · OpenAI API key</label><input id="key" required type="password" maxlength="255" autocomplete="off" spellcheck="false" placeholder="sk-…"><small id="key-note">Required to set up your assistant. The key is stored on this device and is never shown back on this page. Start voice from the microphone button on Tachikoma.</small>
+<button id="connect" type="submit" disabled>Connect Tachikoma</button></form>
+<div id="notice" class="notice" role="status" aria-live="polite">Loading setup…</div><button id="done" class="hidden" type="button">Done · return to my Wi-Fi</button>
+<small>Keep this page open while connecting. If your phone says this setup network has no internet, choose to stay connected. If it closes during connection, rejoin the Tachikoma network and open <b>http://192.168.4.1</b>.</small>
+<form id="tailscale-setup"><label for="tailscale-key">Tailscale auth key · optional</label><input id="tailscale-key" type="password" maxlength="255" autocomplete="off" spellcheck="false"><small id="tailscale-note">Checking saved key status…</small><small>Leave blank to keep the stored key unchanged. Stored on this device like the OpenAI key; never shown back here. This only saves the key for a later Tailscale test. It does not connect or enroll the device. No Wi-Fi or OpenAI re-entry is needed.</small><button id="save-tailscale" type="submit" disabled>Save Tailscale key only</button></form>
+<div id="tailscale-notice" class="notice" role="status" aria-live="polite">Tailscale key saves are separate from Wi-Fi setup.</div>
+<form id="unified-setup"><label for="unified-host">Unified peer FQDN</label><input id="unified-host" maxlength="63" autocomplete="off" spellcheck="false" placeholder="Exact lowercase peer FQDN"><label for="unified-port">HTTPS port</label><input id="unified-port" type="number" min="1" max="65535" value="8941"><small>Nonsecret settings, shown from saved values. Blank host disables the test. Use the exact tailnet peer FQDN, not an IP address or URL. Saving never connects. The device must trust the server certificate; no TLS bypass is offered.</small><button id="save-unified" type="submit" disabled>Save Unified target only</button></form>
+<div id="unified-notice" class="notice" role="status" aria-live="polite">No connection starts from this page.</div>
+<form id="bridge-setup"><h2>Pocket Unified bridge</h2>
+<div class="row"><input id="bridge-enabled" type="checkbox"><label for="bridge-enabled">Use the host bridge (not the standalone chatbot)</label></div>
+<label for="bridge-ip">Gateway LAN IPv4</label><input id="bridge-ip" maxlength="15" autocomplete="off" placeholder="192.168.1.50">
+<label for="bridge-port">Gateway TLS port</label><input id="bridge-port" type="number" min="1" max="65535" value="9443">
+<label for="bridge-fqdn">Certificate FQDN</label><input id="bridge-fqdn" maxlength="63" autocomplete="off" spellcheck="false">
+<label for="bridge-token">Pet token</label><input id="bridge-token" type="password" maxlength="43" autocomplete="off" spellcheck="false">
+<small id="bridge-token-note">Never shown back. Leave blank to keep the saved pet token. Unified and provider credentials stay on the host.</small>
+<div class="row"><input id="bridge-clear-token" type="checkbox"><label for="bridge-clear-token">Clear the saved pet token (disable the bridge first)</label></div>
+<small>This saves configuration only. It does not connect, listen or send anything. The LAN address and verified certificate name are separate; no TLS bypass.</small>
+<button id="save-bridge" type="submit" disabled>Save bridge settings only</button></form>
+<div id="bridge-notice" class="notice" role="status" aria-live="polite">Bridge saves are separate from Wi-Fi and the historical Tailscale test.</div>
+<script>
+const $=id=>document.getElementById(id);let token='',joining=false,pending=false,finished=false,keySaved=false,uncertain=false,feedbackUntil=0,lastGeneration=0,attemptGeneration=0,awaitingSave=false,dirty=false;
+const notice=t=>$('notice').textContent=t;
+let tailscalePending=false,tailscaleDirty=false,tailscaleEdit=0;
+let unifiedPending=false,unifiedDirty=false,unifiedEdit=0,unifiedHostTouched=false,unifiedPortTouched=false;
+let bridgePending=false,bridgeDirty=false,bridgeEdit=0,bridgeTouched=new Set(),bridgeReady=false,bridgeTokenSaved=false;
+function bridgePrefill(s){
+ bridgeReady=s.bridge_valid===true&&s.bridge_enabled===true&&s.bridge_token_saved===true;
+ bridgeTokenSaved=s.bridge_token_saved===true;
+ const fields={'bridge-ip':s.bridge_ip,'bridge-port':s.bridge_port,'bridge-fqdn':s.bridge_fqdn};
+ for(const [id,value] of Object.entries(fields))if(!bridgeTouched.has(id)&&value!==undefined)$(id).value=value;
+ if(!bridgeTouched.has('bridge-enabled')&&typeof s.bridge_enabled==='boolean')$('bridge-enabled').checked=s.bridge_enabled;
+ $('save-bridge').disabled=bridgePending||!token;
+ $('key').required=!keySaved&&!bridgeReady;
+ if(bridgeReady)$('key-note').textContent='Host bridge configured. A provider key is not needed on the pet for bridge mode.';
+ if(bridgeDirty||bridgePending)$('done').classList.toggle('hidden',true);
+}
+function unifiedPrefill(s){
+ if(!unifiedHostTouched&&typeof s.unified_host==='string')$('unified-host').value=s.unified_host;
+ if(!unifiedPortTouched&&Number.isInteger(s.unified_port))$('unified-port').value=s.unified_port;
+ $('save-unified').disabled=unifiedPending||!token;
+ if(unifiedDirty||unifiedPending)$('done').classList.toggle('hidden',true);
+}
+const tailscaleNote=saved=>$('tailscale-note').textContent=saved?'Tailscale key saved on device.':'Tailscale key not configured.';
+async function request(path,options={}) {
+ const response=await fetch(path,{...options,cache:'no-store',signal:AbortSignal.timeout(15000)});
+ if(!response.ok) {
+  const text=await response.text();
+  const error=new Error(new DOMParser().parseFromString(text,'text/html').body.textContent.trim().slice(0,400)||('Device returned HTTP '+response.status));
+  error.server=true;throw error;
+ }
+ return response.json();
+}
+function selected(){return $('network').value==='__manual__'?$('manual').value:$('network').value;}
+function chosen(){const opt=$('network').selectedOptions[0];$('manual-wrap').classList.toggle('hidden',$('network').value!=='__manual__');$('password').disabled=opt?.dataset.open==='true';if($('password').disabled)$('password').value='';}
+async function scan(){if(joining||pending)return;$('rescan').disabled=true;try{const list=await request('/networks');$('network').replaceChildren();for(const n of list){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+(n.enterprise?' · enterprise':n.open?' · open':'');o.dataset.open=String(n.open);o.disabled=n.enterprise;$('network').append(o);}const o=document.createElement('option');o.value='__manual__';o.textContent='Other / hidden network…';$('network').append(o);chosen();}catch(e){notice('Could not scan. Tap Look again, or enter your network name.');$('network').replaceChildren(new Option('Other / hidden network…','__manual__'));chosen();}finally{$('rescan').disabled=false;}}
+async function poll(){if(finished)return;try{const s=await request('/status');token=s.token;lastGeneration=s.configure_generation??0;$('firmware').textContent='Firmware '+(s.firmware_version||'unknown');joining=s.joining;keySaved=s.key_saved;tailscaleNote(s.tailscale_key_saved);$('save-tailscale').disabled=tailscalePending||!token;$('key').required=!keySaved;uncertain=false;$('connect').disabled=joining||pending||!token;if(Date.now()>=feedbackUntil||s.joining)notice(s.message);$('done').classList.toggle('hidden',!s.connected||!s.settings_saved||s.joining||dirty||tailscaleDirty||tailscalePending);if(awaitingSave&&lastGeneration>attemptGeneration&&s.connected&&s.settings_saved&&!s.joining){awaitingSave=false;dirty=false;$('key').value='';$('password').value='';$('done').classList.toggle('hidden',tailscaleDirty||tailscalePending);}unifiedPrefill(s);bridgePrefill(s);if(s.key_saved&&!bridgeReady){$('key').placeholder='Leave blank to keep your saved key';$('key-note').textContent='OpenAI key saved. Changing Wi-Fi keeps it. Leave this field blank unless you want to replace the key.';}}catch(e){notice('Reconnecting to Tachikoma… Stay on its setup Wi-Fi. If needed, rejoin it and reopen http://192.168.4.1.');}finally{if(!finished)setTimeout(poll,2000);}}
+function edited(){awaitingSave=false;dirty=true;$('done').classList.toggle('hidden',true);}
+for(const id of ['password','key','manual'])$(id).oninput=edited;
+$('network').onchange=()=>{edited();chosen();};$('rescan').onclick=scan;$('show').onchange=()=>$('password').type=$('show').checked?'text':'password';
+$('setup').onsubmit=async event=>{event.preventDefault();if(pending||joining)return;const ssid=selected(),password=$('password').value,key=$('key').value.trim();if(!ssid||new TextEncoder().encode(ssid).length>32)return notice('Enter a network name of up to 32 bytes.');if(password&&(new TextEncoder().encode(password).length<8||new TextEncoder().encode(password).length>63))return notice('Wi-Fi passwords must be 8–63 bytes.');if(!key&&!keySaved&&!bridgeReady)return notice('Save bridge settings or enter an OpenAI key for standalone mode.');if(key&&(!key.startsWith('sk-')||key.length<20||/\s/.test(key)))return notice('Enter a valid OpenAI API key starting with sk-.');pending=true;dirty=true;awaitingSave=true;attemptGeneration=lastGeneration;$('connect').disabled=true;feedbackUntil=0;notice('Settings are being sent. Connecting may briefly interrupt this page; stay on Tachikoma Wi-Fi.');try{await request('/configure',{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify({ssid,password,key})});}catch(e){
+ feedbackUntil=Date.now()+8000;
+ if(e.server){awaitingSave=false;notice(e.message);}
+ else {uncertain=true;notice('Connection interrupted. Tachikoma may still be connecting. Rejoin its Wi-Fi and reopen 192.168.4.1 to check before retrying.');}
+ }finally{pending=false;$('connect').disabled=joining||uncertain||!token;}};
+$('done').onclick=async()=>{if(unifiedDirty||unifiedPending||bridgeDirty||bridgePending)return;try{await request('/finish',{method:'POST',headers:{'X-Setup-Token':token}});finished=true;$('setup').classList.add('hidden');$('tailscale-setup').classList.add('hidden');$('tailscale-notice').classList.add('hidden');$('unified-setup').classList.add('hidden');$('unified-notice').classList.add('hidden');$('bridge-setup').classList.add('hidden');$('bridge-notice').classList.add('hidden');$('done').classList.add('hidden');notice('All set! Tachikoma will close this setup network. Your phone can return to its usual Wi-Fi.');}catch(e){notice('Could not finish yet. Wait for Wi-Fi to connect and try again.');}};
+$('tailscale-key').oninput=()=>{tailscaleEdit++;tailscaleDirty=true;$('done').classList.toggle('hidden',true);$('tailscale-notice').textContent='Tailscale key edit not saved.';};
+$('tailscale-setup').onsubmit=async event=>{
+ event.preventDefault();if(tailscalePending||!token)return;
+ const key=$('tailscale-key').value,edit=tailscaleEdit;
+ if(new TextEncoder().encode(key).length>255||key.includes('\0')){$('tailscale-notice').textContent='Tailscale auth key must be at most 255 bytes, without NUL characters.';return;}
+ tailscalePending=true;$('save-tailscale').disabled=true;$('done').classList.toggle('hidden',true);
+ $('tailscale-notice').textContent='Saving Tailscale key only…';
+ try{
+  const saved=await request('/configure',{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify({action:'tailscale_key',tailscale_auth_key:key})});
+  if(typeof saved.tailscale_key_saved!=='boolean'||(key&&!saved.tailscale_key_saved))throw new Error('Save not confirmed');
+  tailscaleNote(saved.tailscale_key_saved);
+  if(tailscaleEdit===edit&&$('tailscale-key').value===key){$('tailscale-key').value='';tailscaleDirty=false;$('tailscale-notice').textContent=key?'Tailscale key saved. No connection or enrollment started.':'Stored Tailscale key unchanged.';}
+  else $('tailscale-notice').textContent='Submitted Tailscale key saved; your newer edit is not saved.';
+ }catch(e){$('tailscale-notice').textContent=e.server?e.message:'Tailscale key save not confirmed. Stay on setup Wi-Fi and retry to confirm; a saved-status badge alone cannot confirm this replacement.';}
+ finally{tailscalePending=false;$('save-tailscale').disabled=!token;}
+};
+for(const id of ['unified-host','unified-port'])$(id).oninput=()=>{
+ unifiedEdit++;unifiedDirty=true;
+ if(id==='unified-host')unifiedHostTouched=true;else unifiedPortTouched=true;
+ $('done').classList.toggle('hidden',true);$('unified-notice').textContent='Unified target edit not saved.';
+};
+$('unified-setup').onsubmit=async event=>{
+ event.preventDefault();if(unifiedPending||!token)return;
+ const host=$('unified-host').value,raw=String($('unified-port').value),port=Number(raw),edit=unifiedEdit;
+ if((host&&(!/^(?=.{1,63}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(host)||!host.includes('.')||!/[a-z]/.test(host)||host.split('.').some(p=>!p||p.startsWith('-')||p.endsWith('-'))))||!/^\d+$/.test(raw)||!Number.isInteger(port)||port<1||port>65535){
+  $('unified-notice').textContent='Use a canonical lowercase FQDN (no URL/IP) and port 1–65535.';return;
+ }
+ unifiedPending=true;$('save-unified').disabled=true;$('done').classList.toggle('hidden',true);
+ try{
+  const s=await request('/configure',{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify({action:'unified_target',host,port})});
+  if(s.unified_target_saved!==true)throw new Error('Save not confirmed');
+  if(unifiedEdit===edit){unifiedDirty=false;$('unified-notice').textContent='Unified target saved. No connection started.';}
+  else $('unified-notice').textContent='Submitted target saved; your newer edit is not saved.';
+ }catch(e){$('unified-notice').textContent=e.server?e.message:'Unified target save not confirmed. Check before retrying.';}
+ finally{unifiedPending=false;$('save-unified').disabled=!token;}
+};
+for(const id of ['bridge-enabled','bridge-ip','bridge-port','bridge-fqdn','bridge-token','bridge-clear-token']){
+ const edit=()=>{bridgeTouched.add(id);bridgeEdit++;bridgeDirty=true;$('done').classList.toggle('hidden',true);$('bridge-notice').textContent='Bridge edit not saved.';};
+ $(id).oninput=edit;$(id).onchange=edit;
+}
+$('bridge-setup').onsubmit=async event=>{
+ event.preventDefault();if(bridgePending||!token)return;
+ const enabled=$('bridge-enabled').checked===true,ip=$('bridge-ip').value,fqdn=$('bridge-fqdn').value;
+ const raw=String($('bridge-port').value),port=Number(raw),petToken=$('bridge-token').value,clear=$('bridge-clear-token').checked===true,edit=bridgeEdit;
+ const v=ip.split('.'),quad=v.length===4&&v.every(x=>/^(0|[1-9][0-9]{0,2})$/.test(x)&&Number(x)<=255),nums=v.map(Number);
+ const priv=quad&&(nums[0]===10||(nums[0]===172&&nums[1]>=16&&nums[1]<=31)||(nums[0]===192&&nums[1]===168));
+ const endpoint=['10.0.0.0','10.255.255.255','172.16.0.0','172.31.255.255','192.168.0.0','192.168.255.255'].includes(ip);
+ const host=/^(?=.{1,63}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(fqdn)&&fqdn.includes('.')&&/[a-z]/.test(fqdn)&&!fqdn.split('.').some(p=>!p||p.startsWith('-')||p.endsWith('-'));
+ if(!priv||endpoint||!host||!/^\d+$/.test(raw)||!Number.isInteger(port)||port<1||port>65535||(petToken&&!/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(petToken))||(clear&&!!petToken)||(enabled&&(clear||(!petToken&&!bridgeTokenSaved)))){
+  $('bridge-notice').textContent='Use a private LAN IPv4, lowercase certificate FQDN, port 1–65535 and valid pet token. Disable before clearing the token.';return;
+ }
+ bridgePending=true;$('save-bridge').disabled=true;$('done').classList.toggle('hidden',true);
+ try{
+  const s=await request('/configure',{method:'POST',headers:{'Content-Type':'application/json','X-Setup-Token':token},body:JSON.stringify({action:'bridge_gateway',enabled,ip,port,fqdn,token:petToken,clear_token:clear})});
+  if(s.bridge_saved!==true||typeof s.bridge_token_saved!=='boolean'||(enabled&&!s.bridge_token_saved))throw new Error('Save not confirmed');
+  bridgeTokenSaved=s.bridge_token_saved;bridgeReady=enabled&&bridgeTokenSaved;
+  if(bridgeEdit===edit){bridgeDirty=false;$('bridge-token').value='';$('bridge-clear-token').checked=false;$('bridge-notice').textContent='Bridge settings saved. No connection started.';}
+  else $('bridge-notice').textContent='Submitted bridge settings saved; your newer edit is not saved.';
+ }catch(e){$('bridge-notice').textContent=e.server?e.message:'Bridge save not confirmed. Check before retrying.';}
+ finally{bridgePending=false;$('save-bridge').disabled=!token;}
+};
+(async()=>{await poll();await scan();})();
+</script></html>
