@@ -4666,6 +4666,7 @@ class SourceHygieneTest(ServerOfflineCase):
                 "AuthRegistry",
                 "check_private_file",
                 "load_config",
+                "load_env_config",
                 "load_provider_key",
                 "build_server_ssl_context",
                 "verify_bearer",

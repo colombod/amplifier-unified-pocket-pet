@@ -234,6 +234,36 @@ def load_config(path: Path) -> gs.GatewayConfig:
     raise StartupError(failure)
 
 
+def load_env_config(path: Path) -> tuple[gs.GatewayConfig, Secret | None]:
+    """Load the private ``.env`` spelling of the gateway config and its inline key, if any.
+
+    The same private-file rule, size cap, ``parse_config`` validation and fixed
+    ``StartupError`` codes as ``load_config``.  Nothing read from the file is ever
+    formatted: the returned key is a ``Secret`` and the errors carry a code only.
+    """
+    failure = "config_invalid"
+    try:
+        raw = check_private_file(Path(path), max_bytes=_MAX_CONFIG_BYTES, read=True) or b""
+        doc, inline = gs.env_config_document(raw.decode("utf-8"))
+        return gs.parse_config(doc), None if inline is None else Secret(inline)
+    except gs.GatewayProtocolError as err:
+        if err.code == "core_binding_required":
+            failure = "core_binding_required"
+    except (OSError, ValueError, TypeError, UnicodeError):
+        pass
+    raise StartupError(failure)
+
+
+def _env_file_provider_key(cfg: gs.GatewayConfig, inline: Secret | None) -> Secret:
+    """The provider key of an env-file start: the named key file or the file's own value.
+
+    The process environment is never consulted: the only variable ``load_provider_key``
+    can see is the one the private file itself supplied.
+    """
+    own = {} if inline is None else {gs.ENV_PROVIDER_KEY: inline.reveal()}
+    return load_provider_key(cfg, own)
+
+
 def load_provider_key(cfg: gs.GatewayConfig, env: Mapping[str, str]) -> Secret:
     """The provider key from the explicit 0600 file or the NAMED variable of ``env`` only."""
     value: Any = None
@@ -1488,11 +1518,20 @@ async def _startup(
     env: Mapping[str, str],
     stdout: TextIO,
     deps: ServeDeps,
+    env_file: bool = False,
 ) -> None:
     """Every startup step in the plan's order; a failure never reaches a later step."""
-    cfg = load_config(config_path)
+    inline: Secret | None = None
+    if env_file:
+        cfg, inline = load_env_config(config_path)
+    else:
+        cfg = load_config(config_path)
     cert, key_path = _check_tls_files(cfg)
-    provider_key = load_provider_key(cfg, env)
+    if env_file:
+        provider_key = _env_file_provider_key(cfg, inline)
+    else:
+        provider_key = load_provider_key(cfg, env)
+    del inline
     root = _check_state_root(cfg)
     attachment = _open_store(held, root, cfg)
     try:
@@ -1602,6 +1641,7 @@ async def _serve(
     stderr: TextIO,
     deps: ServeDeps,
     event_log_path: Path | None = None,
+    env_file: bool = False,
 ) -> int:
     held = _Held()
     failure: str | None = None
@@ -1612,7 +1652,7 @@ async def _serve(
                 held.event_log.write("gateway_start", required=True)
             except EventLogError:
                 raise StartupError("event_log_invalid") from None
-        await _startup(held, config_path, env, stdout, deps)
+        await _startup(held, config_path, env, stdout, deps, env_file)
     except StartupError as err:
         failure = err.code
     finally:
@@ -1639,10 +1679,16 @@ def serve_main(
     stderr: TextIO,
     deps: ServeDeps | None = None,
     event_log_path: Path | None = None,
+    env_file: bool = False,
 ) -> int:
-    """Run the gateway from an explicit private config until SIGINT/SIGTERM.  Exit code."""
+    """Run the gateway from an explicit private config until SIGINT/SIGTERM.  Exit code.
+
+    ``config_path`` is the private JSON config, or with ``env_file=True`` the private
+    ``.env`` spelling of the same settings (``env`` is then not consulted).
+    """
     return asyncio.run(
-        _serve(Path(config_path), env, stdout, stderr, deps or ServeDeps(), event_log_path)
+        _serve(Path(config_path), env, stdout, stderr, deps or ServeDeps(), event_log_path,
+               env_file)
     )
 
 
@@ -1662,6 +1708,7 @@ __all__ = [
     "check_private_file",
     "connect_provider",
     "load_config",
+    "load_env_config",
     "load_provider_key",
     "reject_response",
     "serve_main",

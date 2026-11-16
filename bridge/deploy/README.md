@@ -2,7 +2,8 @@
 
 This is a template, not an installer. Nothing in this directory enables a service.
 Use a Linux host with systemd user services, the bridge's existing Python/aiohttp
-environment, a working private gateway JSON config, TLS files, a paired restricted
+environment, working private gateway settings (a private `.env` file, recommended,
+or the alternative private JSON config), TLS files, a paired restricted
 credential and an already-selected Unified conversation. Pairing and phone/device
 setup are separate; this unit does not perform them.
 
@@ -28,20 +29,109 @@ interpreter path, not a temporary application update directory; test the
 environment again after changes. Installing dependencies may access a package
 registry. No package hashes or fresh-machine install qualification are claimed.
 
+## Private settings in a local `.env` file (recommended)
+
+Machine-specific and secret values stay on the machine, never in the repository.
+The tracked [`bridge/.env.example`](../.env.example) lists every setting with
+placeholders only. Make a private copy and fill it in:
+
+```sh
+umask 077
+cp "/ABSOLUTE/REPOSITORY/bridge/.env.example" "/ABSOLUTE/private/.env"
+chmod 600 "/ABSOLUTE/private/.env"
+```
+
+Keep the copy outside the repository, in an owner-controlled private directory
+such as the one that holds the pairing state. (`.gitignore` also ignores `.env`
+and `.env.*` inside the checkout and allows only `.env.example`, as a safety
+net, not as the recommended place.) Replace every `<placeholder>`, then start
+the gateway with `serve --env-file /ABSOLUTE/private/.env`.
+
+- **Same checks as JSON.** Each variable maps to one field of the JSON config
+  and the values go through the same validation. A wrong value, an unknown,
+  repeated, empty or malformed entry, or a missing required one stops the gateway
+  before it listens with `error: config_invalid` and no value shown. As with
+  JSON, a conversation id whose last eight characters are not lowercase hex is
+  `core_binding_required`, and an absent or malformed provider key is
+  `provider_key_missing`.
+- **Private file required.** The path must be absolute and the file a regular
+  file owned by you with no group/other permissions and not a symlink, as for the
+  JSON config and key files. Anything else is also `config_invalid`.
+- **Literal values.** One `NAME=value` per line; the value is the text to the end
+  of the line. No quotes, no spaces around `=`, no `export`, no `$VAR` expansion,
+  no inline comments, Unix line endings. Comment lines start with `#` in the
+  first column. This is not a shell script; do not `source` it. A value cannot
+  start or end with a space or quote character or contain a space followed by
+  `#`; a conversation label that needs one of those requires the JSON config.
+- **Provider key, exactly one of two.** `POCKET_GATEWAY_PROVIDER_KEY_FILE` is the
+  absolute path of an owner-only key file. `POCKET_GATEWAY_PROVIDER_KEY` is the
+  key itself, kept only in the private copy. Setting both or neither is
+  `config_invalid`. In this mode the gateway does not read the provider key from
+  the process environment.
+- **Not exported.** The gateway reads the file itself. Do not load it with
+  systemd `EnvironmentFile=`, a shell `source` or a dotenv tool: that skips the
+  private-file check and puts the secrets into the process environment.
+- **Token hashes.** `POCKET_GATEWAY_PET_TOKEN_SHA256` takes one hash, or several
+  separated by commas with no spaces.
+
+The gateway never writes the provider key, credential reference, token hashes,
+full conversation id or file paths to stdout, stderr or the event log, and a
+startup failure prints a fixed code only. Exactly as with JSON, a successful
+start prints one line with the listen address(es), port and the last eight
+characters of the conversation id. This path is tested offline with synthetic
+values. It has not been demonstrated on a running service or on a second
+machine.
+
+### Alternative: a private JSON config
+
+`serve --config /ABSOLUTE/private/gateway.json` remains supported and unchanged;
+its shape is shown in the [team guide](../../docs/team-prototype.md). Give exactly
+one of `--config` and `--env-file`. With JSON, set `provider_key_file` to the
+absolute path of the mode-0600 provider key file; do not put a key or token in
+the unit or use a shell environment variable for it.
+
+### Move an existing JSON-configured service to `.env`
+
+Nothing here is automatic, and the JSON file keeps working if you do nothing.
+
+1. Copy `.env.example` to a private owner-only file as above.
+2. Copy each value from the private JSON config to its variable; the names match
+   (`state_root` → `POCKET_GATEWAY_STATE_ROOT`, and so on; `version` →
+   `POCKET_GATEWAY_CONFIG_VERSION`). Write values without the JSON quotes, join
+   the `pet_token_sha256` list with commas, and leave optional settings that the
+   JSON omits commented out. If the JSON used `provider_key_env`, either point
+   `POCKET_GATEWAY_PROVIDER_KEY_FILE` at an owner-only key file or put the key in
+   `POCKET_GATEWAY_PROVIDER_KEY`; the name of the old variable is not carried over.
+3. Wait until no call is in progress, then stop the service
+   (`systemctl --user stop pocket-gateway.service`). Only one gateway may own the
+   journal and listen address.
+4. In `~/.config/systemd/user/pocket-gateway.service`, replace the `ExecStart=`
+   line with the `--env-file` form from the template, using the absolute path of
+   the private file. Keep your existing `--event-log` path.
+5. Run `systemctl --user daemon-reload`, then
+   `systemctl --user start pocket-gateway.service`, and check
+   `systemctl --user status pocket-gateway.service` and the journal for
+   `gateway: listening on` with the same address and short conversation id as
+   before. `error: config_invalid` means the file was refused; nothing listened.
+6. Keep the private JSON file until the service has run from `.env`. To go back,
+   stop the service, restore the `--config` line, reload and start.
+
 ## Install and start
 
 1. Create an owner-only log directory, for example:
    `install -d -m 700 "$HOME/.local/state/pocket-gateway"`.
-   Keep the config, credential and key files private. Set `provider_key_file` in
-   the config to the absolute path of the mode-0600 provider key file; do not put
-   a key or token in this unit or use a shell environment variable for it.
+   Keep the settings, credential and key files private; do not put a key or
+   token in the unit.
 2. Copy `pocket-gateway.service` to
    `~/.config/systemd/user/pocket-gateway.service` (create that directory if needed).
    Replace **every** placeholder in the copy:
    - `@PYTHON@`: absolute Python interpreter with the bridge's dependencies.
    - `@BRIDGE_DIR@`: absolute repository `bridge` directory, where `pet_bridge` lives.
-   - `@CONFIG@`: absolute private gateway JSON path.
+   - `@ENV_FILE@`: absolute path of the private `.env` file.
    - `@EVENT_LOG@`: absolute JSONL path in the owner-only directory from step 1.
+   To use a JSON config instead, delete the `--env-file` line, uncomment the
+   `--config` line below it and replace `@CONFIG@` with the absolute private JSON
+   path. Exactly one `ExecStart=` line may be active.
    These are systemd paths, not shell commands; no `~` or `$HOME` expansion occurs
    inside the unit. Quote the interpreter if its path contains spaces. Escape `%`
    as `%%` in literal paths for systemd.
@@ -66,8 +156,15 @@ Tailscale or Unified is ready.
 The default config still serves only its existing `bind_host`/`host_header`.
 For a matched gateway and device package that supports native Tailnet voice, one
 gateway can also bind a second explicitly chosen local IPv4 address. Add these
-two optional fields to the **same** private JSON document, without changing the LAN
-settings:
+two optional settings to the **same** private file, without changing the LAN
+settings. In `.env`:
+
+```text
+POCKET_GATEWAY_TAILNET_BIND_HOST=100.64.12.34
+POCKET_GATEWAY_TAILNET_FQDN=gateway.example.test
+```
+
+Or, in the JSON document:
 
 ```text
 "tailnet_bind_host": "100.64.12.34",
@@ -118,8 +215,11 @@ The equivalent foreground CLI, **shown for reference, not a second process**:
 
 ```sh
 cd "/ABSOLUTE/REPOSITORY/bridge"
-"/ABSOLUTE/PYTHON" -B -m pet_bridge serve --config "/ABSOLUTE/private/gateway.json" --event-log "/ABSOLUTE/private/events.jsonl"
+"/ABSOLUTE/PYTHON" -B -m pet_bridge serve --env-file "/ABSOLUTE/private/.env" --event-log "/ABSOLUTE/private/events.jsonl"
 ```
+
+With a JSON config, use `--config "/ABSOLUTE/private/gateway.json"` in place of
+`--env-file ...`.
 
 Omit `--event-log` for the existing no-file-log behaviour. A supplied path must be
 absolute; its parent must already exist, be owned by you and have no group/other
@@ -172,7 +272,7 @@ systemctl --user daemon-reload
 systemctl --user reset-failed
 ```
 
-This leaves the repository, private config, credentials, journal and event log
+This leaves the repository, private settings file, credentials, journal and event log
 untouched. Retain them or remove them separately only when you intend to.
 If an administrator enabled lingering only for this service, ask them whether it
 should be disabled; other user services may depend on it.

@@ -982,6 +982,85 @@ def parse_config(doc: Any) -> GatewayConfig:
     )
 
 
+# -- the private ``.env`` spelling of the SAME config document -------------------------
+# One variable per config key.  This table only renames and re-types text; every value is
+# then judged by ``parse_config`` exactly as a JSON document is (there is no second
+# validator).  ``POCKET_GATEWAY_PROVIDER_KEY`` holds the key itself and becomes
+# ``provider_key_env`` naming that same variable, so "exactly one key source" still holds.
+ENV_PROVIDER_KEY = "POCKET_GATEWAY_PROVIDER_KEY"
+_ENV_TOKENS = "POCKET_GATEWAY_PET_TOKEN_SHA256"
+_ENV_INT = {"POCKET_GATEWAY_CONFIG_VERSION": "version", "POCKET_GATEWAY_PORT": "port"}
+_ENV_TEXT = {
+    "POCKET_GATEWAY_STATE_ROOT": "state_root",
+    "POCKET_GATEWAY_AUTH_ROOT": "auth_root",
+    "POCKET_GATEWAY_CREDENTIAL_REF": "credential_ref",
+    "POCKET_GATEWAY_SESSION_ID": "session_id",
+    "POCKET_GATEWAY_SESSION_LABEL": "session_label",
+    "POCKET_GATEWAY_BIND_HOST": "bind_host",
+    "POCKET_GATEWAY_HOST_HEADER": "host_header",
+    "POCKET_GATEWAY_TAILNET_BIND_HOST": "tailnet_bind_host",
+    "POCKET_GATEWAY_TAILNET_FQDN": "tailnet_fqdn",
+    "POCKET_GATEWAY_TLS_CERT_FILE": "tls_cert_file",
+    "POCKET_GATEWAY_TLS_KEY_FILE": "tls_key_file",
+    "POCKET_GATEWAY_MODEL": "model",
+    "POCKET_GATEWAY_VOICE": "voice",
+    "POCKET_GATEWAY_PROVIDER_KEY_FILE": "provider_key_file",
+}
+ENV_CONFIG_NAMES = frozenset(_ENV_TEXT) | frozenset(_ENV_INT) | {_ENV_TOKENS, ENV_PROVIDER_KEY}
+_ENV_LINE_RE = re.compile(r"([A-Z][A-Z0-9_]{0,63})=(.*)")
+_ENV_EDGE = frozenset(" \"'")
+
+
+def env_config_document(text: Any) -> tuple[dict[str, Any], str | None]:
+    """Translate private ``NAME=value`` text into the document ``parse_config`` validates.
+
+    Returns ``(document, inline provider key or None)``; the caller must pass the document
+    to ``parse_config`` and hide the key.  Lines are separated by LF only.  A line is blank
+    (spaces only), a comment (``#`` in the first column) or ``NAME=value`` with a name from
+    ``ENV_CONFIG_NAMES``.  The value is literal text to the end of the line: no quoting,
+    escapes, expansion, ``export`` or inline comment.  It is refused when empty, when it
+    starts or ends with a space or a quote character, or when it contains a space followed
+    by ``#`` (an attempted inline comment).  The version and port are canonical decimal
+    integers; token hashes are separated by commas.
+
+    Any other line, an unknown or repeated name, or a control character (CR and TAB
+    included) is ``config_invalid``.  The error never quotes a name or a value.
+    """
+    invalid = GatewayProtocolError("config_invalid")
+    if not isinstance(text, str):
+        raise invalid
+    values: dict[str, str] = {}
+    for line in text.split("\n"):
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in line):
+            raise invalid
+        if not line.strip(" ") or line.startswith("#"):
+            continue
+        match = _ENV_LINE_RE.fullmatch(line)
+        if match is None:
+            raise invalid
+        name, value = match.group(1), match.group(2)
+        if name not in ENV_CONFIG_NAMES or name in values or not value:
+            raise invalid
+        if value[0] in _ENV_EDGE or value[-1] in _ENV_EDGE or " #" in value:
+            raise invalid
+        values[name] = value
+    doc: dict[str, Any] = {}
+    inline_key: str | None = None
+    for name, value in values.items():
+        if name in _ENV_INT:
+            if _PORT_RE.fullmatch(value) is None:
+                raise invalid
+            doc[_ENV_INT[name]] = int(value)
+        elif name == _ENV_TOKENS:
+            doc["pet_token_sha256"] = value.split(",")
+        elif name == ENV_PROVIDER_KEY:
+            doc["provider_key_env"] = ENV_PROVIDER_KEY
+            inline_key = value
+        else:
+            doc[_ENV_TEXT[name]] = value
+    return doc, inline_key
+
+
 __all__ = [
     "ACK_WAIT_S",
     "AUDIO_BYTES_PER_S",
@@ -1004,6 +1083,8 @@ __all__ = [
     "COMMENTARY_CHUNK_BYTES",
     "DEFAULT_MODEL",
     "DEFAULT_VOICE",
+    "ENV_CONFIG_NAMES",
+    "ENV_PROVIDER_KEY",
     "INBOX_CAP",
     "INVALIDATED_REASONS",
     "MAX_AUDIO_APPEND_BYTES",
@@ -1050,6 +1131,7 @@ __all__ = [
     "build_session_started",
     "build_turn_began",
     "chunk_commentary",
+    "env_config_document",
     "is_event_id",
     "next_send_time",
     "parse_config",

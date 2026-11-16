@@ -2,10 +2,12 @@
 
 Commands: ``pair-start``, ``pair-poll``, ``pair-abandon``, ``attach``, ``list``,
 ``bind SESSION_ID`` and ``serve --config ABSOLUTE_PATH [--event-log ABSOLUTE_PATH]``.
-The explicit private gateway config is required (no default, never the
-default config root) and the gateway module is imported lazily inside that branch, so
-every other command stays standard library only.  There is deliberately still NO
-send, token or resume command: a token never enters through argv or the environment,
+``serve --env-file ABSOLUTE_PATH`` takes the same settings from a private ``.env`` file
+instead (exactly one of the two).  The explicit private gateway config is required (no
+default, never the default config root) and the gateway module is imported lazily inside
+that branch, so every other command stays standard library only.  There is deliberately
+still NO send, token or resume command: a token never enters through argv or the
+process environment (the ``.env`` file is read as a private file, never exported),
 and ``bind`` only records an explicit selection in the private journal (it sends
 nothing and does not arm the bridge).  ``--help`` works offline without opening any
 config.
@@ -129,11 +131,16 @@ def _make_parser(out: IO[str]) -> argparse.ArgumentParser:
                 help="observation scope; requires --all-work (default: roots)",
             )
     serve = add("serve", "Run the voice gateway from an explicit private config.")
-    serve.add_argument(
+    source = serve.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--config",
-        required=True,
         metavar="PATH",
-        help="ABSOLUTE path of the private gateway config (no default)",
+        help="ABSOLUTE path of the private gateway JSON config (no default)",
+    )
+    source.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help="ABSOLUTE path of the private owner-only gateway .env file (no default)",
     )
     serve.add_argument(
         "--event-log", metavar="PATH",
@@ -376,7 +383,9 @@ def main(
             raise _Usage
         if args.command == "list" and args.scope is not None and not args.all_work:
             raise _Usage
-        if args.command == "serve" and not Path(args.config).is_absolute():
+        if args.command == "serve" and not Path(
+            args.env_file if args.config is None else args.config
+        ).is_absolute():
             raise _Usage
         if (args.command == "serve" and args.event_log is not None
                 and not Path(args.event_log).is_absolute()):
@@ -429,9 +438,15 @@ def _serve(
     """The ONLY place the gateway is imported (lazily): never the default root or store."""
     from . import gateway_server
 
+    event_log = Path(args.event_log) if args.event_log is not None else None
+    if args.config is None:  # the private .env spelling of the same settings
+        return gateway_server.serve_main(
+            Path(args.env_file), env=env, stdout=out, stderr=err, deps=deps,
+            event_log_path=event_log, env_file=True,
+        )
     return gateway_server.serve_main(
         Path(args.config), env=env, stdout=out, stderr=err, deps=deps,
-        event_log_path=Path(args.event_log) if args.event_log is not None else None,
+        event_log_path=event_log,
     )
 
 

@@ -330,15 +330,41 @@ have not yet been tested.
    file already exists, it may be partial or its durability uncertain. Preserve
    it and inspect privately before deciding what to do; never overwrite it or
    generate a replacement blindly.
-4. The gateway config requires its private state and credential paths, chat ID
+4. The gateway settings require its private state and credential paths, chat ID
    and label, LAN IPv4 and port, literal HTTP Host value, TLS certificate and key,
    pet token hash, and exactly one provider-key source. Use an owner-only 0600
-   provider key file for a service. Config, certificates, keys and state must be
+   provider key file for a service. Settings, certificates, keys and state must be
    private, owner-controlled files/directories; final-component symlinks are
-   rejected. This is the shape of a private JSON config; replace every value in
-   angle brackets with your own, using absolute paths and an RFC1918 LAN address.
-   The literal `host_header` must match the device's dial address and port; it is
-   not the TLS certificate FQDN.
+   rejected. Use absolute paths and an RFC1918 LAN address. The literal Host
+   value must match the device's dial address and port; it is not the TLS
+   certificate FQDN.
+
+   **Recommended: a private `.env` file.** Machine-specific and secret values
+   stay on your machine and out of the repository. Copy the tracked
+   placeholder-only `bridge/.env.example` to a private owner-only `.env` in the
+   same private directory from step 2, then replace every `<placeholder>`. From
+   the `bridge/` directory, in the same private shell (`umask 077`):
+
+   ```sh
+   cp .env.example "$XDG_CONFIG_HOME/.env"
+   chmod 600 "$XDG_CONFIG_HOME/.env"
+   ```
+
+   Edit the copy in a private editor that makes no backups or cloud copies. Each
+   variable has a one-line comment in the file. Values are literal: no quotes, no
+   spaces around `=`, no inline comments. Never commit, paste or share the
+   filled-in copy. The gateway is then started with
+   `serve --env-file <absolute-path-of-that-file>`; it reads the file itself and
+   refuses a file that is not a regular owner-only file, or any unknown,
+   repeated, missing or malformed entry, with `error: config_invalid` before
+   listening. The values pass the same checks as the JSON config. See
+   [service setup](../bridge/deploy/README.md) for the exact rules and the
+   service unit. This path is offline-tested only; it has not been demonstrated
+   on a running service or on a second machine.
+
+   **Alternative: a private JSON config** with the same fields, started with
+   `serve --config`. This is its shape; replace every value in angle brackets
+   with your own:
 
    ```json
    {
@@ -360,7 +386,8 @@ have not yet been tested.
    ```
 
    `auth_root` may be omitted to use the state root's `auth` directory. Use only
-   one of `provider_key_file` and `provider_key_env`, never both. See
+   one of `provider_key_file` and `provider_key_env`, never both (in `.env`: only
+   one of `POCKET_GATEWAY_PROVIDER_KEY_FILE` and `POCKET_GATEWAY_PROVIDER_KEY`). See
    `GatewayConfig` in `bridge/pet_bridge/gateway_state.py` and
    [service setup](../bridge/deploy/README.md). A complete clean-server config
    and installation walkthrough still needs maintainer validation. An optional
