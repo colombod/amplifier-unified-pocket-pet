@@ -524,6 +524,8 @@ static unsigned converse_end(bridge_voice_t *c,char *out,size_t cap){
     const char *s=NULL;unsigned end=BV_END_ERROR;
     if(reason==BV_EXIT_USER||atomic_load(&c->muted)){s="Mic off";end=BV_END_OFF;}
     else if(atomic_load(&c->invalid_protocol))s="Host sent an invalid message.";
+    else if(c->transport_terminal==BR_TRANSPORT_CERT_VERIFY)s="Host certificate verification failed.";
+    else if(c->transport_terminal==BR_TRANSPORT_TLS_UNKNOWN)s="Secure connection failed.";
     else if(c->transport_terminal==BR_TRANSPORT_PROTOCOL)s="Voice connection protocol error.";
     else if(c->transport_terminal==BR_TRANSPORT_POLICY)s="Host refused the voice connection.";
     else if(c->transport_terminal==BR_TRANSPORT_UNSUPPORTED)s="Host rejected the voice format.";

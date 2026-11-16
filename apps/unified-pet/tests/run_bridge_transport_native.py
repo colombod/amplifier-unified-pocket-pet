@@ -43,7 +43,7 @@ case_names=(
     'immediate-zero-progress','subtick-lock-budget',
     'zero-probe-clock-progress',
     'cancel-final-release','cancel-nested-release','cancel-release-invalidfd',
-    'nested-short-request','ws-observation-isolation','lifecycle','receive',
+    'nested-short-request','ws-observation-isolation','cert-connect','lifecycle','receive',
 )
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('output',type=Path)
@@ -56,6 +56,12 @@ ws_source=sdk/'components/tcp_transport/transport_ws.c'
 pins={
     ssl_source:'1b9e42e556f8ef85d441950d0487eca77a8e9bde8293d7f0332f0826f08f6bde',
     ws_source:'281a84a82c1e00f0198204a0ea80b981090fc3ec00b480ede3d79c9c5fc5bbfd',
+    sdk/'components/esp-tls/esp_tls_errors.h':'260744dfbbdba45a6100b03967341a064ac13e3c6c0bd3e127d62a04a6f16c8b',
+    sdk/'components/esp-tls/esp_tls_error_capture.c':'b42a800f4de408677ca21cf1d074ef5cdd4a2e3db3ceaf0221b13f74bccf07db',
+    sdk/'components/esp-tls/esp_tls_mbedtls.c':'76fdfeaa6788301e73e2b4a5dd58b5909818fb41f75c3d63e41dcafc566001ce',
+    sdk/'components/mbedtls/mbedtls/library/ssl_tls.c':'0154e70f20b465213d3f97a9c2b75e686d79ee83592f90e1d7e7d995593ca7e1',
+    sdk/'components/mbedtls/mbedtls/include/mbedtls/ssl.h':'038e560c60744a13a19d67f77194f7ad6213d988349519a234df55da7b0a3bb8',
+    sdk/'components/mbedtls/mbedtls/include/mbedtls/x509.h':'aa138f6080869285173296afd08727e0ab0313cca959b830250b72a3c37a3bc4',
 }
 pinned_sources={path:path.read_bytes() for path in pins}
 for path,digest in pins.items():
@@ -64,6 +70,7 @@ for path,digest in pins.items():
 source=pinned_sources[ssl_source].decode('utf-8')
 signatures=(
     'static inline transport_esp_tls_t *ssl_get_context_data(',
+    'static int ssl_connect(',
     'static int ssl_write(',
     'static int ssl_read(',
 )
@@ -83,8 +90,10 @@ generated.write_text(
     '/* SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD */\n'
     '/* SPDX-License-Identifier: Apache-2.0 */\n'
     'static const char *TAG = "transport_base";\n'+
-    ''.join(f'#line {line} {json.dumps(str(ssl_source))}\n{body}'
-            for _,line,body in extracted))
+    ''.join(f'#line {line} {json.dumps(str(ssl_source))}\n'+
+            (body.replace('static int ssl_connect(', 'static int pinned_ssl_connect(', 1)
+             if signature=='static int ssl_connect(' else body)
+            for signature,line,body in extracted))
 (out/'ssl-extraction.json').write_text(json.dumps({
     'source':str(ssl_source),'sha256':pins[ssl_source],'fixture_tick_hz':args.tick_hz,
     'functions':[{'signature':name,'line':line,
@@ -122,19 +131,17 @@ void fixture_log(const char*,const char*,...);
 #include <stddef.h>
 #include <sys/types.h>
 #include "esp_err.h"
-typedef struct esp_tls_last_error {int last_error,esp_tls_error_code,esp_tls_flags;} esp_tls_last_error_t;
-typedef esp_tls_last_error_t *esp_tls_error_handle_t;
-typedef struct esp_tls {void *transport;} esp_tls_t;
-#define ESP_TLS_ERR_TYPE_SYSTEM 0
-#define ESP_ERR_ESP_TLS_TCP_CLOSED_FIN 100
-#define ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT 101
-#define ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST 102
-#define ESP_TLS_ERR_SSL_WANT_READ (-0x6900)
-#define ESP_TLS_ERR_SSL_TIMEOUT (-0x6800)
+#include "esp_tls_errors.h"
+typedef struct esp_tls {void *transport;esp_tls_last_error_t error;} esp_tls_t;
+typedef struct {int timeout_ms;} esp_tls_cfg_t;
 ssize_t esp_tls_conn_read(esp_tls_t*,void*,size_t);
 ssize_t esp_tls_conn_write(esp_tls_t*,const void*,size_t);
 esp_err_t esp_tls_get_error_handle(esp_tls_t*,esp_tls_error_handle_t*);
-static inline int esp_tls_get_and_clear_error_type(void*p,int t,int*out){(void)p;(void)t;*out=0;return 0;}
+esp_tls_t *esp_tls_init(void);
+int esp_tls_conn_new_sync(const char*,int,int,const esp_tls_cfg_t*,esp_tls_t*);
+int esp_tls_conn_destroy(esp_tls_t*);
+esp_err_t esp_tls_get_conn_sockfd(esp_tls_t*,int*);
+static inline int esp_tls_get_and_clear_error_type(void*p,esp_tls_error_type_t t,int*out){(void)p;(void)t;*out=0;return 0;}
 ''',
 'esp_tls_crypto.h':'''#pragma once
 #include "mbedtls/base64.h"
@@ -240,8 +247,22 @@ esp_err_t esp_websocket_register_events(esp_websocket_client_handle_t,int,esp_ev
 '''
 }
 for name,text in headers.items():(inc/name).write_text(text)
-files=[Path('main/bridge_transport.c'),Path('main/bridge_transport.h'),Path('main/setup_bridge.h'),Path('tests/bridge_transport_test.c'),Path(__file__),sdk/'components/tcp_transport/transport.c',ws_source,ssl_source,sdk/'components/tcp_transport/include/esp_transport.h',sdk/'components/tcp_transport/private_include/esp_transport_internal.h',generated]
+files=[Path('main/bridge_transport.c'),Path('main/bridge_transport.h'),Path('main/setup_bridge.h'),Path('tests/bridge_transport_test.c'),Path(__file__),sdk/'components/tcp_transport/transport.c',ws_source,ssl_source,sdk/'components/tcp_transport/include/esp_transport.h',sdk/'components/tcp_transport/private_include/esp_transport_internal.h',sdk/'components/esp-tls/esp_tls_errors.h',generated]
 files.extend(inc/name for name in headers)
+files.extend(pins)
+mutant=os.environ.get('PET_CERT_TEST_MUTANT','')
+if mutant:
+    if mutant not in ('latch','flags') or args.case!='cert-connect':
+        raise SystemExit('Unsupported certificate test mutation')
+    app=Path('main/bridge_transport.c').read_text()
+    needle=('if(result<0)note_connect_error(t,ssl);' if mutant=='latch'
+            else 'if(flags&&!(flags&~failure_flags)){')
+    replacement=('if(result<0&&false)note_connect_error(t,ssl);' if mutant=='latch'
+                 else 'if(flags&&flags!=UINT32_MAX&&(failure_flags||true)){')
+    assert app.count(needle)==1
+    mutated=inc/'bridge-transport-mutant.inc'
+    mutated.write_text(app.replace(needle,replacement,1))
+    files.append(mutated)
 if args.case in ('lifecycle','receive'):
     # No replacement task algorithm: compile the COMPLETE pinned task, start,
     # abort and destroy bodies. RTOS, event dispatch, TLS and receive are named
@@ -299,6 +320,17 @@ if args.case in ('lifecycle','receive'):
     },indent=2)+'\n')
     files.extend([*proof_pins,types,lifecycle,Path('tests/bridge_lifecycle_test.c')])
     if args.case=='receive':
+        tls_source=sdk/'components/esp-tls/esp_tls.c'
+        tls_bytes=tls_source.read_bytes()
+        if hashlib.sha256(tls_bytes).hexdigest()!='b8f5a79f0efd0b049e4ae132acbdecf22c6494eff269cb5bc93624a88158f3dc':
+            raise SystemExit('Pinned IDF TLS get-and-clear source mismatch')
+        tls_text=tls_bytes.decode('utf-8')
+        signature='esp_err_t esp_tls_get_and_clear_last_error('
+        assert tls_text.count(signature)==1
+        a=tls_text.index(signature);b=tls_text.index('\n}\n',a)+3
+        clear=inc/'pinned_tls_get_clear.inc'
+        clear.write_text(licence+f'#line {tls_text[:a].count(chr(10))+1} {json.dumps(str(tls_source))}\n'+tls_text[a:b])
+        files.extend([tls_source,clear])
         event_source=sdk/'components/esp_event/esp_event.c'
         event_bytes=event_source.read_bytes()
         if hashlib.sha256(event_bytes).hexdigest()!='30b9d6bf74d47ee2c2a5015866b3d01c1a04be404b2952f75108864c03cd8016':
@@ -401,10 +433,12 @@ print(json.dumps({"frames":frames,"pcm":list(pcm),
                       Path('main/bridge_protocol.h'),Path('main/live_protocol.h'),
                       sdk/'components/json/cJSON/cJSON.c'])
 (out/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files},indent=2)+'\n')
-cc=['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-g','-pthread','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie','-ffunction-sections','-fdata-sections','-DCONFIG_LOG_DYNAMIC_LEVEL_CONTROL=1','-DCONFIG_WS_BUFFER_SIZE=4096','-I'+str(inc),'-Imain','-I'+str(sdk/'components/tcp_transport/include'),'-I'+str(sdk/'components/tcp_transport/private_include'),'-I'+str(sdk/'components/json/cJSON'),'-I'+str(sdk/'components/mbedtls/mbedtls/include'),'tests/bridge_transport_test.c',str(sdk/'components/tcp_transport/transport.c'),str(sdk/'components/tcp_transport/transport_ws.c'),os.environ['PET_TLS_HOST_LIB']+'/libmbedcrypto.a','-Wl,--gc-sections','-o',str(out/'test')]
+cc=['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-g','-pthread','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie','-ffunction-sections','-fdata-sections','-DCONFIG_LOG_DYNAMIC_LEVEL_CONTROL=1','-DCONFIG_ESP_TLS_USING_MBEDTLS=1','-DCONFIG_WS_BUFFER_SIZE=4096','-I'+str(inc),'-Imain','-I'+str(sdk/'components/tcp_transport/include'),'-I'+str(sdk/'components/tcp_transport/private_include'),'-I'+str(sdk/'components/json/cJSON'),'-I'+str(sdk/'components/mbedtls/mbedtls/include'),'tests/bridge_transport_test.c',str(sdk/'components/tcp_transport/transport.c'),str(sdk/'components/tcp_transport/transport_ws.c'),os.environ['PET_TLS_HOST_LIB']+'/libmbedcrypto.a','-Wl,--gc-sections','-o',str(out/'test')]
 # Native 64-bit builds expose vendor signed-size warnings not enabled by its
 # SDK build. Scope the exception to unchanged SDK objects, never the app/tests.
 base=cc[:cc.index('tests/bridge_transport_test.c')]
+base.append('-I'+str(sdk/'components/esp-tls'))
+if mutant:base.append('-DBRIDGE_TEST_TRANSPORT_MUTANT=1')
 base.append(f'-DconfigTICK_RATE_HZ={args.tick_hz}')
 if args.case in ('lifecycle','receive'):
     base.append('-DBRIDGE_LIFECYCLE_TEST=1')
@@ -435,7 +469,7 @@ try:
             'active-cutoff-join','active-cutoff-timeout','timer-stop-fail','timer-delete-fail')
            if args.case=='lifecycle' else (args.case,))
     if args.case=='receive':
-        cases=('rx-normal','rx-tcp-byte-splits','rx-continuations-controls',
+        cases=('cert-event-order','cert-event-post-loss','rx-normal','rx-tcp-byte-splits','rx-continuations-controls',
                'rx-reply-coalesced-eof','rx-unsolicited-audio','rx-zero-controls',
                'rx-binary','rx-nested-text','rx-json-coalesced','rx-nul',
                'rx-queue-overflow','rx-truncated-eof','rx-empty-final-continuation',

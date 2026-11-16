@@ -10,6 +10,8 @@
 #include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_tls.h"
+#include "mbedtls/x509.h"
 #include <sys/socket.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -25,6 +27,9 @@
 #include "esp_transport_internal.h"
 #if ESP_IDF_VERSION != ESP_IDF_VERSION_VAL(5,5,4)
 #error Bridge transport requires inspected ESP-IDF 5.5.4
+#endif
+#if !CONFIG_ESP_TLS_USING_MBEDTLS
+#error Bridge certificate evidence requires the inspected mbedTLS backend
 #endif
 #if !CONFIG_LOG_DYNAMIC_LEVEL_CONTROL
 #error Dynamic log control is required before introducing a pet token
@@ -380,6 +385,38 @@ static bool stop_before_connect(bridge_transport_t *t){
     }
     return atomic_load(&t->cancelled);
 }
+/* Called synchronously under io immediately after the one admitted SSL connect.
+ * Pinned IDF copies its TLS error to the SSL foundation before destroying TLS;
+ * WS shares that foundation. Do not clear it: client 1.6.1 still needs it for
+ * its own ERROR/DISCONNECTED dispatch. No event callback fields are consulted.
+ * mbedTLS documents UINT32_MAX as "verification result unavailable", and
+ * SKIP_VERIFY as verification skipped. Unknown/contradictory flags are not
+ * proof of a certificate failure or a transient link loss. */
+static void note_connect_error(bridge_transport_t *t,esp_transport_handle_t ssl){
+    esp_tls_error_handle_t e=esp_transport_get_error_handle(ssl);
+    if(!e){atomic_store(&t->terminal,BR_TRANSPORT_TLS_UNKNOWN);return;}
+    uint32_t flags=(uint32_t)e->esp_tls_flags;
+    const uint32_t failure_flags=
+        MBEDTLS_X509_BADCERT_EXPIRED|MBEDTLS_X509_BADCERT_REVOKED|
+        MBEDTLS_X509_BADCERT_CN_MISMATCH|MBEDTLS_X509_BADCERT_NOT_TRUSTED|
+        MBEDTLS_X509_BADCRL_NOT_TRUSTED|MBEDTLS_X509_BADCRL_EXPIRED|
+        MBEDTLS_X509_BADCERT_MISSING|MBEDTLS_X509_BADCERT_OTHER|
+        MBEDTLS_X509_BADCERT_FUTURE|MBEDTLS_X509_BADCRL_FUTURE|
+        MBEDTLS_X509_BADCERT_KEY_USAGE|MBEDTLS_X509_BADCERT_EXT_KEY_USAGE|
+        MBEDTLS_X509_BADCERT_NS_CERT_TYPE|MBEDTLS_X509_BADCERT_BAD_MD|
+        MBEDTLS_X509_BADCERT_BAD_PK|MBEDTLS_X509_BADCERT_BAD_KEY|
+        MBEDTLS_X509_BADCRL_BAD_MD|MBEDTLS_X509_BADCRL_BAD_PK|MBEDTLS_X509_BADCRL_BAD_KEY;
+    if(flags&&!(flags&~failure_flags)){
+        atomic_store(&t->terminal,BR_TRANSPORT_CERT_VERIFY);
+    }else if(flags||e->esp_tls_error_code||
+             (e->last_error!=ESP_OK&&
+              e->last_error!=ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME&&
+              e->last_error!=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST&&
+              e->last_error!=ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT&&
+              e->last_error!=ESP_ERR_ESP_TLS_TCP_CLOSED_FIN)){
+        atomic_store(&t->terminal,BR_TRANSPORT_TLS_UNKNOWN);
+    }
+}
 static int one_connect(esp_transport_handle_t ssl,const char *host,int port,int timeout){
     bridge_transport_t *t=atomic_load(&chain);
     if(!t||ssl!=t->ssl||!host||strcmp(host,t->ip)||port!=t->cfg.port||timeout<=0)return -1;
@@ -390,7 +427,11 @@ static int one_connect(esp_transport_handle_t ssl,const char *host,int port,int 
     if(take_io(t,d,false)!=1)return -1;
     bool stopped=stop_before_connect(t);
     timeout=budget(t,d,false);
-    int result=timeout>0&&!stopped?t->ssl_connect(ssl,t->ip,t->cfg.port,timeout):-1;
+    int result=-1;
+    if(timeout>0&&!stopped){
+        result=t->ssl_connect(ssl,t->ip,t->cfg.port,timeout);
+        if(result<0)note_connect_error(t,ssl);
+    }
     if(stop_before_connect(t)||esp_timer_get_time()>=t->deadline){
         if(esp_timer_get_time()>=t->deadline)atomic_store(&t->cancelled,true);
         give_io(t);

@@ -67,7 +67,7 @@ typedef struct queue {fixture_frame_t items[64];unsigned n,cap;} *QueueHandle_t;
 typedef void *SemaphoreHandle_t;
 typedef void *esp_websocket_client_handle_t;
 typedef struct audio_session {unsigned unused;} audio_session_t;
-typedef enum {BR_TRANSPORT_NONE,BR_TRANSPORT_PROTOCOL,BR_TRANSPORT_POLICY,BR_TRANSPORT_EVENT_LOSS,BR_TRANSPORT_PEER_NORMAL,BR_TRANSPORT_UNSUPPORTED,BR_TRANSPORT_PAYLOAD_REJECTED} bridge_transport_terminal_t;
+typedef enum {BR_TRANSPORT_NONE,BR_TRANSPORT_PROTOCOL,BR_TRANSPORT_POLICY,BR_TRANSPORT_EVENT_LOSS,BR_TRANSPORT_PEER_NORMAL,BR_TRANSPORT_UNSUPPORTED,BR_TRANSPORT_PAYLOAD_REJECTED,BR_TRANSPORT_CERT_VERIFY,BR_TRANSPORT_TLS_UNKNOWN} bridge_transport_terminal_t;
 typedef struct bridge_transport {bool started,upgraded,cancelled,finished,local_control;int http;int64_t deadline;bridge_transport_terminal_t terminal;bool (*stop_check)(void *);void *stop_context;} bridge_transport_t;
 typedef struct {int unused;} setup_bridge_t;
 typedef const char *esp_event_base_t;
@@ -97,7 +97,7 @@ static bool guard_held;
 #endif
 static bool fail_next_guard,fail_tail_guard,fail_message_alloc,delay_message_alloc;
 
-typedef enum {EV_CONNECT,EV_TEXT,EV_PARTIAL_TEXT,EV_WS_CLOSED,EV_WS_DROP,EV_WS_ERROR,EV_RAW_CLOSE,EV_CLOSE_1011,EV_CLOSE_1000,EV_PROTOCOL_CLOSE,EV_POLICY_CLOSE,EV_MIC_OFF,EV_PARENT_STOP,
+typedef enum {EV_CONNECT,EV_TEXT,EV_PARTIAL_TEXT,EV_WS_CLOSED,EV_WS_DROP,EV_WS_ERROR,EV_TLS_FAILURE,EV_RAW_CLOSE,EV_CLOSE_1011,EV_CLOSE_1000,EV_PROTOCOL_CLOSE,EV_POLICY_CLOSE,EV_MIC_OFF,EV_PARENT_STOP,
               EV_REFUSED,EV_CHECK,EV_HTTP} ev_kind;
 /* call: the connection (1, 2, ... within one mic-on) a host event belongs to.
  * The host of an ended call says nothing more; mic off and checks are global. */
@@ -390,6 +390,7 @@ static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){
 static bridge_transport_t transport;
 static bool transport_live,ws_up,new_fail,start_fail,token_fail,dispose_ok=true,host_closes=true;
 static bridge_transport_terminal_t during_dispose;
+static bridge_transport_terminal_t tls_failure_result;
 static const char *text_during_dispose;
 /* One-shot fixture observers/injections at real owner I/O boundaries. They do
  * not call owner/model helpers or change production state. */
@@ -738,6 +739,17 @@ static void fire(event_t *e){
             handler(handler_arg,NULL,WEBSOCKET_EVENT_DISCONNECTED,NULL);
         }
         break;
+    case EV_TLS_FAILURE:
+        /* Synthetic settled result at the transport boundary, not actual TLS.
+         * The pinned SDK event ordering and error copy have separate tests. */
+        assert(handler&&!ws_up&&!transport.upgraded&&transport.http==0);
+        transport.terminal=tls_failure_result;
+        if(!e->text){
+            handler(handler_arg,NULL,WEBSOCKET_EVENT_ERROR,NULL);
+            handler(handler_arg,NULL,WEBSOCKET_EVENT_DISCONNECTED,NULL);
+        }
+        transport.finished=true;
+        break;
     case EV_RAW_CLOSE:
         if(handler&&ws_up){
             esp_websocket_event_data_t d={.data_len=0,.payload_len=0,.payload_offset=0,.op_code=8,.fin=true,.data_ptr=NULL};
@@ -835,7 +847,7 @@ static void fresh(void){
     call_no=0;max_calls=1;frames_total=0;call_appends=0;call_mic_sent=0;began_sent=false;plan_rest=NULL;
     memset(plans,0,sizeof(plans));memset(call_at,0,sizeof(call_at));mic_call=0;open_samples=0;
     tasks_created=tasks_exited=task_fail_at=task_attempts=0;
-    new_fail=start_fail=token_fail=false;dispose_ok=true;host_closes=true;during_dispose=BR_TRANSPORT_NONE;text_during_dispose=NULL;
+    new_fail=start_fail=token_fail=false;dispose_ok=true;host_closes=true;during_dispose=BR_TRANSPORT_NONE;tls_failure_result=BR_TRANSPORT_NONE;text_during_dispose=NULL;
     before_control_hook=stop_send_hook=dispose_hook=register_hook=before_start_send_hook=NULL;
     fragment_message=NULL;finish_during_dispose=fragment_rfc6455=fragment_reply_on_stop=drop_fragment_completion=inject_before_control=reply_during_stop=short_stop=false;
     injected_pre_control=stop_replies=short_stops=0;
@@ -1475,6 +1487,42 @@ static void plan_ok_drop31(void){opened();at(31000,EV_WS_DROP,NULL);}
 static void plan_ok_drop10(void){opened();at(10000,EV_WS_DROP,NULL);}
 static void plan_ok_drop20(void){opened();at(20000,EV_WS_DROP,NULL);}
 static void plan_simple_stop(void){opened();at(1500,EV_MIC_OFF,NULL);}
+static void plan_tls_fail(void){at(40,EV_TLS_FAILURE,NULL);}
+static void plan_tls_silent(void){at(40,EV_TLS_FAILURE,"events-lost");}
+static void cert_failure(const char *name){
+    bool reconnect=!strcmp(name,"cert-reconnect")||!strcmp(name,"cert-silent-reconnect");
+    bool silent=!strcmp(name,"cert-silent")||!strcmp(name,"cert-silent-reconnect");
+    bool muted=!strcmp(name,"cert-muted");
+    bool unknown=!strcmp(name,"cert-unknown");
+    bool ordinary=!strcmp(name,"cert-no-evidence");
+    bool stitched=!strcmp(name,"cert-stitch");
+    fresh();
+    tls_failure_result=ordinary?BR_TRANSPORT_NONE:unknown?BR_TRANSPORT_TLS_UNKNOWN:BR_TRANSPORT_CERT_VERIFY;
+    if(stitched){
+        const char *value=getenv("CERT_STITCH_TERMINAL");
+        assert(value&&*value);char *end=NULL;long terminal=strtol(value,&end,10);
+        assert(end&&!*end&&terminal==BR_TRANSPORT_CERT_VERIFY);
+        tls_failure_result=(bridge_transport_terminal_t)terminal;
+    }
+    if(reconnect){
+        opened();at(1000,EV_WS_DROP,NULL);max_calls=2;plans[1]=silent?plan_tls_silent:plan_tls_fail;
+    }else{
+        at(40,EV_TLS_FAILURE,silent?"events-lost":NULL);
+        if(muted)at(40,EV_MIC_OFF,NULL);
+        plans[1]=plan_simple_stop; /* a forbidden replacement terminates promptly */
+        if(ordinary)max_calls=2;
+    }
+    call(false);
+    if(ordinary){
+        stopped_cleanly(2);
+        assert(new_calls==2&&start_calls==2&&frames_total==4&&opens==1&&closes==1);
+        return;
+    }
+    ended(muted?LIVE_OFF:LIVE_ERROR,muted?"Mic off":unknown?"Secure connection failed.":"Host certificate verification failed.");
+    assert(new_calls==(reconnect?2U:1U)&&start_calls==new_calls&&!call_report.again);
+    assert(frames_total==(reconnect?2U:0U)&&opens==(reconnect?1U:0U));
+    assert(closes==opens&&!transport_live);
+}
 static uint64_t wait_mic,wait_played,re_audible;
 static unsigned wait_frames;
 static void reconnecting(void){ended(LIVE_RECONNECTING,"Reconnecting...");assert(!codec_open);}
@@ -2698,6 +2746,7 @@ int main(int argc,char **argv){
     else if(!strcmp(name,"host-quiet")||!strcmp(name,"host-time-limit")||!strcmp(name,"host-burst-error"))host_end(name);
     else if(!strncmp(name,"notice-",7))host_end_race(name);
     else if(!strcmp(name,"terminal-wire"))terminal_wire();
+    else if(!strncmp(name,"cert-",5))cert_failure(name);
     else if(!strcmp(name,"malformed-tail"))malformed_tail();
     else if(!strcmp(name,"sdk-event-loss"))sdk_event_loss();
     else if(!strcmp(name,"reviewed-races"))reviewed_races();

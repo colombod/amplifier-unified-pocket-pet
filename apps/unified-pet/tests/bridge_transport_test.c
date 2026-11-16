@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "mbedtls/sha1.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/x509.h"
 #include "freertos/semphr.h"
 struct fixture_lock{bool recursive;unsigned owner,depth;};
 struct fixture_timer{esp_timer_create_args_t args;uint64_t us;};
@@ -56,6 +57,7 @@ static void check_io_owner(unsigned depth);
 static void check_socket_owner(void);
 static void check_exclusion(void);
 static int status=101;static bool fail_write,fail_connect,cancel_during_connect,location=true;
+static esp_tls_last_error_t connect_error;
 static const char *gateway_refusal;
 static char redirect[256],response[2048],cn[64];static size_t response_at;
 static bool muted_ws,muted_client,muted_base,bundle;
@@ -139,6 +141,7 @@ static int ssl_connect(esp_transport_handle_t t,const char*host,int port,int ms)
  * The generated SDK functions use only tls/sockfd and the real t->data seam. */
 typedef struct transport_esp_tls{
     esp_tls_t *tls;int sockfd;esp_tls_t fixture_tls;
+    esp_tls_cfg_t cfg;bool ssl_initialized;
 }transport_esp_tls_t;
 ssize_t esp_tls_conn_read(esp_tls_t*tls,void*buffer,size_t n){
     assert(tls&&tls->transport);check_io_owner(1);raw_reads++;
@@ -210,11 +213,22 @@ ssize_t esp_tls_conn_write(esp_tls_t*tls,const void*buffer,size_t n){
     return fail_write?-1:tls_write_result!=INT_MAX?tls_write_result:(ssize_t)n;
 }
 esp_err_t esp_tls_get_error_handle(esp_tls_t*tls,esp_tls_error_handle_t*out){
-    static esp_tls_last_error_t synthetic_error;
-    assert(tls&&out);error_handle_reads++;*out=&synthetic_error;return ESP_OK;
+    assert(tls&&out);error_handle_reads++;*out=&tls->error;return ESP_OK;
 }
+static esp_transport_handle_t ssl_for_new_tls;
+esp_tls_t *esp_tls_init(void){
+    esp_tls_t *tls=calloc(1,sizeof(*tls));assert(tls);tls->transport=ssl_for_new_tls;return tls;
+}
+int esp_tls_conn_new_sync(const char *host,int len,int port,const esp_tls_cfg_t *cfg,esp_tls_t *tls){
+    assert(tls&&host&&len==(int)strlen(host)&&port==9443&&cfg->timeout_ms>0);
+    check_io_owner(1);connects++;
+    tls->error=connect_error;return fail_connect?-1:1;
+}
+int esp_tls_conn_destroy(esp_tls_t *tls){assert(tls);free(tls);return 0;}
+esp_err_t esp_tls_get_conn_sockfd(esp_tls_t *tls,int *fd){assert(tls&&fd);*fd=12345;return ESP_OK;}
 /* Generated ONLY by the runner after the complete SDK SSL source hash matches.
  * Do not replace these functions with a handwritten poll+I/O approximation. */
+#define INVALID_SOCKET (-1) /* pinned transport_ssl.c:20 */
 #include "pinned_transport_ssl_io.inc"
 static int ssl_poll(esp_transport_handle_t t,int ms,bool read);
 static int ssl_poll_read(esp_transport_handle_t t,int ms){return ssl_poll(t,ms,true);}
@@ -225,7 +239,7 @@ esp_transport_handle_t esp_transport_ssl_init(void){
     esp_transport_handle_t t=esp_transport_init();assert(t);t->foundation=calloc(1,sizeof(*t->foundation));t->foundation->error_handle=calloc(1,sizeof(*t->foundation->error_handle));
     transport_esp_tls_t*ctx=calloc(1,sizeof(*ctx));assert(ctx);
     ctx->tls=&ctx->fixture_tls;ctx->fixture_tls.transport=t;ctx->sockfd=-1;t->data=ctx;
-    esp_transport_set_func(t,ssl_connect,ssl_read,ssl_write,ssl_close,ssl_poll_read,ssl_poll_write,ssl_destroy);t->_get_socket=socket_fn;return t;
+    esp_transport_set_func(t,ssl_connect,ssl_read,ssl_write,ssl_close,ssl_poll_read,ssl_poll_write,ssl_destroy);t->_get_socket=socket_fn;ssl_for_new_tls=t;return t;
 }
 void esp_transport_ssl_crt_bundle_attach(esp_transport_handle_t t,esp_err_t(*fn)(void*)){assert(t&&fn==esp_crt_bundle_attach);bundle=true;}
 void esp_transport_ssl_set_common_name(esp_transport_handle_t t,const char*s){assert(t);snprintf(cn,sizeof(cn),"%s",s);}
@@ -241,7 +255,11 @@ esp_err_t esp_websocket_register_events(esp_websocket_client_handle_t h,int id,e
 esp_err_t esp_websocket_client_destroy_on_exit(esp_websocket_client_handle_t h){assert(h);return ESP_OK;}
 /* Every app shutdown resolves to this guard; no synthetic FD can reach libc. */
 #define shutdown fixture_shutdown
+#ifdef BRIDGE_TEST_TRANSPORT_MUTANT
+#include "bridge-transport-mutant.inc"
+#else
 #include "../main/bridge_transport.c"
+#endif
 #undef shutdown
 static int fixture_shutdown(int fd,int how){
     bridge_transport_t*t=atomic_load(&chain);
@@ -370,6 +388,7 @@ static int ssl_connect(esp_transport_handle_t t,const char*host,int port,int ms)
     (void)t;check_io_owner(1);assert(!strcmp(host,"192.168.1.50")&&port==9443&&ms>0&&ms<=5000);connects++;
     fixture_fd=12345;
     if(cancel_during_connect)bridge_transport_cancel(atomic_load(&chain));
+    if(fail_connect)esp_transport_set_errors(t,&connect_error);
     return fail_connect?-1:0;
 }
 static setup_bridge_t cfg={.version=1,.enabled=1,.ip={192,168,1,50},.port=9443,.fqdn="pet.example.net"};
@@ -381,6 +400,7 @@ static void reset(void){
     tls_read_result=tls_write_result=INT_MAX;base_poll_result=1;last_poll_ms=-1;
     probe_exclusion=false;exclusion_probes=0;lock_action=LOCK_NONE;action_depth=actions_fired=0;
     status=101;fail_write=fail_connect=cancel_during_connect=false;location=true;gateway_refusal=NULL;
+    memset(&connect_error,0,sizeof(connect_error));
     strcpy(redirect,"https://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@example.net/evil");
     muted_ws=muted_client=muted_base=bundle=false;response_at=0;response[0]=cn[0]=0;
     wire_enabled=wire_cancel_fired=false;wire_cancel_at=0;wire_polls=0;
@@ -914,10 +934,71 @@ static int run_extra_case(size_t which){
     printf("PASS CASE %s: exact SDK SSL bodies, synthetic clock/locks/TLS; no live or full-task qualification.\n",extra_cases[which]);
     return 0;
 }
+static int cert_connect(void){
+    /* Exact hash-pinned SDK ssl_connect + esp_transport_set_errors copy
+     * synthetic TLS errors to the shared foundation before destroying TLS.
+     * The real WS connect and app adapter run; handshake itself is synthetic. */
+    static const struct {int flags,esp,stack,expected;} cases[]={
+        {MBEDTLS_X509_BADCERT_CN_MISMATCH,ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_CERT_VERIFY},
+        {MBEDTLS_X509_BADCERT_NOT_TRUSTED|MBEDTLS_X509_BADCERT_EXPIRED,ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_CERT_VERIFY},
+        {-1,ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_TLS_UNKNOWN},
+        {0,ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_TLS_UNKNOWN},
+        {0,0,0,BR_TRANSPORT_NONE},
+        {0,ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST,0,BR_TRANSPORT_NONE},
+        {0,ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME,0,BR_TRANSPORT_NONE},
+        {0,ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT,0,BR_TRANSPORT_NONE},
+        {0,ESP_ERR_ESP_TLS_TCP_CLOSED_FIN,0,BR_TRANSPORT_NONE},
+        {0,0,1,BR_TRANSPORT_TLS_UNKNOWN},
+        {0,ESP_ERR_NO_MEM,0,BR_TRANSPORT_TLS_UNKNOWN},
+        {MBEDTLS_X509_BADCERT_SKIP_VERIFY,ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_TLS_UNKNOWN},
+        {(int)UINT32_C(0x80000000),ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_TLS_UNKNOWN},
+        {MBEDTLS_X509_BADCERT_SKIP_VERIFY|MBEDTLS_X509_BADCERT_EXPIRED,ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,1,BR_TRANSPORT_TLS_UNKNOWN},
+    };
+    for(size_t i=0;i<sizeof(cases)/sizeof(*cases);i++){
+        bridge_transport_t *t=new_fixture();fail_connect=true;
+        t->ssl_connect=pinned_ssl_connect;
+        connect_error=(esp_tls_last_error_t){.last_error=cases[i].esp,.esp_tls_error_code=cases[i].stack,.esp_tls_flags=cases[i].flags};
+        assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0);
+        assert(connects==1&&auth_writes==0&&!bridge_transport_upgraded(t)&&bridge_transport_http_status(t)==0);
+        /* The adapter must NOT consume the SDK's error evidence. */
+        esp_tls_error_handle_t h=esp_transport_get_error_handle(t->ws);
+        assert(h&&h->last_error==cases[i].esp&&h->esp_tls_error_code==cases[i].stack&&h->esp_tls_flags==cases[i].flags);
+        bridge_transport_terminal_t outcome=BR_TRANSPORT_PROTOCOL;
+        assert(bridge_transport_dispose_result(t,now,&outcome));
+        fprintf(stderr,"cert-connect case %zu observed=%d expected=%d\n",i,(int)outcome,cases[i].expected);
+        assert((int)outcome==cases[i].expected);
+    }
+    bridge_transport_t *t=new_fixture();
+    esp_transport_error_storage *saved=t->ssl->foundation->error_handle;
+    assert(saved);t->ssl->foundation->error_handle=NULL;
+    note_connect_error(t,t->ssl);
+    t->ssl->foundation->error_handle=saved;
+    bridge_transport_terminal_t outcome=BR_TRANSPORT_NONE;
+    assert(bridge_transport_dispose_result(t,now,&outcome));
+    assert(outcome==BR_TRANSPORT_TLS_UNKNOWN);
+    puts("PASS cert-connect: SDK error copy + real WS + adapter, synthetic TLS");
+    return 0;
+}
+static int cert_positive(const char *value){
+    char *end=NULL;unsigned long flags=strtoul(value,&end,0);
+    assert(end&&!*end&&flags>0&&flags<UINT32_MAX);
+    bridge_transport_t *t=new_fixture();fail_connect=true;t->ssl_connect=pinned_ssl_connect;
+    connect_error=(esp_tls_last_error_t){.last_error=ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,
+        .esp_tls_error_code=1,.esp_tls_flags=(int)flags};
+    assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0);
+    assert(connects==1&&!auth_writes&&!bridge_transport_upgraded(t)&&!bridge_transport_http_status(t));
+    bridge_transport_terminal_t outcome=BR_TRANSPORT_NONE;
+    assert(bridge_transport_dispose_result(t,now,&outcome));
+    printf("CERT_TERMINAL=%d\n",(int)outcome);
+    assert(outcome==BR_TRANSPORT_CERT_VERIFY);
+    return 0;
+}
 int main(int argc,char**argv){
     /* Default/legacy remains the original 32+110 suite. Run every positive RED
      * as a separate process/CASE so one assertion cannot mask the others. */
+    if(argc==3&&!strcmp(argv[1],"cert-positive"))return cert_positive(argv[2]);
     if(argc==2&&strcmp(argv[1],"legacy")){
+        if(!strcmp(argv[1],"cert-connect"))return cert_connect();
         for(size_t i=0;i<sizeof(wire_cases)/sizeof(*wire_cases);i++)
             if(!strcmp(argv[1],wire_cases[i].name))return run_wire_case(&wire_cases[i]);
         for(size_t i=0;i<sizeof(extra_cases)/sizeof(*extra_cases);i++)

@@ -29,6 +29,7 @@
 #include "live_protocol.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/sha1.h"
+#include "mbedtls/x509.h"
 #endif
 
 typedef void *TaskHandle_t;
@@ -100,6 +101,9 @@ static unsigned consumed_ticket_faults;
 static int64_t data_dispatch_delay_us;
 static int64_t nondata_dispatch_delay_us;
 static bool fail_next_data_post;
+static bool fail_next_disconnect_post,cert_event_probe;
+static unsigned cert_error_events,cert_disconnect_events;
+static int cert_flags_seen;
 static unsigned data_post_count,fail_data_post_at;
 static struct {esp_event_handler_t fn;void *arg;} handlers[2];
 static unsigned handler_count;
@@ -134,11 +138,12 @@ static esp_err_t esp_event_post_to(void *loop,esp_event_base_t base,int id,
     if(id==WEBSOCKET_EVENT_DATA&&fail_next_data_post){
         fail_next_data_post=false;return fixture_sdk_event_post_to(&post_loop,base,id,event,n,ticks);
     }
+    if(id==WEBSOCKET_EVENT_DISCONNECTED&&fail_next_disconnect_post){
+        fail_next_disconnect_post=false;return fixture_sdk_event_post_to(&post_loop,base,id,event,n,ticks);
+    }
     pending_event=*(const esp_websocket_event_data_t*)event;pending_id=id;pending_valid=true;return ESP_OK;
 }
-static int esp_tls_get_and_clear_last_error(void *e,int *stack,int *flags){
-    (void)e;*stack=*flags=0;return 0; /* synthetic TLS error boundary only */
-}
+#include "pinned_tls_get_clear.inc"
 #endif
 
 int64_t esp_timer_get_time(void){
@@ -270,6 +275,18 @@ static int esp_event_loop_run(void *loop,unsigned ticks){
 #ifdef BRIDGE_RECEIVE_TEST
     if(pending_valid){
         pending_valid=false;
+        if(cert_event_probe&&pending_id==WEBSOCKET_EVENT_ERROR){
+            /* No other error_handle field is initialized at this event. */
+            assert(pending_event.error_handle.error_type==WEBSOCKET_ERROR_TYPE_NONE);
+            esp_tls_error_handle_t h=esp_transport_get_error_handle(atomic_load(&chain)->ws);
+            assert(h&&h->esp_tls_flags==cert_flags_seen);cert_error_events++;
+        }
+        if(cert_event_probe&&pending_id==WEBSOCKET_EVENT_DISCONNECTED){
+            assert(pending_event.error_handle.error_type==WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT);
+            assert(pending_event.error_handle.esp_tls_cert_verify_flags==cert_flags_seen);
+            esp_tls_error_handle_t h=esp_transport_get_error_handle(atomic_load(&chain)->ws);
+            assert(h&&!h->last_error&&!h->esp_tls_error_code&&!h->esp_tls_flags);cert_disconnect_events++;
+        }
         if(pending_id!=WEBSOCKET_EVENT_DATA&&nondata_dispatch_delay_us){
             assert(fake_clock);fake_now+=nondata_dispatch_delay_us;nondata_dispatch_delay_us=0;
         }
@@ -381,7 +398,12 @@ void esp_log_level_set(const char *tag,int level){(void)tag;assert(level==ESP_LO
 void fixture_log(const char *tag,const char *fmt,...){(void)tag;(void)fmt;} /* no tokens/transcripts emitted */
 esp_err_t esp_crt_bundle_attach(void *p){(void)p;return ESP_OK;}
 
-static int raw_connect(esp_transport_handle_t t,const char *h,int p,int ms){(void)t;assert(h&&p==9443&&ms>0);atomic_fetch_add(&connects,1);return connect_failure?-1:0;}
+static esp_tls_last_error_t fixture_connect_error;
+static int raw_connect(esp_transport_handle_t t,const char *h,int p,int ms){
+    assert(h&&p==9443&&ms>0);atomic_fetch_add(&connects,1);
+    if(connect_failure)esp_transport_set_errors(t,&fixture_connect_error);
+    return connect_failure?-1:0;
+}
 static int raw_read(esp_transport_handle_t t,char *b,int n,int ms){
     (void)t;(void)ms;
 #ifdef BRIDGE_RECEIVE_TEST
@@ -770,6 +792,34 @@ static int run_receive(const char *which){
         puts("PASS RECEIVE start-before-timer-delay: no SDK task admitted after cutoff.");return 0;
     }
     bridge_transport_t *t=receive_init();bridge_voice_t *c=&receive_context;
+    if(!strcmp(which,"cert-event-order")||!strcmp(which,"cert-event-post-loss")){
+        bool lost=!strcmp(which,"cert-event-post-loss");
+        /* The actual SDK task does connect -> ERROR dispatch -> abort, which
+         * closes and dispatches DISCONNECTED. Execute those exact bodies here,
+         * not the task scheduler; the handshake itself is synthetic. */
+        cert_event_probe=true;cert_flags_seen=MBEDTLS_X509_BADCERT_CN_MISMATCH;
+        fixture_connect_error=(esp_tls_last_error_t){
+            .last_error=ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED,
+            .esp_tls_error_code=1,.esp_tls_flags=cert_flags_seen};
+        connect_failure=true;c->ws->state=WEBSOCKET_STATE_INIT;
+        assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0);
+        assert(!bridge_transport_upgraded(t)&&bridge_transport_http_status(t)==0);
+        assert(esp_websocket_client_dispatch_event(c->ws,WEBSOCKET_EVENT_ERROR,NULL,0)==ESP_OK);
+        assert(cert_error_events==1);
+        fail_next_disconnect_post=lost;
+        assert(xSemaphoreTakeRecursive(c->ws->lock,0)==pdTRUE);
+        assert(esp_websocket_client_abort_connection(c->ws,WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT)==ESP_OK);
+        assert(xSemaphoreGiveRecursive(c->ws->lock)==pdTRUE);
+        assert(cert_disconnect_events==(lost?0U:1U));
+        if(lost)assert(failed_allocations==1&&!fail_next_disconnect_post);
+        esp_tls_error_handle_t h=esp_transport_get_error_handle(t->ws);
+        assert(h&&!h->last_error&&!h->esp_tls_error_code&&!h->esp_tls_flags);
+        bridge_transport_terminal_t result=BR_TRANSPORT_NONE;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==BR_TRANSPORT_CERT_VERIFY&&!app_sends&&!tx_size&&!atomic_load(&payload_sends));
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        puts("PASS certificate event ordering/get-clear: exact dispatch/abort, synthetic TLS/RTOS/events");return 0;
+    }
     if(!strncmp(which,"cleanup-race-rx-",16)){
         /* These sanitized literal text payloads match 70df142's builders and
          * gateway shutdown branch; they are NOT a captured gateway execution.

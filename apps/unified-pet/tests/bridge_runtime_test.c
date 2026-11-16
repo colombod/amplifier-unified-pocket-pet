@@ -42,7 +42,7 @@ typedef void *SemaphoreHandle_t;
 typedef void *esp_websocket_client_handle_t;
 typedef struct {unsigned unused;} audio_session_t;
 typedef struct {bool upgraded,cancelled,finished;} bridge_transport_t;
-typedef enum {BR_TRANSPORT_NONE,BR_TRANSPORT_PROTOCOL,BR_TRANSPORT_POLICY,BR_TRANSPORT_EVENT_LOSS,BR_TRANSPORT_PEER_NORMAL,BR_TRANSPORT_UNSUPPORTED,BR_TRANSPORT_PAYLOAD_REJECTED} bridge_transport_terminal_t;
+typedef enum {BR_TRANSPORT_NONE,BR_TRANSPORT_PROTOCOL,BR_TRANSPORT_POLICY,BR_TRANSPORT_EVENT_LOSS,BR_TRANSPORT_PEER_NORMAL,BR_TRANSPORT_UNSUPPORTED,BR_TRANSPORT_PAYLOAD_REJECTED,BR_TRANSPORT_CERT_VERIFY,BR_TRANSPORT_TLS_UNKNOWN} bridge_transport_terminal_t;
 typedef const char *esp_event_base_t;
 typedef struct {int data_len,payload_len,payload_offset,op_code;bool fin;const char *data_ptr;} esp_websocket_event_data_t;
 #define WEBSOCKET_EVENT_CONNECTED 1

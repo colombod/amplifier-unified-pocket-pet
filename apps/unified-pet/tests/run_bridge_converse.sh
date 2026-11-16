@@ -25,6 +25,12 @@ start=text.index(anchor)
 # Everything after the include block, unmodified: no body is replaced or skipped.
 assert '#include' not in text[start:],'unexpected include inside production body'
 body=text[start:]
+mutant=os.environ.get('PET_CERT_TEST_MUTANT','')
+if mutant:
+    if mutant!='owner':raise SystemExit('Unsupported certificate test mutation')
+    needle='else if(c->transport_terminal==BR_TRANSPORT_CERT_VERIFY)s="Host certificate verification failed.";'
+    assert body.count(needle)==1
+    body=body.replace(needle,'else if(false&&c->transport_terminal==BR_TRANSPORT_CERT_VERIFY)s="Host certificate verification failed.";',1)
 (out/'bridge-converse-production.inc').write_text(
     f'#line {text.count(chr(10),0,start)+1} "main/bridge_voice.c"\n'+body)
 generated={}
@@ -87,10 +93,12 @@ cc -std=gnu11 -Wall -Wextra -Werror -g -pthread -fsanitize=address,undefined -fn
  -UNDEBUG \
  -I "$out" -I main -I "$IDF_PATH/components/json/cJSON" -I "$IDF_PATH/components/mbedtls/mbedtls/include" \
  tests/bridge_converse_test.c main/bridge_protocol.c "$IDF_PATH/components/json/cJSON/cJSON.c" "$lib/libmbedcrypto.a" -o "$out/converse"
+if [ "${PET_CERT_STITCH_ONLY:-0}" = 1 ]; then exit 0; fi
+if [ "${PET_CERT_TEST_MUTANT:-}" = owner ]; then "$out/converse" cert-first; exit "$?"; fi
 failed=0
 for name in stop-before-active stop-registration stop-reconnect-registration stop-audio-arm stop-parent-audio-arm stop-start-send-admitted stop-capture-guard stop-guard-timeout stop-audio-work-deadline stop-codec-work-deadline open-success-stop open-success-cutoff open-success-control normal off-connecting off-connected off-started off-opening off-listening off-asking \
     off-answering off-parent off-no-reply host-quiet host-time-limit host-burst-error \
-    notice-queue notice-linger notice-begin notice-user notice-fatal terminal-wire malformed-tail reviewed-races sdk-event-loss no-error \
+    notice-queue notice-linger notice-begin notice-user notice-fatal terminal-wire cert-first cert-reconnect cert-muted cert-unknown cert-no-evidence cert-silent cert-silent-reconnect malformed-tail reviewed-races sdk-event-loss no-error \
     malformed turn-frame unknown-type deadline audio-open mic-read speaker-write setup-token setup-start \
     burst-ok gappy lag late-600 late-600-heavy recover retained \
     re-listening re-asking re-answering re-close re-error re-flood re-send re-stall re-stall-long \

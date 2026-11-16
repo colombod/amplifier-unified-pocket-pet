@@ -11,7 +11,9 @@ typedef enum {
     BR_TRANSPORT_EVENT_LOSS,
     BR_TRANSPORT_PEER_NORMAL, /* complete received WS1000; no claim about close cause */
     BR_TRANSPORT_UNSUPPORTED,
-    BR_TRANSPORT_PAYLOAD_REJECTED
+    BR_TRANSPORT_PAYLOAD_REJECTED,
+    BR_TRANSPORT_CERT_VERIFY, /* positive mbedTLS certificate verification flags */
+    BR_TRANSPORT_TLS_UNKNOWN  /* TLS error or verification result is inconclusive */
 } bridge_transport_terminal_t;
 /* One active chain. Reuse only after successful disposal's final-access proof.
  * All APIs are inert until start. token is copied by pinned transport_ws. */
@@ -48,7 +50,7 @@ void bridge_transport_dispose_unstarted(bridge_transport_t *t);
  * True invalidates t/client. Waits share this absolute monotonic deadline; no
  * reconnect, send, timeout-and-free or fresh cleanup time allowance is added. */
 bool bridge_transport_dispose(bridge_transport_t *t,int64_t absolute_deadline_us);
-/* Like dispose, but reports a verified terminal wire condition only after the
+/* Like dispose, but reports terminal transport evidence only after the
  * transport task's final-access proof. False retains t and leaves out unchanged. */
 bool bridge_transport_dispose_result(bridge_transport_t *t,int64_t absolute_deadline_us,
                                      bridge_transport_terminal_t *out);
