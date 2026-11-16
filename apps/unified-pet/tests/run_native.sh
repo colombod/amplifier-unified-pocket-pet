@@ -2,6 +2,13 @@
 # Run inside the pinned ESP-IDF SDK container, never a host SDK installation.
 set -eu
 cd "$(dirname "$0")/.."
+# Mutant, compile-only, real-parent-only, or optimized Python modes do not
+# execute this complete maintained suite. Reject rather than report false PASS.
+if [ -n "${PET_CERT_TEST_MUTANT:-}" ] || [ "${PET_CERT_STITCH_ONLY:-0}" != 0 ] ||
+   [ "${BRIDGE_JOIN_REAL_PARENT:-0}" != 0 ] || [ -n "${PYTHONOPTIMIZE:-}" ]; then
+  printf '%s\n' 'run_native requires full, non-mutant tests with Python assertions enabled' >&2
+  exit 2
+fi
 export PET_REPO="$(cd ../.. && pwd)"
 out=${1:-/tmp/pet-native}
 mkdir -p "$out"
@@ -44,5 +51,11 @@ sh tests/run_bridge_converse.sh "$out/bridge-converse"
 python3 tests/run_bridge_transport_native.py "$out/bridge-transport"
 python3 tests/run_bridge_transport_native.py "$out/bridge-lifecycle" lifecycle
 python3 tests/run_bridge_transport_native.py "$out/bridge-receive" receive
+# Certificate failures: the adapter matrix consumes synthetic TLS errors using
+# exact pinned SSL/WS bodies. The stitch supplies real host mbedTLS flags over
+# socketpairs, then crosses synthetic TLS and transport seams into the actual
+# conversation owner. Neither test is an IDF-device TLS/RTOS qualification.
+python3 tests/run_bridge_transport_native.py "$out/bridge-cert" cert-connect
+python3 tests/run_cert_stitch.py "$out/bridge-cert/test" "$out/bridge-converse/converse" "$out/bridge-cert-stitch"
 # Setup-page JavaScript suites run separately with the existing host Node.
 # Node is intentionally not installed into the pinned offline SDK image.

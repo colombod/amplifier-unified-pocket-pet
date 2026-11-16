@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -26,6 +27,7 @@ inputs = [
     repo / "components/pet_tls/pet_tls.c",
     repo / "components/pet_tls/include/pet_tls.h",
     sdk / "components/mbedtls/mbedtls/include/mbedtls/build_info.h",
+    sdk / "components/mbedtls/mbedtls/include/mbedtls/x509.h",
     lib / "libmbedtls.a", lib / "libmbedx509.a", lib / "libmbedcrypto.a",
     adapter, owner, Path(__file__),
 ]
@@ -60,11 +62,22 @@ for line in run.stdout.splitlines():
             observed[name] = json.loads(rest)
 assert set(observed) == {"valid-partial-401", "wrong-host", "untrusted", "expired"}
 assert observed["valid-partial-401"]["verified"] and not observed["valid-partial-401"]["verify_flags"]
+header = (sdk / "components/mbedtls/mbedtls/include/mbedtls/x509.h").read_text()
+expected_flags = {}
+for name, symbol in (
+    ("wrong-host", "MBEDTLS_X509_BADCERT_CN_MISMATCH"),
+    ("untrusted", "MBEDTLS_X509_BADCERT_NOT_TRUSTED"),
+    ("expired", "MBEDTLS_X509_BADCERT_EXPIRED"),
+):
+    match = re.search(r"^#define\s+" + symbol + r"\s+(0x[0-9a-fA-F]+)\b", header, re.MULTILINE)
+    assert match, symbol
+    expected_flags[name] = int(match.group(1), 16)
 results = {}
 for name in ("wrong-host", "untrusted", "expired"):
     value = observed[name]
     flags = value["verify_flags"]
     assert 0 < flags < 0xFFFFFFFF and not value["verified"] and not value["http"]
+    assert flags & expected_flags[name], (name, flags, expected_flags[name])
     transport = subprocess.run(
         [str(adapter), "cert-positive", str(flags)], capture_output=True, text=True,
         check=True, timeout=10,
@@ -78,7 +91,8 @@ for name in ("wrong-host", "untrusted", "expired"):
         check=True, timeout=10,
     )
     assert "PASS cert-stitch" in voice.stdout
-    results[name] = {"flags": flags, "terminal": int(terminal), "owner_pass": True}
+    results[name] = {"flags": flags, "required_flag": expected_flags[name],
+                     "terminal": int(terminal), "owner_pass": True}
 assert before == hashes(), "stitch inputs changed during execution"
 (root / "receipt.json").write_text(json.dumps({
     "inputs": before, "observed": observed, "stitched_results": results,
