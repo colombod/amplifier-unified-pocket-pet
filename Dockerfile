@@ -1,4 +1,4 @@
-FROM espressif/idf:v5.5.4@sha256:f3bc9daebfd8cb4e0afbdced7caac4431c7a862326a5e5587d65c31439549bb5
+FROM espressif/idf:v5.5.4@sha256:b9f2d6ea1c19e0c9f7959bdb74a9e3c775642f9d0f3b841937c5fa3363db892b
 # Explicit image preparation only. Restrict Pillow to known CPython 3.12
 # Linux wheels for the actual SDK image architecture; never build from sdist.
 RUN /usr/bin/python3 -c 'import platform, sys; assert sys.implementation.name == "cpython" and sys.version_info[:2] == (3, 12) and platform.machine() in ("x86_64", "aarch64"), "Unsupported SDK Python/architecture"' \

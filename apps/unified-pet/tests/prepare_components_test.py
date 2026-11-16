@@ -77,6 +77,14 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(set(packages), set(pins))
         self.assertEqual(sum(p["files"] for p in pins.values()), 4523)
 
+    def test_tools_image_uses_pinned_multiplatform_release(self):
+        dockerfile = SCRIPT.parents[3] / "Dockerfile"
+        self.assertEqual(
+            dockerfile.read_text(encoding="utf-8").splitlines()[0],
+            "FROM espressif/idf:v5.5.4@sha256:"
+            "b9f2d6ea1c19e0c9f7959bdb74a9e3c775642f9d0f3b841937c5fa3363db892b",
+        )
+
     def test_success_and_full_actual_tree_verification(self):
         downloader = mock.Mock(side_effect=self.download)
         self.run_prepare(downloader)

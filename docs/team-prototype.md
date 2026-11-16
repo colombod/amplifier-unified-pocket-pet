@@ -71,18 +71,20 @@ pins. Fresh public downloads and the existing independent `offline_cache.py`
 checker verified 4,523 files on the maintainer's Linux host. A clean
 network-disabled firmware build also passed with that freshly prepared cache
 and an **existing, separately prepared AMD64 tools image**. It did not validate
-the pinned ARM64 Dockerfile build. If preparation fails after staging is created,
+a fresh Dockerfile image build. If preparation fails after staging is created,
 it retains that directory for inspection; an earlier failure may leave no stage.
 It does not replace an existing cache. Keep the resulting cache in an
 owner-controlled location and do not modify it during the build. A teammate's
 complete fresh-machine setup is not yet verified.
 
-The repository's `Dockerfile` pins its ESP-IDF base image and Pillow wheel hashes,
-but the pinned base digest currently resolves to **Linux ARM64**. On the
-maintainer's AMD64 Linux host no ARM emulator was registered, so building that
-Dockerfile there was not verified. Do not substitute an image and describe it as
-the pinned base. A reproducible image bootstrap on a clean teammate's host,
-including actual architecture and Python compatibility, remains to be validated.
+The repository's `Dockerfile` pins the ESP-IDF 5.5.4 multi-platform image index
+and Pillow wheel hashes. The index includes the originally pinned ARM64 image
+and a different, official AMD64 image from the same release. A fresh Dockerfile
+image build, including actual architecture and Python compatibility, has not
+been verified on either platform. The root `compose.yaml` selects ARM64 and
+builds the older root app, not this Unified app. A clean teammate's image
+bootstrap remains to be validated; do not describe a substituted tools image as
+the result of that build.
 Once a matched local image is available, including Pillow at
 `/opt/pet-assets/bin/python`, substitute its name below; the command uses the
 exported `PET_COMPONENT_CACHE` above:
