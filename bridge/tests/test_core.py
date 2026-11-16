@@ -1533,6 +1533,102 @@ def _plant_command(case: CoreCase, command_id: str, state: str, epoch: int, **ex
     case.journal.put(f"cmd-{command_id}.json", record)
 
 
+class PreDialSafetyTest(CoreCase):
+    COMMAND = "00000000-0000-4000-8000-0000000000b2"
+
+    def setUp(self):
+        super().setUp()
+        self.binding = self.bind()
+
+    def test_record_matrix_is_read_only_and_no_send(self):
+        for state in (
+            "PREPARED", "ATTEMPTED", "UNCERTAIN", "ACCEPTED", "REJECTED",
+            "ABANDONED", "COMPLETE", "SUPPRESSED", "RESOLVED",
+        ):
+            with self.subTest(state=state):
+                _plant_command(self, self.COMMAND, state, self.bridge.status()["epoch"])
+                before = self.all_journal_bytes()
+                self.assertEqual(
+                    self.bridge.pre_dial_safe(self.binding),
+                    state not in ("PREPARED", "ATTEMPTED", "UNCERTAIN"),
+                )
+                self.assertEqual(self.all_journal_bytes(), before)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_restart_recovers_attempted_as_unresolved_and_prepared_as_unsent(self):
+        _plant_command(self, self.COMMAND, "ATTEMPTED", self.bridge.status()["epoch"])
+        self.restart(resume=False)
+        self.assertEqual(self.record(self.COMMAND)["state"], "UNCERTAIN")
+        before = self.all_journal_bytes()
+        self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+        self.assertEqual(self.all_journal_bytes(), before)
+        self.bridge.resolve_uncertain(
+            self.COMMAND, operator_ack=f"ack-uncertain:{self.COMMAND}"
+        )
+        self.assertTrue(self.bridge.pre_dial_safe(self.binding))
+        _plant_command(self, self.COMMAND, "PREPARED", self.bridge.status()["epoch"])
+        self.restart(resume=False)
+        self.assertEqual(self.record(self.COMMAND)["state"], "ABANDONED")
+        self.assertTrue(self.bridge.pre_dial_safe(self.binding))
+        self.assertEqual(self.transport.calls, [])
+
+    def test_faulted_unbound_inconsistent_and_corrupt_state_refuse(self):
+        self.assertFalse(self.bridge.pre_dial_safe(None))
+        wrong = self.bind(session=OTHER_SESSION)
+        self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+        self.assertTrue(self.bridge.pre_dial_safe(wrong))
+        state = self.journal.get("binding.json")
+        for key, value in (("epoch", True), ("stopped", 0), ("binding", None)):
+            with self.subTest(key=key):
+                self.journal.put("binding.json", {**state, key: value})
+                before = self.all_journal_bytes()
+                self.assertFalse(self.bridge.pre_dial_safe(wrong))
+                self.assertEqual(self.all_journal_bytes(), before)
+        self.journal.put("binding.json", state)
+        _plant_command(self, self.COMMAND, "ACCEPTED", state["epoch"])
+        name = f"cmd-{self.COMMAND}.json"
+        record = self.journal.get(name)
+        for invalid in ("UNKNOWN", [], None):
+            with self.subTest(invalid=invalid):
+                self.journal.put(name, {**record, "state": invalid})
+                self.assertFalse(self.bridge.pre_dial_safe(wrong))
+        self.journal.put(name, record)
+        with mock.patch.object(self.journal, "get", side_effect=JournalError("journal_io_error")):
+            self.assertFalse(self.bridge.pre_dial_safe(wrong))
+        with mock.patch.object(self.bridge, "_faulted", True):
+            self.assertFalse(self.bridge.pre_dial_safe(wrong))
+        self.assertEqual(self.transport.calls, [])
+
+    def test_open_turn_and_lost_listed_record_fail_closed(self):
+        turn = self.bridge.begin_turn()
+        self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+        self.bridge.abandon_turn(turn)
+        _plant_command(self, self.COMMAND, "ACCEPTED", self.bridge.status()["epoch"])
+        actual = self.journal.get
+        with mock.patch.object(
+            self.journal, "get",
+            side_effect=lambda name: None if name.startswith("cmd-") else actual(name),
+        ):
+            self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+
+    def test_listing_or_count_error_and_mixed_uncertainty_fail_closed(self):
+        second = "00000000-0000-4000-8000-0000000000b3"
+        epoch = self.bridge.status()["epoch"]
+        _plant_command(self, self.COMMAND, "ACCEPTED", epoch)
+        _plant_command(self, second, "UNCERTAIN", epoch)
+        before = self.all_journal_bytes()
+        self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+        self.assertEqual(self.all_journal_bytes(), before)
+        self.journal.delete(f"cmd-{second}.json")
+        for method in ("names", "count"):
+            with self.subTest(method=method), mock.patch.object(
+                self.journal, method, side_effect=JournalError("journal_io_error")
+            ):
+                self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+        with mock.patch.object(self.journal, "count", return_value=42):
+            self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+
+
 class CredentialRefTest(CoreCase):
     """R4: only the exact opaque identifier 'device-' + 32 lowercase hex."""
 
@@ -2149,6 +2245,15 @@ class InflightLockTest(CoreCase):
         self.finish()
         self.assertEqual(self.box["result"].outcome, "accepted")
         self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+
+    def test_pre_dial_refuses_while_send_is_inflight_then_allows_known_acceptance(self):
+        binding = self.bridge._binding
+        self.transport.responses.append(ok())
+        turn, _ = self.start_send()
+        self.assertFalse(self.other_thread(lambda: self.bridge.pre_dial_safe(binding)))
+        self.finish()
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertTrue(self.bridge.pre_dial_safe(binding))
 
     def test_stop_from_a_second_thread_does_not_wait_and_the_late_accept_is_not_spoken(
         self,

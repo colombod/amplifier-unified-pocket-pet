@@ -332,6 +332,46 @@ class Bridge:
                 found.append((name, _validate_cmd(record)))
         return found
 
+    def pre_dial_safe(self, expected_binding: Binding | None) -> bool:
+        """Read-only provider admission under the core lock; uncertainty stays unresolved.
+
+        This is not the turn gate: it does not clean up, suppress, reconcile, or
+        resume anything. The journal's exclusive-owner and durable ATTEMPTED-before-
+        send invariants are required, as is gateway custody across sessions.
+        """
+        with self._lock:
+            if (
+                self._faulted
+                or self._inflight is not None
+                or self._turn is not None
+                or expected_binding is None
+                or self._binding != expected_binding
+            ):
+                return False
+            try:
+                # Check the persisted binding without mutating the loaded state.
+                state = self._read(BINDING_NAME)
+                if (
+                    state is None
+                    or set(state) != {"binding", "epoch", "stopped"}
+                    or _valid_binding_dict(state["binding"]) != self._binding
+                    or type(state["epoch"]) is not int
+                    or state["epoch"] != self._epoch
+                    or type(state["stopped"]) is not bool
+                    or state["stopped"] != self._stopped
+                ):
+                    return False
+                names = self._journal.names("cmd-")
+                for name in names:
+                    record = self._read(name)
+                    if record is None:
+                        return False
+                    if _validate_cmd(record)["state"] in {"PREPARED", "ATTEMPTED", "UNCERTAIN"}:
+                        return False
+                return self._count() == len(names) + 1
+            except Exception:  # noqa: BLE001 - any unreadable state is unsafe, never logged
+                return False
+
     def _transition(
         self, name: str, record: dict[str, Any], state: str, **extra: Any
     ) -> dict[str, Any]:

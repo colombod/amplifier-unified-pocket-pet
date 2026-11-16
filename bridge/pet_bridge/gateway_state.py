@@ -68,9 +68,10 @@ Gateway -> device (outbound builders; each returns ``str``)
 
     Provider endings close the device WebSocket without a reason string. A validated
     same-session ``close_requested``, ``expired`` or ``remote_hangup`` emits 1000;
-    1008 is upstream authentication/authorization refusal or a provider safety
-    filter. 1002 indicates invalid/incompatible upstream protocol (not a claim
-    about the device's frames); 1011 is an ambiguous provider/network failure
+    1008 is upstream authentication/authorization refusal, a provider safety
+    filter, or local pre-dial safety refusal. 1002 indicates invalid/incompatible
+    upstream protocol (not a claim about the device's frames); 1011 is an ambiguous
+    provider/network failure
     including ``connection_lost``. A 1000 says only that the voice session ended,
     not that our close was acknowledged or that a request or reply completed.
     These distinctions are best-effort: a lost close frame carries no cause.

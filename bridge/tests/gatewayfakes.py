@@ -452,3 +452,7 @@ class FakeOps:
     def status(self) -> dict[str, Any]:
         scripted = self._enter("status", ())
         return {} if scripted is None else scripted
+
+    def pre_dial_safe(self) -> bool:
+        scripted = self._enter("pre_dial_safe", ())
+        return True if scripted is None else scripted

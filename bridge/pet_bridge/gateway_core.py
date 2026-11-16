@@ -124,7 +124,7 @@ class ProviderError(Exception):
 
     CODES = frozenset({
         "provider_connect", "provider_redirect", "provider_link", "provider_auth",
-        "provider_protocol",
+        "provider_protocol", "provider_policy",
     })
 
     def __init__(self, code: str) -> None:
@@ -838,6 +838,16 @@ class UnifiedOps:
 
     def status(self) -> dict[str, Any]:
         return self._bridge.status()
+
+    def pre_dial_safe(self) -> bool:
+        """A local, non-mutating admission check against the frozen session binding."""
+        if (
+            self._binding is None
+            or self._binding.session_id != self._session_id
+            or self._binding.credential_ref != self._credential_ref
+        ):
+            return False
+        return self._bridge.pre_dial_safe(self._binding)
 
 
 class LoopClock(Protocol):
@@ -1665,7 +1675,9 @@ class PetSession:
             link = await self._provider_connect()
         except ProviderError as err:
             # Only fixed connector classifications, never exception details.
-            code = {"provider_auth": 1008, "provider_protocol": 1002}.get(err.code, 1011)
+            code = {
+                "provider_auth": 1008, "provider_policy": 1008, "provider_protocol": 1002,
+            }.get(err.code, 1011)
             self._post(("provider_failed", code))
             return
         except Exception:  # noqa: BLE001 - fixed outcome, no detail

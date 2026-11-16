@@ -1049,6 +1049,20 @@ class _Gateway:
 
     # -- sessions
     async def _connect(self) -> Any:
+        # Custody owns the single slot until the prior runner has settled. Recheck
+        # its durable send state immediately before any paid provider connection.
+        # This job reads locally only; it does not reconcile or resolve a command.
+        safe = False
+        try:
+            safe = await self._runner.run(
+                "status", self._ops.pre_dial_safe, urgent=False, retain=False
+            )
+        except Exception:  # noqa: BLE001 - failure is a fixed local policy refusal
+            pass
+        if safe is not True:
+            raise ProviderError("provider_policy") from None
+        if self._closing:
+            raise asyncio.CancelledError
         self._event("provider_dial", outcome="attempt", code=None)
         try:
             link = await self._deps.provider_connect(self._key, timeout=gs.START_DEADLINE_S)

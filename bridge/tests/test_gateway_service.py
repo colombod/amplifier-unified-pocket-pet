@@ -19,6 +19,7 @@ from pet_bridge import cli, core
 from pet_bridge import gateway_core as gc
 from pet_bridge import gateway_events as ge
 from pet_bridge import gateway_server as gsv
+from pet_bridge import gateway_state as gs
 from pet_bridge.journal import BINDING_NAME
 
 from . import authfakes as af
@@ -443,6 +444,13 @@ class ServeEventsTest(gf.OfflineAsyncCase):
         sink = ge.EventLog(log, self.err)
         self.addCleanup(sink.close)
         gw._event_log = sink
+        # The original service is stopped; give the isolated wrapper a live
+        # synthetic runner and an affirmative local gate for this log-only test.
+        gw._runner = gc.CoreRunner()
+        gw._runner.start()
+        self.addAsyncCleanup(gw._runner.aclose)
+        gw._ops.pre_dial_safe = lambda: True
+        gw._closing = False
         for error, code in ((gsv.ProviderError("provider_redirect"), "provider_redirect"),
                             (gsv.ProviderError("provider_auth"), "provider_auth"),
                             (gsv.ProviderError("provider_protocol"), "provider_protocol"),
@@ -534,3 +542,578 @@ class LoggedFlowTest(flow.FlowCase):
                        af.TOKEN, srv.GOOD_TOKEN, flow.SESSION_ID, af.HOST_IDENTITY,
                        flow.b64(flow.PCM_A), flow.b64(b"\x01\x02" * 100)):
             self.assertNotIn(canary, text)
+
+
+class PreDialUncertaintyFlowTest(flow.FlowCase):
+    """Real journal/core/custody with synthetic device, provider and Unified."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.devices = []
+        self.providers = []
+        self.dials = 0
+        self.sockets = []
+
+        async def connect(_key, *, timeout):
+            self.assertEqual(timeout, gs.START_DEADLINE_S)
+            self.dials += 1
+            provider = gf.FakeProviderLink(self.clock)
+            self.providers.append(provider)
+            return provider
+
+        def make_ws():
+            ws = srv.FakeServerWS()
+            self.sockets.append(ws)
+            return ws
+
+        cfg = srv.make_cfg(self.base, session_id=flow.SESSION_ID)
+        self.gw = gsv._Gateway(
+            cfg, gsv.Secret(gf.KEY_CANARY), gsv.AuthRegistry(), self.runner, self.ops,
+            gsv.ServeDeps(provider_connect=connect, clock=lambda: self.clock),
+            ws_factory=make_ws, device_factory=lambda *_: self.devices.pop(0),
+        )
+        self.addAsyncCleanup(self.gw.shutdown)
+
+    async def test_gate_checks_frozen_session_ref_and_live_binding_locally(self):
+        self.assertTrue(self.ops.pre_dial_safe())
+        for field, value in (
+            ("_binding", None),
+            ("_session_id", "other-session"),
+            ("_credential_ref", "device-" + "cd" * 16),
+            ("_binding", dataclasses.replace(self.binding, binding_id=flow.IdFactory(3000)())),
+        ):
+            with self.subTest(field=field), mock.patch.object(self.ops, field, value):
+                self.assertFalse(self.ops.pre_dial_safe())
+        self.assertTrue(self.ops.pre_dial_safe())
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.dials, 0)
+
+    async def test_lost_send_result_with_durable_uncertainty_does_not_redial(self):
+        self.client.post_response = flow.Response(504, b"")
+        gate = self.hold_posts()
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        device.feed(gf.ASSISTANT_START)
+        await self.quiesce()
+        self.assertEqual(self.dials, 1)
+        device.feed({"type": "pet.turn.begin"})
+        await self.quiesce()
+        turn = device.of_type("pet.turn.began")[0]["turn_id"]
+        self.providers[0].push(delegation())
+        self.providers[0].push(delta("e1", "hello world", 0, 500))
+        await self.quiesce()
+        device.feed(flow.golden_in(turn)["capture_stop"])
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        device.feed(self.confirm_frame(turn))
+        await self.quiesce()
+        await until(self.client.post_entered.is_set)
+        self.assertTrue(self.client.post_blocked())
+        device.fail_sends = True
+        device.disconnect()
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        self.assertEqual(device.of_type("pet.turn.send_result"), [])
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(srv.request_for())).status, 409)
+        self.assertEqual(self.dials, 1)
+        self.assertTrue(self.client.post_blocked())
+        gate.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn)["state"], "UNCERTAIN")
+        before = self.journal.get(f"cmd-{turn}.json")
+        self.assertEqual(len(self.client.posts), 1)
+
+        second = gf.FakeDeviceLink(self.clock)
+        self.devices.append(second)
+        second.feed(gf.ASSISTANT_START)
+        retry = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        if not retry.done():  # baseline lacks the fence; close its synthetic session
+            second.feed({"type": "pet.stop"})
+            await self.quiesce()
+        await asyncio.wait_for(retry, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.journal.get(f"cmd-{turn}.json"), before)
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(second.close_codes, [1008])
+        self.assertEqual(second.of_type("session.started"), [])
+
+        # Reopen the actual journal and core, not just a new session. Startup
+        # recovery must preserve the unresolved command without another send.
+        await self.gw.shutdown()
+        await self.runner.aclose()
+        self.journal.close()
+        self.journal = flow.Journal(self.base / "journal")
+        self.addCleanup(self.journal.close)
+        self.bridge = core.Bridge(
+            self.journal, flow.transport.HttpsTransport(self.store, lambda: self.client),
+            clock=lambda: flow.WALL0 + self.clock.now(), new_id=flow.IdFactory(1000),
+            monotonic=self.clock.now,
+        )
+        self.runner = gc.CoreRunner()
+        self.runner.start()
+        self.addAsyncCleanup(self.runner.aclose)
+        self.ops = gc.UnifiedOps(
+            self.bridge, self.store, flow.CRED_REF, flow.SESSION_ID, lambda: self.client,
+            monotonic=self.clock.now, binding=self.binding,
+        )
+        old = self.gw
+        self.gw = gsv._Gateway(
+            old._cfg, gsv.Secret(gf.KEY_CANARY), gsv.AuthRegistry(), self.runner, self.ops,
+            old._deps, ws_factory=old._ws_factory, device_factory=old._device_factory,
+        )
+        self.addAsyncCleanup(self.gw.shutdown)
+        third = gf.FakeDeviceLink(self.clock)
+        self.devices.append(third)
+        third.feed(gf.ASSISTANT_START)
+        restarted = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(restarted, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(third.close_codes, [1008])
+        self.assertEqual(self.journal.get(f"cmd-{turn}.json"), before)
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.dials, 1)
+
+    async def test_conversation_loses_asking_and_uncertainty_before_disconnect(self):
+        self.client.post_response = flow.Response(504, b"")
+        gate = self.hold_posts()
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        device.feed(gf.ASSISTANT_START)
+        await self.quiesce()
+        device.feed({"type": "pet.converse.begin"})
+        await self.quiesce()
+        self.assertEqual(
+            [f["state"] for f in device.of_type("pet.converse.state")], ["listening"]
+        )
+        self.providers[0].push(delta("e1", "hello world", 0, 500))
+        self.providers[0].push(delegation())
+        await self.quiesce()
+        device.fail_sends = True
+        await self.clock.advance(1.5)
+        await until(self.client.post_entered.is_set)
+        self.assertTrue(self.client.post_blocked())
+        device.disconnect()
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        self.assertNotIn(
+            "asking", [f["state"] for f in device.of_type("pet.converse.state")]
+        )
+        self.assertEqual(device.of_type("pet.converse.notice"), [])
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(srv.request_for())).status, 409)
+        # Make the retained-result lookup unavailable; the durable result remains
+        # the source of truth and must still prevent a paid replacement session.
+        with mock.patch.object(
+            self.runner, "take_result", side_effect=gc.RunnerError("runner_result_unavailable")
+        ):
+            gate.set()
+            await until(lambda: not self.gw.busy)
+        self.assertEqual(self.gw.last_outcome.source, "unavailable")
+        (name,) = self.command_names()
+        before = self.journal.get(name)
+        self.assertEqual(before["state"], "UNCERTAIN")
+
+        second = gf.FakeDeviceLink(self.clock)
+        self.devices.append(second)
+        second.feed(gf.ASSISTANT_START)
+        retry = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(retry, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(second.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.journal.get(name), before)
+
+    async def _cross_route_uncertainty_and_startup(self, first_tailnet, aged=False):
+        self.gw._cfg = srv.make_cfg(
+            self.base, session_id=flow.SESSION_ID,
+            tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test",
+        )
+        lan = srv.request_for(
+            transport=srv.transport_for(local=("10.1.2.3", 8941))
+        )
+        tail = srv.request_for(
+            host="gateway.example.test:8941",
+            transport=srv.transport_for(local=("100.64.12.34", 8941)),
+        )
+        first_route, other_route = (tail, lan) if first_tailnet else (lan, tail)
+        self.client.post_response = flow.Response(504, b"")
+        gate = self.hold_posts()
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        first = asyncio.create_task(self.gw.handle(first_route))
+        await self.quiesce()
+        device.feed(gf.ASSISTANT_START)
+        await self.quiesce()
+        self.assertEqual(self.dials, 1)
+        device.feed({"type": "pet.turn.begin"})
+        await self.quiesce()
+        turn = device.of_type("pet.turn.began")[0]["turn_id"]
+        self.providers[0].push(delta("e1", "hello world", 0, 500))
+        self.providers[0].push(delegation())
+        await self.quiesce()
+        device.feed(flow.golden_in(turn)["capture_stop"])
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        device.feed(self.confirm_frame(turn))
+        await until(self.client.post_entered.is_set)
+        self.assertTrue(self.client.post_blocked())
+        device.fail_sends = True
+        device.disconnect()
+        await self.quiesce()
+        await asyncio.wait_for(first, 5)
+        self.assertEqual(device.of_type("pet.turn.send_result"), [])
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(other_route)).status, 409)
+        self.assertTrue(self.client.post_blocked())
+        self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+        gate.set()
+        await until(lambda: not self.gw.busy)
+        name = f"cmd-{turn}.json"
+        before = self.journal.get(name)
+        self.assertEqual(before["state"], "UNCERTAIN")
+
+        second = gf.FakeDeviceLink(self.clock)
+        self.devices.append(second)
+        second.feed(gf.ASSISTANT_START)
+        values = []
+        original_gate = self.ops.pre_dial_safe
+
+        def record_gate():
+            value = original_gate()
+            values.append(value)
+            return value
+
+        with mock.patch.object(self.ops, "pre_dial_safe", record_gate):
+            retry = asyncio.create_task(self.gw.handle(other_route))
+            await self.quiesce()
+            if not retry.done():  # baseline without the fence needs a synthetic stop
+                second.feed({"type": "pet.stop"})
+                await self.quiesce()
+            await asyncio.wait_for(retry, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(values, [False])
+        self.assertEqual(second.close_codes, [1008])
+        self.assertEqual(second.of_type("session.started"), [])
+        self.assertEqual(self.journal.get(name), before)
+        self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+
+        # Restart through the actual service startup with a fake site, client and
+        # provider; reuse only this test's synthetic credential and journal.
+        await self.gw.shutdown()
+        await self.runner.aclose()
+        self.journal.close()
+        self.store.save_client_id(af.CLIENT_ID, flow.CRED_REF)
+        self.store.close()
+        fixture = srv.StateFixture(self.base)
+        fixture.write("cert.pem", "synthetic cert")
+        fixture.write("key.pem", "synthetic tls key")
+        fixture.write("provider.key", gf.KEY_CANARY)
+        cfg = srv.config_doc(
+            self.base, state_root=str(self.base), session_id=flow.SESSION_ID,
+            tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test",
+        )
+        config_path = fixture.write("config.json", json.dumps(cfg))
+        spies = srv.Spies()
+        client = self.client
+        attaches = []
+
+        class RestartUnified:
+            def request(self, origin, route, *, headers=None, body=b""):
+                if route.name == "attach":
+                    attaches.append(True)
+                    return af.json_response(af.attach_ok())
+                return client.request(origin, route, headers=headers, body=body)
+
+        spies.unified = RestartUnified()
+        deps = spies.deps(self.clock)
+        deps.provider_connect = self.gw._deps.provider_connect
+        held = gsv._Held()
+        self.addAsyncCleanup(gsv._release, held)
+        startup_wall = flow.WALL0 + self.clock.now() + (core.RETENTION_S if aged else 0)
+        with mock.patch.object(gsv.time, "time", return_value=startup_wall):
+            await gsv._startup(held, config_path, {}, io.StringIO(), deps)
+        restarted = held.gateway
+        self.assertEqual(len(attaches), 1)
+        after_startup = held.journal.get(name)
+        if aged:
+            self.assertEqual(after_startup["state"], "UNCERTAIN")
+            self.assertTrue(after_startup["tombstone"])
+            self.assertEqual(after_startup["binding"], before["binding"])
+            self.assertEqual(after_startup["command_id"], turn)
+            self.assertNotIn("text_sha256", after_startup)
+        else:
+            self.assertEqual(after_startup, before)
+        self.assertEqual(len(spies.site_calls), 1)  # fake site, not a socket
+        third = gf.FakeDeviceLink(self.clock)
+        restarted._ws_factory = srv.FakeServerWS
+        restarted._device_factory = lambda *_: third
+        third.feed(gf.ASSISTANT_START)
+        values = []
+        original_gate = held.ops.pre_dial_safe
+        with mock.patch.object(held.ops, "pre_dial_safe", record_gate):
+            request = asyncio.create_task(restarted.handle(other_route))
+            await asyncio.wait_for(request, 5)
+        await until(lambda: not restarted.busy)
+        self.assertEqual(len(attaches), 2)  # startup and session-boundary refresh
+        self.assertEqual(values, [False])
+        self.assertEqual(third.close_codes, [1008])
+        self.assertEqual(third.of_type("session.started"), [])
+        self.assertEqual(held.journal.get(name), after_startup)
+        self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+
+    async def test_uncertainty_from_lan_refuses_tailnet_before_and_after_startup(self):
+        await self._cross_route_uncertainty_and_startup(False)
+
+    async def test_uncertainty_from_tailnet_refuses_lan_before_and_after_startup(self):
+        await self._cross_route_uncertainty_and_startup(True)
+
+    async def test_aged_lan_uncertainty_tombstone_refuses_tailnet_after_startup(self):
+        await self._cross_route_uncertainty_and_startup(False, aged=True)
+
+    async def test_aged_tailnet_uncertainty_tombstone_refuses_lan_after_startup(self):
+        await self._cross_route_uncertainty_and_startup(True, aged=True)
+
+    async def test_healthy_real_startup_allows_provider_without_a_send(self):
+        fixture = srv.StateFixture(self.base)
+        path = fixture.build(cfg={
+            "tailnet_bind_host": "100.64.12.34",
+            "tailnet_fqdn": "gateway.example.test",
+        })
+        spies = srv.Spies()
+        spies.unified = RestartClient()
+        deps = spies.deps(self.clock)
+        deps.provider_connect = self.gw._deps.provider_connect
+        held = gsv._Held()
+        self.addAsyncCleanup(gsv._release, held)
+        await gsv._startup(held, path, {}, io.StringIO(), deps)
+        device = gf.FakeDeviceLink(self.clock)
+        held.gateway._ws_factory = srv.FakeServerWS
+        held.gateway._device_factory = lambda *_: device
+        request = srv.request_for(
+            host="gateway.example.test:8941",
+            transport=srv.transport_for(local=("100.64.12.34", 8941)),
+        )
+        values = []
+        original = held.ops.pre_dial_safe
+
+        def record_gate():
+            value = original()
+            values.append(value)
+            return value
+
+        with mock.patch.object(held.ops, "pre_dial_safe", record_gate):
+            task = asyncio.create_task(held.gateway.handle(request))
+            device.feed(gf.ASSISTANT_START)
+            await until(lambda: bool(device.of_type("session.started")))
+            self.assertEqual(values, [True])
+            self.assertEqual(self.dials, 1)
+            device.feed({"type": "pet.stop"})
+            await asyncio.wait_for(task, 5)
+        await until(lambda: not held.gateway.busy)
+        self.assertEqual(spies.unified.named("send"), [])
+
+    async def _known_outcome_then_reconnect(self, response, expected):
+        self.client.post_response = response
+        gate = self.hold_posts()
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        first = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        device.feed(gf.ASSISTANT_START)
+        await self.quiesce()
+        device.feed({"type": "pet.turn.begin"})
+        await self.quiesce()
+        turn = device.of_type("pet.turn.began")[0]["turn_id"]
+        self.providers[0].push(delta("e1", "hello world", 0, 500))
+        self.providers[0].push(delegation())
+        await self.quiesce()
+        device.feed(flow.golden_in(turn)["capture_stop"])
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        device.feed(self.confirm_frame(turn))
+        await self.quiesce()
+        await until(self.client.post_entered.is_set)
+        self.assertTrue(self.client.post_blocked())
+        device.fail_sends = True
+        device.disconnect()
+        await self.quiesce()
+        await asyncio.wait_for(first, 5)
+        self.assertTrue(self.gw.busy)
+        gate.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn)["state"], expected)
+        self.assertEqual(len(self.client.posts), 1)
+
+        second = gf.FakeDeviceLink(self.clock)
+        self.devices.append(second)
+        second.feed(gf.ASSISTANT_START)
+        retry = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(self.dials, 2)
+        self.assertEqual(len(second.of_type("session.started")), 1)
+        second.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(retry, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.record(turn)["state"], expected)
+
+    async def test_lost_result_proven_accepted_allows_one_reconnect_without_resend(self):
+        await self._known_outcome_then_reconnect(None, "ACCEPTED")
+
+    async def test_lost_result_proven_rejected_allows_one_reconnect_without_resend(self):
+        await self._known_outcome_then_reconnect(flow.Response(409, b"{}"), "REJECTED")
+
+    async def test_exact_positive_proof_resolves_uncertain_before_reconnect(self):
+        self.client.echo_sent_text = True
+        await self._known_outcome_then_reconnect(flow.Response(504, b""), "ACCEPTED")
+
+    async def test_corrupt_journal_refuses_before_any_counted_provider_dial(self):
+        self.journal.put("binding.json", {"binding": None, "epoch": True, "stopped": 0})
+        before = (self.base / "journal" / "binding.json").read_bytes()
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 0)
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual((self.base / "journal" / "binding.json").read_bytes(), before)
+
+    async def test_proven_presend_refusal_cleans_turn_and_allows_reconnect(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def refuse_bad_digest(turn, _sha, _revision):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("fake confirm hold timed out")
+            return self.bridge.confirm_send(turn, expected_text_sha256="0" * 64)
+
+        self.ops.confirm = refuse_bad_digest
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        first = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        device.feed(gf.ASSISTANT_START)
+        await self.quiesce()
+        device.feed({"type": "pet.turn.begin"})
+        await self.quiesce()
+        turn = device.of_type("pet.turn.began")[0]["turn_id"]
+        self.providers[0].push(delta("e1", "hello world", 0, 500))
+        self.providers[0].push(delegation())
+        await self.quiesce()
+        device.feed(flow.golden_in(turn)["capture_stop"])
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        device.feed(self.confirm_frame(turn))
+        await until(entered.is_set)
+        device.fail_sends = True
+        device.disconnect()
+        await asyncio.wait_for(first, 5)
+        self.assertTrue(self.gw.busy)
+        release.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.gw.last_outcome.send_outcome, "refused")
+        self.assertEqual(self.command_names(), [])
+        self.assertEqual(self.client.posts, [])
+
+        second = gf.FakeDeviceLink(self.clock)
+        self.devices.append(second)
+        second.feed(gf.ASSISTANT_START)
+        retry = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(self.dials, 2)
+        self.assertEqual(len(second.of_type("session.started")), 1)
+        second.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(retry, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(self.command_names(), [])
+
+
+class PreDialGatewayTest(srv.GatewayCase):
+    async def test_gate_failure_values_or_exception_emit_policy_without_dial_or_details(self):
+        for value in (False, None, 1, {}, RuntimeError(gf.KEY_CANARY)):
+            with self.subTest(value=type(value).__name__):
+                self.h.ops.pre_dial_safe = (
+                    mock.Mock(side_effect=value) if isinstance(value, Exception)
+                    else mock.Mock(return_value=value)
+                )
+                device = gf.FakeDeviceLink(self.h.clock)
+                self.devices = [device]
+                task = asyncio.create_task(self.gw.handle(self.request()))
+                device.feed(gf.ASSISTANT_START)
+                await self.h.quiesce()
+                await asyncio.wait_for(task, 5)
+                await until(lambda: not self.gw.busy)
+                self.assertEqual(device.close_codes, [1008])
+                self.assertEqual(device.of_type("session.started"), [])
+                self.assertEqual(self.connects, [])
+                self.assertNotIn(gf.KEY_CANARY, repr(device.frames))
+                self.assertNotIn(gf.KEY_CANARY, repr(device.close_codes))
+
+    async def test_shutdown_during_gate_keeps_custody_until_check_settles_no_dial(self):
+        release = self.h.ops.hold("pre_dial_safe")
+        device = self.h.device
+        task = asyncio.create_task(self.gw.handle(self.request()))
+        device.feed(gf.ASSISTANT_START)
+        await until(lambda: self.h.ops.entered.get("pre_dial_safe", threading.Event()).is_set())
+        self.assertEqual((await self.gw.handle(self.request())).status, 409)
+        shutdown = asyncio.create_task(self.gw.shutdown())
+        await self.h.quiesce()
+        self.assertTrue(self.gw.busy)
+        self.assertFalse(shutdown.done())
+        self.assertEqual(self.connects, [])
+        release.set()
+        await asyncio.wait_for(shutdown, 5)
+        await asyncio.wait_for(task, 5)
+        self.assertFalse(self.gw.busy)
+        self.assertEqual(self.connects, [])
+
+    async def test_stop_during_gate_waits_for_worker_and_never_starts_provider(self):
+        release = self.h.ops.hold("pre_dial_safe")
+        device = self.h.device
+        task = asyncio.create_task(self.gw.handle(self.request()))
+        device.feed(gf.ASSISTANT_START)
+        await until(lambda: self.h.ops.entered.get("pre_dial_safe", threading.Event()).is_set())
+        device.feed({"type": "pet.stop"})
+        await self.h.quiesce()
+        await asyncio.wait_for(task, 5)
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(self.request())).status, 409)
+        self.assertEqual(self.connects, [])
+        release.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.connects, [])
+
+    async def test_cancelled_http_waiter_keeps_gate_custody_and_no_late_dial(self):
+        release = self.h.ops.hold("pre_dial_safe")
+        device = self.h.device
+        task = asyncio.create_task(self.gw.handle(self.request()))
+        device.feed(gf.ASSISTANT_START)
+        await until(lambda: self.h.ops.entered.get("pre_dial_safe", threading.Event()).is_set())
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await self.h.quiesce()
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(self.request())).status, 409)
+        self.assertEqual(self.connects, [])
+        release.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.connects, [])
