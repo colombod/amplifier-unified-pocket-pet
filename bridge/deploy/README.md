@@ -33,13 +33,43 @@ registry. No package hashes or fresh-machine install qualification are claimed.
 
 Machine-specific and secret values stay on the machine, never in the repository.
 The tracked [`bridge/.env.example`](../.env.example) lists every setting with
-placeholders only. Make a private copy and fill it in:
+placeholders only. Make a private copy and fill it in. The copy must never
+replace a file you have already filled in, so create it with this command, not
+with `cp`:
 
 ```sh
-umask 077
-cp "/ABSOLUTE/REPOSITORY/bridge/.env.example" "/ABSOLUTE/private/.env"
-chmod 600 "/ABSOLUTE/private/.env"
+PET_ENV_EXAMPLE="/ABSOLUTE/REPOSITORY/bridge/.env.example"
+PET_ENV_FILE="/ABSOLUTE/private/.env"
+if [ -e "$PET_ENV_FILE" ] || [ -L "$PET_ENV_FILE" ]; then
+  echo "Stopped: the destination already exists. Nothing was copied or changed." >&2; false
+elif ( umask 077 && set -C && cat "$PET_ENV_EXAMPLE" > "$PET_ENV_FILE" ); then
+  echo "Created a new private settings file."
+else
+  echo "Stopped: the copy did not complete. No existing file was overwritten." >&2; false
+fi
 ```
+
+It creates the destination only if nothing is there. An existing file, or a
+symbolic link of any kind, is left untouched and you see
+`Stopped: the destination already exists. Nothing was copied or changed.`
+
+The command assumes the destination directory is private and controlled only by
+you, so that nothing else creates files in it. It is a check followed by a
+redirect, not one atomic step. The redirect runs with the shell's no-overwrite
+option (`set -C`); in the `sh` and `bash` used for this change's tests it
+refused to write to a regular file, a symbolic link or a directory that was
+already at the path. That is not a guarantee for everything that could be
+created there between the check and the redirect: a FIFO, for example, could
+make the command block or fail.
+
+When the redirect does not complete you see
+`Stopped: the copy did not complete. No existing file was overwritten.` After
+that second message (also shown when the example or the destination directory
+is missing), inspect the destination before doing anything else; it can be an
+empty new file. The new file is owner-only (mode 0600) because of `umask 077`.
+Do not `chmod`, move or delete an existing destination to make the command
+pass: if a private `.env` is already there, keep it and edit it, or choose a
+different absent path.
 
 Keep the copy outside the repository, in an owner-controlled private directory
 such as the one that holds the pairing state. (`.gitignore` also ignores `.env`
@@ -57,6 +87,13 @@ the gateway with `serve --env-file /ABSOLUTE/private/.env`.
 - **Private file required.** The path must be absolute and the file a regular
   file owned by you with no group/other permissions and not a symlink, as for the
   JSON config and key files. Anything else is also `config_invalid`.
+- **Do not edit it while the gateway starts.** Stop the service, edit, then
+  start. The gateway refuses a settings file (`.env` or JSON) or provider key
+  file that yields fewer bytes than its size at open, or whose size,
+  permissions, owner or modification/change time differ after the read. That
+  is a before-and-after comparison, not a lock: an edit that leaves all of those
+  equal (for example a same-size rewrite within the file system's timestamp
+  resolution) is not detected, and refusal of every concurrent edit is not claimed.
 - **Literal values.** One `NAME=value` per line; the value is the text to the end
   of the line. No quotes, no spaces around `=`, no `export`, no `$VAR` expansion,
   no inline comments, Unix line endings. Comment lines start with `#` in the
@@ -68,9 +105,21 @@ the gateway with `serve --env-file /ABSOLUTE/private/.env`.
   key itself, kept only in the private copy. Setting both or neither is
   `config_invalid`. In this mode the gateway does not read the provider key from
   the process environment.
-- **Not exported.** The gateway reads the file itself. Do not load it with
-  systemd `EnvironmentFile=`, a shell `source` or a dotenv tool: that skips the
-  private-file check and puts the secrets into the process environment.
+- **Do not also load it another way.** With `--env-file` the gateway opens the
+  file itself and applies the private-file check. Loading the same file by
+  another route does not remove that check, and it gains nothing: in this mode
+  the gateway never reads its provider key from the environment.
+  - Systemd `EnvironmentFile=`, and dotenv tools that export what they read,
+    copy every value, including an inline provider key, into the process
+    environment. There a child process that is not given a cleaned environment
+    inherits it, and other processes of the same user can normally read it
+    through `/proc/<pid>/environ`.
+  - A bare shell `source` is different: it sets shell variables, which reach a
+    process environment only if the file or the shell exports them (for
+    example under `set -a`). Do not `source` the file anyway. It is not a shell
+    script: the shell applies its own quoting, expansion and word splitting to
+    values the gateway reads literally, so a label containing a space is not
+    even read as one value.
 - **Token hashes.** `POCKET_GATEWAY_PET_TOKEN_SHA256` takes one hash, or several
   separated by commas with no spaces.
 
@@ -94,7 +143,9 @@ the unit or use a shell environment variable for it.
 
 Nothing here is automatic, and the JSON file keeps working if you do nothing.
 
-1. Copy `.env.example` to a private owner-only file as above.
+1. Create the private owner-only file with the no-overwrite copy command above.
+   If it stops because the destination already exists, do not replace that file;
+   review it or choose a different absent path.
 2. Copy each value from the private JSON config to its variable; the names match
    (`state_root` → `POCKET_GATEWAY_STATE_ROOT`, and so on; `version` →
    `POCKET_GATEWAY_CONFIG_VERSION`). Write values without the JSON quotes, join
@@ -108,11 +159,22 @@ Nothing here is automatic, and the JSON file keeps working if you do nothing.
 4. In `~/.config/systemd/user/pocket-gateway.service`, replace the `ExecStart=`
    line with the `--env-file` form from the template, using the absolute path of
    the private file. Keep your existing `--event-log` path.
-5. Run `systemctl --user daemon-reload`, then
-   `systemctl --user start pocket-gateway.service`, and check
-   `systemctl --user status pocket-gateway.service` and the journal for
-   `gateway: listening on` with the same address and short conversation id as
-   before. `error: config_invalid` means the file was refused; nothing listened.
+5. Run these in order, in one shell. The first two note the time **before** the
+   start, which [Check the current start](#check-the-current-start) needs:
+
+   ```sh
+   PET_START_LOCAL="$(date '+%Y-%m-%d %H:%M:%S')"
+   date -u '+%Y-%m-%dT%H:%M:%S+00:00'
+   systemctl --user daemon-reload
+   systemctl --user start pocket-gateway.service
+   ```
+
+   Then follow that section. The
+   journal still holds `gateway: listening on` lines from earlier runs with the
+   JSON config, so that text alone proves nothing: accept only the evidence tied
+   to this start, with the same address and short conversation id as before. A
+   `gateway_stop` record with `code` `config_invalid` means the file was refused
+   and nothing listened.
 6. Keep the private JSON file until the service has run from `.env`. To go back,
    stop the service, restore the `--config` line, reload and start.
 
@@ -136,13 +198,19 @@ Nothing here is automatic, and the JSON file keeps working if you do nothing.
    inside the unit. Quote the interpreter if its path contains spaces. Escape `%`
    as `%%` in literal paths for systemd.
 3. Stop any manually launched gateway yourself first: only one may own the journal
-   and listen address. Then run:
+   and listen address. Then run these in order, in one shell. The first two note
+   the time **before** the start, which the check afterwards needs:
 
    ```sh
+   PET_START_LOCAL="$(date '+%Y-%m-%d %H:%M:%S')"
+   date -u '+%Y-%m-%dT%H:%M:%S+00:00'
    systemctl --user daemon-reload
    systemctl --user enable --now pocket-gateway.service
    systemctl --user status pocket-gateway.service
    ```
+
+   Then confirm this start as described in
+   [Check the current start](#check-the-current-start).
 
 `enable` starts it on future user-manager starts. To keep this service running
 after logout or start it before login, an administrator may need to enable
@@ -150,6 +218,69 @@ lingering for your user (`loginctl enable-linger USERNAME`). Closing the Unified
 app does not stop the gateway, but Unified must be running/reachable to do work.
 User `network-online.target` is only ordering, not a guarantee that Wi-Fi,
 Tailscale or Unified is ready.
+
+### Check the current start
+
+`Type=simple` reports the unit as active as soon as the process exists, before
+the settings are read, and the journal keeps the output of earlier runs. Judge
+only evidence that belongs to the start you just made.
+
+The check compares against a time noted immediately **before** the start. The
+start commands in [Install and start](#install-and-start) step 3 and in step 5
+of the move to `.env` begin with the two `date` commands that note it: the
+first keeps the local time in `PET_START_LOCAL` for this shell, the second
+prints the same moment in UTC for comparison with the event log. Before any
+other start or restart, run those two commands first. Do not run them once the
+service has started: a time taken afterwards is later than the start and would
+make a healthy start fail the comparisons below. If you started without noting
+the time, wait until no call is in progress, stop the service, and start again
+from those commands.
+
+After the start, wait about 15 seconds (longer than `RestartSec`), then, in the
+same shell:
+
+```sh
+systemctl --user show pocket-gateway.service \
+  -p ActiveState -p SubState -p ActiveEnterTimestamp -p InvocationID
+journalctl --user -u pocket-gateway.service --no-pager \
+  _SYSTEMD_INVOCATION_ID="$(systemctl --user show pocket-gateway.service -p InvocationID --value)"
+grep '"event":"gateway_st' /ABSOLUTE/private/events.jsonl | tail -n 2
+```
+
+The last command shows the two most recent start/stop records of the event log.
+This start is listening only if all of the following hold:
+
+- `ActiveState=active` and `SubState=running`, and `ActiveEnterTimestamp` (shown
+  in local time) is not earlier than the time you noted.
+- The journal output for this invocation contains
+  `gateway: listening on <address>:<port> for session ...<last eight characters>`
+  with the values you expect, and no `error:` or `gateway: stopped` line after
+  it. The gateway flushes this line when it writes it, so it does not wait for
+  the process to exit.
+- The newest of those event-log records is a `gateway_start` record whose UTC
+  `timestamp` is not earlier than the UTC time printed by the second `date`
+  command, with no `gateway_stop` after it.
+
+A `gateway_stop` record after that `gateway_start` means this start ended and
+nothing is listening from it. Its `code` says how:
+
+- A code such as `config_invalid` is a failed start. The process exits with a
+  failure status, so `Restart=on-failure` starts the gateway again after 10
+  seconds, and again after each further failure, until you stop the service and
+  correct the cause.
+- A `null` code is a clean stop, for example after `systemctl --user stop` or a
+  termination signal. The process exits successfully and `Restart=on-failure`
+  does not start it again.
+
+If the journal command prints no entries although the unit is running, your
+systemd may not tag a user service's output with its invocation. Use
+`journalctl --user -u pocket-gateway.service --no-pager --since "$PET_START_LOCAL"`
+instead; that restricts by time, not to one invocation, so it also shows any
+automatic restarts after your start.
+
+The listening line reports that the socket was bound, not that a device can
+reach it. These commands follow the systemd documentation and the gateway
+source; they have not been exercised against a live unit in this change.
 
 ## Optional LAN and Tailnet listeners
 

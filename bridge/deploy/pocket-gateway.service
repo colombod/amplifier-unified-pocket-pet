@@ -7,9 +7,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=@BRIDGE_DIR@
 Environment=PYTHONDONTWRITEBYTECODE=1
-# Recommended: settings come from a private owner-only .env file that the gateway reads
-# and checks itself. Do not add EnvironmentFile=: it would skip that check and export the
-# file's secrets into the process environment.
+# Recommended: settings come from a private owner-only .env file. With --env-file the
+# gateway opens and checks that file itself. Do not also add EnvironmentFile= for it:
+# systemd would copy the file's secrets into the process environment, where a child
+# process can inherit them and same-user processes can read them through /proc, and the
+# gateway never reads its key from the environment in this mode.
 ExecStart=@PYTHON@ -B -m pet_bridge serve --env-file "@ENV_FILE@" --event-log "@EVENT_LOG@"
 # Alternative: a private JSON config. Use this line INSTEAD of the one above, never both.
 #ExecStart=@PYTHON@ -B -m pet_bridge serve --config "@CONFIG@" --event-log "@EVENT_LOG@"

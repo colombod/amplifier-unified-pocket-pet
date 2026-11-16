@@ -2,6 +2,10 @@
 
 Synthetic values only; no listener, dial, provider, Unified call or real key.  These
 are offline evidence: not a running service and not a second machine.
+
+Also here, because both config spellings share them: the private-file reader's
+changed-during-read refusal, the flushed startup lines, and the documented no-overwrite
+copy command (run in real shells against temporary synthetic files only).
 """
 
 # pyright: reportArgumentType=false, reportOptionalMemberAccess=false, reportPrivateUsage=false
@@ -12,6 +16,12 @@ import io
 import json
 import os
 import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import textwrap
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -519,6 +529,460 @@ class ServeEnvFileTest(ServerOfflineCase):
 
 
 # =================================================================================
+# The startup lines are visible at once on a block-buffered (non-tty) stream
+# =================================================================================
+class PipeStream:
+    """A text stream over a real pipe, buffered like Python's stdout under a service."""
+
+    def __init__(self, case: Any) -> None:
+        self._read_fd, write_fd = os.pipe()
+        os.set_blocking(self._read_fd, False)
+        self.stream = open(write_fd, "w", buffering=8192, encoding="utf-8")  # noqa: SIM115
+        case.addCleanup(os.close, self._read_fd)
+        case.addCleanup(self.close)
+        case.assertFalse(self.stream.isatty())
+        case.assertFalse(self.stream.line_buffering)
+        # the premise: an unflushed line does NOT reach the reader of this stream
+        self.stream.write("premise: buffered\n")
+        case.assertEqual(self.arrived(), "")
+        self.stream.flush()
+        case.assertEqual(self.arrived(), "premise: buffered\n")
+
+    def arrived(self) -> str:
+        """Everything the other end of the pipe can read right now."""
+        data = b""
+        while True:
+            try:
+                chunk = os.read(self._read_fd, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            data += chunk
+        return data.decode("utf-8")
+
+    def close(self) -> None:
+        if not self.stream.closed:
+            self.stream.close()
+
+
+class StartupLineFlushTest(ServerOfflineCase):
+    LISTENING = "gateway: listening on 10.1.2.3:8941 for session ...0a1b2c3d\n"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fx = StateFixture(self.base)
+
+    def run_gateway(self, path: Path, stdout: Any, *, env_file: bool,
+                    retrying: bool = False) -> tuple[int, list[str], str]:
+        """Serve once; return (exit code, what a reader saw WHILE it ran, stderr)."""
+        spies = Spies()
+        deps = spies.deps(FakeLoopClock())
+        seen: list[str] = []
+
+        async def wait() -> None:  # the gateway is up and waiting for a signal
+            seen.append(stdout.arrived() if isinstance(stdout, PipeStream) else "")
+
+        deps.wait_for_shutdown = wait
+        if retrying:
+            async def close() -> None:
+                return None
+
+            async def start_site(_handler: Any, _cfg: Any, _ctx: Any) -> Any:
+                handle = gsv._SiteHandle(close, lambda: None)
+                handle.tailnet_state = "retrying"
+                return handle
+
+            deps.start_site = start_site
+        err = io.StringIO()
+        code = gsv.serve_main(
+            path, env={}, stderr=err, deps=deps, env_file=env_file,
+            stdout=stdout.stream if isinstance(stdout, PipeStream) else stdout,
+        )
+        self.assertEqual(runner_threads(), [])
+        self.fx.stores_reopen()
+        return code, seen, err.getvalue()
+
+    def test_a_real_interpreter_does_not_line_buffer_stdout_on_a_pipe(self):
+        # Why the flush matters: without PYTHONUNBUFFERED (the unit does not set it), a
+        # service's stdout is a pipe and Python holds printed lines until the buffer fills.
+        result = subprocess.run(
+            [sys.executable, "-B", "-c",
+             "import sys; print(sys.stdout.isatty(), sys.stdout.line_buffering)"],
+            env={"PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True,
+            timeout=10, check=False,
+        )
+        self.assertEqual((result.returncode, result.stdout), (0, "False False\n"))
+
+    def test_the_listening_line_reaches_a_pipe_reader_while_the_gateway_runs(self):
+        json_path = self.fx.build()
+        env_path = self.write("gw.env", env_text(config_doc(self.base)))
+        for name, path, env_file in (("json", json_path, False), ("env", env_path, True)):
+            with self.subTest(config=name):
+                pipe = PipeStream(self)
+                code, seen, err = self.run_gateway(path, pipe, env_file=env_file)
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(seen, [self.LISTENING])  # before any shutdown or exit
+                pipe.close()
+                self.assertEqual(pipe.arrived(), "gateway: stopped\n")
+
+    def test_the_tailnet_retrying_line_is_flushed_with_it(self):
+        path = self.fx.build(cfg={"tailnet_bind_host": "100.64.12.34",
+                                  "tailnet_fqdn": "gateway.example.test"})
+        pipe = PipeStream(self)
+        code, seen, err = self.run_gateway(path, pipe, env_file=False, retrying=True)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(
+            seen, [self.LISTENING + "gateway: Tailnet address unavailable; retrying\n"])
+
+    def test_a_failing_flush_never_stops_a_listening_gateway(self):
+        class Unflushable(io.StringIO):
+            def flush(self) -> None:
+                raise BrokenPipeError("synthetic")
+
+        out = Unflushable()
+        code, seen, err = self.run_gateway(self.fx.build(), out, env_file=False)
+        self.assertEqual((code, err, seen), (0, "", [""]))  # it reached the wait
+        self.assertEqual(out.getvalue(), self.LISTENING + "gateway: stopped\n")
+
+
+# =================================================================================
+# A private file that changes while it is read is refused (JSON, .env and key file)
+# =================================================================================
+class ChangedDuringReadTest(ServerOfflineCase):
+    """The change happens after the file is opened and checked, before its bytes are read.
+
+    A before/after comparison, not a lock: only the changes exercised here are shown to
+    be refused.
+    """
+
+    OLD_NS = 1_600_000_000 * 10**9  # a fixed old mtime, so a rewrite always moves it
+    CHANGES = ("truncated to nothing", "truncated to a prefix", "appended to",
+               "rewritten at the same size", "permissions changed")
+
+    def during_read(self, action: Any) -> Any:
+        real_read = os.read
+        fired: list[int] = []
+
+        def read(fd: int, count: int) -> bytes:
+            if not fired:
+                fired.append(1)
+                action()
+            return real_read(fd, count)
+
+        return mock.patch.object(gsv.os, "read", side_effect=read)
+
+    def change(self, name: str, path: Path) -> Any:
+        size = os.stat(path).st_size
+
+        def rewrite_same_size() -> None:
+            with open(path, "r+b") as handle:
+                handle.write(b"#" * size)
+
+        def append() -> None:
+            with open(path, "ab") as handle:
+                handle.write(b"# appended\n")
+
+        return {
+            "truncated to nothing": lambda: os.truncate(path, 0),
+            "truncated to a prefix": lambda: os.truncate(path, size // 2),
+            "appended to": append,
+            "rewritten at the same size": rewrite_same_size,
+            "permissions changed": lambda: os.chmod(path, 0o400),
+        }[name]
+
+    def fresh(self, name: str, text: str | bytes) -> Path:
+        path = self.write(name, text)
+        os.utime(path, ns=(self.OLD_NS, self.OLD_NS))
+        return path
+
+    def test_every_exercised_change_is_refused_by_all_three_readers(self):
+        json_text = json.dumps(config_doc(self.base))
+        env = env_text(config_doc(self.base))
+        for index, name in enumerate(self.CHANGES):
+            with self.subTest(change=name, reader="json config"):
+                path = self.fresh(f"j{index}.json", json_text)
+                with self.during_read(self.change(name, path)):
+                    with self.assertRaises(gsv.StartupError) as ctx:
+                        gsv.load_config(path)
+                self.assertEqual(ctx.exception.code, "config_invalid")
+                self.assertIsNone(ctx.exception.__cause__)
+            with self.subTest(change=name, reader="env file"):
+                path = self.fresh(f"e{index}.env", env)
+                with self.during_read(self.change(name, path)):
+                    with self.assertRaises(gsv.StartupError) as ctx:
+                        gsv.load_env_config(path)
+                self.assertEqual(ctx.exception.code, "config_invalid")
+                self.assertIsNone(ctx.exception.__cause__)
+            with self.subTest(change=name, reader="provider key file"):
+                path = self.fresh(f"k{index}.key", KEY_CANARY + "\n")
+                cfg = gs.parse_config(config_doc(self.base, provider_key_file=str(path)))
+                with self.during_read(self.change(name, path)):
+                    with self.assertRaises(gsv.StartupError) as ctx:
+                        gsv.load_provider_key(cfg, {})
+                self.assertEqual(ctx.exception.code, "provider_key_missing")
+            with self.subTest(change=name, reader="check_private_file"):
+                path = self.fresh(f"r{index}.bin", b"x" * 64)
+                with self.during_read(self.change(name, path)):
+                    with self.assertRaises(OSError):
+                        gsv.check_private_file(path, max_bytes=4096, read=True)
+
+    def test_an_env_file_cut_down_to_a_valid_prefix_is_refused(self):
+        # The reported case: the prefix is a complete, valid settings text on its own
+        # (only the optional Tailnet lines are lost), yet it must not be accepted.
+        doc = config_doc(self.base, tailnet_bind_host="100.64.12.34",
+                         tailnet_fqdn="gateway.example.test")
+        text = env_text(doc)
+        cut = len(text[:text.index("POCKET_GATEWAY_TAILNET_BIND_HOST=")].encode("utf-8"))
+        prefix_cfg = gs.parse_config(gs.env_config_document(text.encode()[:cut].decode())[0])
+        self.assertIsNone(prefix_cfg.tailnet_bind_host)  # valid, and silently different
+        path = self.fresh("cut.env", text)
+        with self.during_read(lambda: os.truncate(path, cut)):
+            with self.assertRaises(gsv.StartupError) as ctx:
+                gsv.load_env_config(path)
+        self.assertEqual(ctx.exception.code, "config_invalid")
+        self.assertEqual(gsv.load_env_config(path)[0], prefix_cfg)  # once it is at rest
+
+    def test_a_json_config_that_grows_into_a_different_valid_document_is_refused(self):
+        # A JSON text followed by spaces is still valid JSON, so without the comparison
+        # the first bytes of a file being extended would be accepted.
+        text = json.dumps(config_doc(self.base))
+        path = self.fresh("grow.json", text)
+
+        def extend() -> None:
+            with open(path, "ab") as handle:
+                handle.write(b" " * 64)
+
+        with self.during_read(extend):
+            with self.assertRaises(gsv.StartupError) as ctx:
+                gsv.load_config(path)
+        self.assertEqual(ctx.exception.code, "config_invalid")
+        self.assertEqual(gsv.load_config(path).port, 8941)  # once it is at rest
+
+    def test_an_unchanged_file_and_a_concurrent_reader_are_still_accepted(self):
+        text = env_text(config_doc(self.base))
+        path = self.fresh("still.env", text)
+        with self.during_read(lambda: None):
+            self.assertEqual(gsv.load_env_config(path)[0].port, 8941)
+        with self.during_read(lambda: Path(path).read_bytes()):  # reading is not a change
+            self.assertEqual(gsv.load_env_config(path)[0].port, 8941)
+        json_path = self.fresh("still.json", json.dumps(config_doc(self.base)))
+        with self.during_read(lambda: Path(json_path).read_bytes()):
+            self.assertEqual(gsv.load_config(json_path).port, 8941)
+        # the check without a read (the TLS files) takes no second look
+        with mock.patch.object(gsv.os, "fstat", wraps=os.fstat) as fstat:
+            self.assertIsNone(gsv.check_private_file(path, max_bytes=None, read=False))
+        self.assertEqual(fstat.call_count, 1)
+
+    def test_a_file_changed_while_read_never_reaches_the_listener(self):
+        fx = StateFixture(self.base)
+        json_path = fx.build()
+        os.utime(json_path, ns=(self.OLD_NS, self.OLD_NS))
+        env_path = self.fresh("gw.env", env_text(config_doc(self.base)))
+        for name, path, env_file in (("json", json_path, False), ("env", env_path, True)):
+            with self.subTest(config=name):
+                spies = Spies()
+                out, err = io.StringIO(), io.StringIO()
+
+                def append(target: Path = path) -> None:
+                    with open(target, "ab") as handle:
+                        handle.write(b"\n")
+
+                with self.during_read(append):
+                    code = gsv.serve_main(path, env={}, stdout=out, stderr=err,
+                                          deps=spies.deps(FakeLoopClock()),
+                                          env_file=env_file)
+                self.assertEqual((code, out.getvalue(), err.getvalue()),
+                                 (1, "", "error: config_invalid\n"))
+                self.assertEqual(spies.events, [])
+        fx.stores_reopen()
+
+
+# =================================================================================
+# The documented copy command creates the private file exclusively
+# =================================================================================
+def copy_command(document: Path) -> tuple[list[str], str]:
+    """(the two assignment lines, the command body) of the documented copy snippet."""
+    blocks = document.read_text(encoding="utf-8").split("```sh\n")[1:]
+    found = [textwrap.dedent(block.split("```", 1)[0]) for block in blocks]
+    (snippet,) = [block for block in found if "set -C" in block]
+    lines = snippet.splitlines()
+    return lines[:2], "\n".join(lines[2:]) + "\n"
+
+
+class CopyCommandTest(OfflineTestCase):
+    SHELLS = tuple(shell for shell in ("/bin/sh", "/bin/bash") if Path(shell).exists())
+    EXISTS = "Stopped: the destination already exists. Nothing was copied or changed."
+    INCOMPLETE = "Stopped: the copy did not complete. No existing file was overwritten."
+    FILLED = b"POCKET_GATEWAY_SESSION_LABEL=synthetic filled-in file\n"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertTrue(self.SHELLS)
+        self.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="pet-env-copy-")))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.body = copy_command(DEPLOY_README)[1]
+        self.count = 0
+
+    def folder(self) -> Path:
+        self.count += 1
+        path = self.root / f"private dir {self.count}"  # a space: the quoting must hold
+        path.mkdir(mode=0o700)
+        return path
+
+    def run_shell(self, shell: str, script: str, dest: Path,
+                  source: Path = EXAMPLE) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [shell, "-c", script],
+            env={"PATH": os.defpath, "PET_ENV_EXAMPLE": str(source),
+                 "PET_ENV_FILE": str(dest)},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+
+    def test_both_documents_give_the_same_command_and_no_plain_copy(self):
+        readme_head, readme_body = copy_command(DEPLOY_README)
+        guide_head, guide_body = copy_command(GUIDE)
+        self.assertEqual(readme_body, guide_body)  # one form, used consistently
+        self.assertEqual(readme_head, [
+            'PET_ENV_EXAMPLE="/ABSOLUTE/REPOSITORY/bridge/.env.example"',
+            'PET_ENV_FILE="/ABSOLUTE/private/.env"'])
+        self.assertEqual(guide_head, [
+            'PET_ENV_EXAMPLE=".env.example"', 'PET_ENV_FILE="$XDG_CONFIG_HOME/.env"'])
+        self.assertIn(
+            '( umask 077 && set -C && cat "$PET_ENV_EXAMPLE" > "$PET_ENV_FILE" )', readme_body)
+        plain = re.compile(r"\s*(cp|mv|install|chmod)\s.*\.env")
+        for document in (DEPLOY_README, GUIDE, EXAMPLE):
+            lines = document.read_text(encoding="utf-8").splitlines()
+            with self.subTest(document=document.name):
+                self.assertEqual([line for line in lines if plain.match(line)], [])
+        for document in (DEPLOY_README, GUIDE):
+            text = " ".join(document.read_text(encoding="utf-8").split())
+            with self.subTest(document=document.name):
+                # each message is in the command AND explained in the text around it
+                self.assertGreaterEqual(text.count(self.EXISTS), 2)
+                self.assertGreaterEqual(text.count(self.INCOMPLETE), 2)
+                self.assertIn("not with `cp`", text)
+
+    def test_an_absent_destination_is_created_private_with_the_example_bytes(self):
+        for shell in self.SHELLS:
+            for prefix in ("", "umask 022\n", "umask 000\n"):
+                with self.subTest(shell=shell, prefix=prefix.strip()):
+                    dest = self.folder() / ".env"
+                    result = self.run_shell(shell, prefix + self.body, dest)
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr),
+                        (0, "Created a new private settings file.\n", ""))
+                    self.assertEqual(dest.read_bytes(), EXAMPLE.read_bytes())
+                    info = os.lstat(dest)
+                    self.assertTrue(stat.S_ISREG(info.st_mode))
+                    self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+                    # running it again is the "already exists" refusal, byte for byte
+                    again = self.run_shell(shell, prefix + self.body, dest)
+                    self.assertNotEqual(again.returncode, 0)
+                    self.assertEqual((again.stdout, again.stderr), ("", self.EXISTS + "\n"))
+                    self.assertEqual(dest.read_bytes(), EXAMPLE.read_bytes())
+
+    def obstacles(self, folder: Path) -> dict[str, Path]:
+        """Things already at a destination; ``filled.env`` holds the bytes to protect."""
+        filled = folder / "filled.env"
+        filled.write_bytes(self.FILLED)
+        os.chmod(filled, 0o640)  # not ours to tighten: the mode must survive too
+        to_file = folder / "link-to-file.env"
+        to_file.symlink_to(filled)
+        dangling = folder / "dangling.env"
+        dangling.symlink_to(folder / "not-there.env")
+        to_dir = folder / "link-to-dir.env"
+        to_dir.symlink_to(folder, target_is_directory=True)
+        fifo = folder / "fifo.env"
+        os.mkfifo(fifo, 0o600)
+        directory = folder / "dir.env"
+        directory.mkdir()
+        return {
+            "existing filled-in file": filled,
+            "symlink to a filled-in file": to_file,
+            "dangling symlink": dangling,
+            "symlink to a directory": to_dir,
+            "fifo": fifo,
+            "directory": directory,
+        }
+
+    def assert_untouched(self, folder: Path, before: list[str]) -> None:
+        self.assertEqual(sorted(os.listdir(folder)), before)  # nothing created or removed
+        self.assertEqual((folder / "filled.env").read_bytes(), self.FILLED)
+        self.assertEqual(stat.S_IMODE((folder / "filled.env").stat().st_mode), 0o640)
+        for link in ("link-to-file.env", "dangling.env", "link-to-dir.env"):
+            self.assertTrue((folder / link).is_symlink())
+        self.assertFalse((folder / "not-there.env").exists())
+        self.assertEqual(os.listdir(folder / "dir.env"), [])
+
+    def test_anything_already_at_the_destination_is_refused_and_left_untouched(self):
+        for shell in self.SHELLS:
+            folder = self.folder()
+            cases = self.obstacles(folder)
+            before = sorted(os.listdir(folder))
+            for name, dest in cases.items():
+                with self.subTest(shell=shell, case=name):
+                    result = self.run_shell(shell, self.body, dest)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual((result.stdout, result.stderr), ("", self.EXISTS + "\n"))
+                    self.assert_untouched(folder, before)
+
+    def test_the_redirect_alone_is_exclusive_without_the_check(self):
+        # What the check cannot close: something appears after it.  The no-overwrite
+        # redirect must itself fail and leave the other file alone.  (A FIFO is left out:
+        # a shell may open one for writing, which overwrites nothing but can block.)
+        match = re.search(r"^elif (\( .* \)); then$", self.body, re.MULTILINE)
+        self.assertIsNotNone(match)
+        redirect = match.group(1) + "\n"
+        for shell in self.SHELLS:
+            folder = self.folder()
+            cases = self.obstacles(folder)
+            before = sorted(os.listdir(folder))
+            for name in ("existing filled-in file", "symlink to a filled-in file",
+                         "dangling symlink", "symlink to a directory", "directory"):
+                with self.subTest(shell=shell, case=name):
+                    result = self.run_shell(shell, redirect, cases[name])
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assert_untouched(folder, before)
+            with self.subTest(shell=shell, case="clear path"):
+                created = folder / "new.env"  # and it does create when the way is clear
+                self.assertEqual(self.run_shell(shell, redirect, created).returncode, 0)
+                self.assertEqual(created.read_bytes(), EXAMPLE.read_bytes())
+                self.assertEqual(stat.S_IMODE(created.stat().st_mode), 0o600)
+
+    def test_a_failed_copy_reports_incomplete_and_overwrites_nothing(self):
+        for shell in self.SHELLS:
+            with self.subTest(shell=shell, case="missing destination directory"):
+                dest = self.folder() / "absent" / ".env"
+                result = self.run_shell(shell, self.body, dest)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.endswith(self.INCOMPLETE + "\n"))
+                self.assertFalse(dest.parent.exists())
+            with self.subTest(shell=shell, case="missing example"):
+                folder = self.folder()
+                dest = folder / ".env"
+                result = self.run_shell(shell, self.body, dest, folder / "no-example")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.endswith(self.INCOMPLETE + "\n"))
+                # the documented leftover: a new, empty, owner-only file to inspect
+                self.assertEqual(dest.read_bytes(), b"")
+                self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o600)
+
+    def test_a_created_copy_is_a_file_the_gateway_accepts_as_private(self):
+        dest = self.folder() / ".env"
+        self.assertEqual(self.run_shell(self.SHELLS[0], self.body, dest).returncode, 0)
+        # owner-only and regular: the reader gets as far as the unfilled placeholders
+        self.assertEqual(
+            gsv.check_private_file(dest, max_bytes=16384, read=True), EXAMPLE.read_bytes())
+        with self.assertRaises(gsv.StartupError) as ctx:
+            gsv.load_env_config(dest)
+        self.assertEqual(ctx.exception.code, "config_invalid")
+
+
+# =================================================================================
 # CLI: serve --env-file
 # =================================================================================
 class CliEnvFileTest(ServerOfflineCase):
@@ -731,8 +1195,162 @@ class EnvDocumentsTest(OfflineTestCase):
         directives = [line.split("=", 1)[0] for line in unit.splitlines()
                       if "=" in line and not line.startswith("#")]
         self.assertNotIn("EnvironmentFile", directives)  # secrets are never exported
-        self.assertEqual(directives.count("Environment"), 1)
+        # The start line and environment are not changed by the startup-line fix: no
+        # PYTHONUNBUFFERED and no ``-u``.  The line is visible because the gateway flushes
+        # it (StartupLineFlushTest), not because the unit unbuffers Python.
+        self.assertEqual(
+            [line for line in unit.splitlines() if line.startswith("Environment")],
+            ["Environment=PYTHONDONTWRITEBYTECODE=1"])
+        self.assertNotIn("PYTHONUNBUFFERED", unit)
         self.assertNotIn(KEY_CANARY, unit)
+
+    def test_the_environmentfile_warning_gives_the_real_reason(self):
+        unit = " ".join(
+            line.lstrip("# ") for line in UNIT.read_text(encoding="utf-8").splitlines()
+            if line.startswith("#"))
+        readme = " ".join(DEPLOY_README.read_text(encoding="utf-8").split())
+        for name, text in (("unit", unit), ("deploy README", readme)):
+            with self.subTest(document=name):
+                self.assertIn("EnvironmentFile=", text)
+                self.assertIn("process environment", text)
+                self.assertIn("/proc", text)
+                self.assertIn("never reads its", text)  # ... key from the environment
+                # with --env-file the gateway still checks the file: never say otherwise
+                self.assertIsNone(re.search(r"skips? (that|the private-file) check", text))
+        self.assertIn("opens and checks that file itself", unit)
+        self.assertIn("does not remove that check", readme)
+
+    def test_the_start_is_verified_by_evidence_tied_to_the_current_start(self):
+        readme = " ".join(DEPLOY_README.read_text(encoding="utf-8").split())
+        guide = " ".join(GUIDE.read_text(encoding="utf-8").split())
+        for needed in (
+            "### Check the current start", "ActiveEnterTimestamp", "-p InvocationID",
+            '_SYSTEMD_INVOCATION_ID="$(systemctl --user show pocket-gateway.service '
+            '-p InvocationID --value)"',
+            "`gateway_start` record whose UTC `timestamp` is not earlier",
+            "no `gateway_stop` after it", '--since "$PET_START_LOCAL"',
+            "have not been exercised against a live unit",
+        ):
+            with self.subTest(readme=needed):
+                self.assertIn(needed, readme)
+        for needed in ("ActiveEnterTimestamp", "`gateway_start` event-log record",
+                       "restricted to the current invocation", "Check the current start"):
+            with self.subTest(guide=needed):
+                self.assertIn(needed, guide)
+        # the migration no longer tells the operator to look for the bare text
+        self.assertNotIn("and the journal for `gateway: listening on`", readme)
+        self.assertIn("that text alone proves nothing", readme)
+
+    def test_the_documents_state_the_concurrent_edit_limit_without_overclaiming(self):
+        for document in (DEPLOY_README, GUIDE):
+            text = " ".join(document.read_text(encoding="utf-8").split())
+            with self.subTest(document=document.name):
+                self.assertIn("not a lock", text)
+                self.assertIn("refusal of every concurrent edit is not claimed", text)
+
+    START = re.compile(
+        r"systemctl --user (?:start|restart|enable --now) pocket-gateway\.service")
+    NOTE_LOCAL = "PET_START_LOCAL=\"$(date '+%Y-%m-%d %H:%M:%S')\""
+    NOTE_UTC = "date -u '+%Y-%m-%dT%H:%M:%S+00:00'"
+
+    def start_order_defects(self, procedure: str) -> list[str]:
+        """Why a start procedure would note its time too late (empty when it is right)."""
+        starts = [match.start() for match in self.START.finditer(procedure)]
+        if len(starts) != 1:
+            return ["expected exactly one start command"]
+        defects = []
+        for label, needle in (("local", self.NOTE_LOCAL), ("UTC", self.NOTE_UTC)):
+            if procedure.count(needle) != 1:
+                defects.append(f"the {label} time is not noted exactly once")
+            elif procedure.index(needle) > starts[0]:
+                defects.append(f"the {label} time is noted after the start")
+            elif "```" in procedure[procedure.index(needle):starts[0]]:
+                defects.append(f"the {label} time is not in the start's command block")
+        return defects
+
+    def readme_sections(self) -> dict[str, str]:
+        readme = DEPLOY_README.read_text(encoding="utf-8")
+        move, rest = readme.split(
+            "\n### Move an existing JSON-configured service to `.env`\n", 1)[1].split(
+            "\n## Install and start\n", 1)
+        install, rest = rest.split("\n### Check the current start\n", 1)
+        check, rest = rest.split("\n## Optional LAN and Tailnet listeners\n", 1)
+        return {"move": move, "install": install, "check": check, "all": readme}
+
+    def test_the_time_is_noted_before_the_start_command_in_both_start_paths(self):
+        sections = self.readme_sections()
+        for name in ("move", "install"):
+            with self.subTest(path=name):
+                self.assertEqual(self.start_order_defects(sections[name]), [])
+        # The check itself never tells a reader who has already started to note the time,
+        # and says what a late note would do.
+        check = " ".join(sections["check"].split())
+        self.assertNotIn("PET_START_LOCAL=", check)
+        self.assertEqual(self.START.findall(check), [])
+        self.assertIn("noted immediately **before** the start", check)
+        self.assertIn("Do not run them once the service has started", check)
+        # Two start procedures and the two entries of the operate list: a further start
+        # command cannot be added without being placed in one of the checked procedures.
+        self.assertEqual(len(self.START.findall(sections["all"])), 4)
+        # The team guide starts nothing itself and gives the same order in words.
+        guide = " ".join(GUIDE.read_text(encoding="utf-8").split())
+        self.assertEqual(self.START.findall(guide), [])
+        self.assertLess(guide.index("Before you start the service, note the time"),
+                        guide.index("Afterwards do not rely on finding"))
+
+    def test_the_ordering_check_rejects_a_time_noted_after_the_start(self):
+        good = self.readme_sections()["install"]
+        self.assertEqual(self.start_order_defects(good), [])
+        start = self.START.search(good).group(0)
+        block = f"{self.NOTE_LOCAL}\n   {self.NOTE_UTC}\n"
+        self.assertEqual(good.count(block), 1)
+        late = good.replace(block, "").replace(start, f"{start}\n   {block}")
+        self.assertEqual(self.start_order_defects(late), [
+            "the local time is noted after the start",
+            "the UTC time is noted after the start"])
+        # the previous shape: start here, note the time in a later command block
+        separate = good.replace(block, "") + f"\n```sh\n{block}```\n"
+        self.assertEqual(self.start_order_defects(separate), [
+            "the local time is noted after the start",
+            "the UTC time is noted after the start"])
+        apart = good.replace(block, "") .replace(
+            "   ```sh\n", f"   ```sh\n   {block}   ```\n\n   ```sh\n", 1)
+        self.assertEqual(self.start_order_defects(apart), [
+            "the local time is not in the start's command block",
+            "the UTC time is not in the start's command block"])
+        self.assertEqual(self.start_order_defects(good.replace(block, "")), [
+            "the local time is not noted exactly once",
+            "the UTC time is not noted exactly once"])
+        self.assertEqual(self.start_order_defects("no command here"),
+                         ["expected exactly one start command"])
+
+    def test_a_clean_stop_is_not_described_as_a_restart_trigger(self):
+        check = " ".join(self.readme_sections()["check"].split())
+        self.assertIn("A `null` code is a clean stop", check)
+        self.assertIn("`Restart=on-failure` does not start it again", check)
+        self.assertIn("A code such as `config_invalid` is a failed start", check)
+        self.assertNotIn("every 10 seconds", check)
+
+    def test_sourcing_is_distinguished_from_exporting(self):
+        readme = " ".join(DEPLOY_README.read_text(encoding="utf-8").split())
+        self.assertIn("Systemd `EnvironmentFile=`, and dotenv tools that export what they "
+                      "read, copy every value", readme)
+        self.assertIn("A bare shell `source` is different: it sets shell variables, which "
+                      "reach a process environment only if the file or the shell exports "
+                      "them", readme)
+        self.assertIn("Do not `source` the file anyway. It is not a shell script", readme)
+        self.assertNotIn("a shell `source` or a dotenv tool", readme)  # the old conflation
+
+    def test_the_copy_command_scope_is_stated_without_an_atomic_claim(self):
+        for document in (DEPLOY_README, GUIDE):
+            text = " ".join(document.read_text(encoding="utf-8").split())
+            with self.subTest(document=document.name):
+                self.assertIn("private and controlled only by you", text)
+                self.assertIn("check followed by a redirect", text)
+                self.assertRegex(text, r"not (one atomic step|an atomic guarantee)")
+                self.assertRegex(text, r"FIFO\)?,? (for example, )?could make (the command|it) "
+                                       r"block or fail")
+                self.assertNotIn("is not overwritten either", text)
 
     def test_the_guides_show_the_env_setup_keep_json_and_claim_no_demonstration(self):
         readme = " ".join(DEPLOY_README.read_text(encoding="utf-8").split())
@@ -748,7 +1366,7 @@ class EnvDocumentsTest(OfflineTestCase):
         self.assertIn("@ENV_FILE@", readme)
         self.assertIn("@CONFIG@", readme)
         self.assertIn("Move an existing JSON-configured service to `.env`", readme)
-        self.assertIn("Do not load it with systemd `EnvironmentFile=`", readme)
+        self.assertIn("create it with this command, not with `cp`", readme)
 
 
 if __name__ == "__main__":  # pragma: no cover

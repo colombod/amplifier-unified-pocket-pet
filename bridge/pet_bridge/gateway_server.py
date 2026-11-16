@@ -177,6 +177,11 @@ class _PrivateFileError(OSError):
     """Any private-file refusal; carries no path or content."""
 
 
+def _file_state(info: os.stat_result) -> tuple[int, ...]:
+    """What must not change on the open file while it is read (never the access time)."""
+    return (info.st_size, info.st_mode, info.st_uid, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def check_private_file(
     path: Path, *, max_bytes: int | None, read: bool
 ) -> bytes | None:
@@ -185,6 +190,12 @@ def check_private_file(
     Absolute, final component not a symlink, a regular file owned by this user with no
     group/other permission bit, within ``max_bytes``.  Raises ``OSError`` for every failure
     (callers map it to their own fixed code).  Never blocks on a FIFO.
+
+    A read is refused when fewer bytes arrive than the size seen at open, or when the open
+    file's size, mode, owner or modification/change time differs after the read: a file
+    that is being rewritten is not accepted as a shorter or mixed text.  This is a
+    before/after comparison, not a lock; a change that leaves all of those equal is not
+    detected.
     """
     try:
         text = os.fspath(path)
@@ -213,6 +224,8 @@ def check_private_file(
             if not chunk:
                 break
             data += chunk
+        if len(data) != info.st_size or _file_state(os.fstat(fd)) != _file_state(info):
+            raise _PrivateFileError("changed_during_read")
         return data
     finally:
         os.close(fd)
@@ -1594,6 +1607,11 @@ async def _startup(
                 stdout.flush()
 
         site_handle.on_tailnet_ready = recovered
+    # A service's stdout is a pipe, which Python block-buffers: without this the lines
+    # above would stay in the buffer until exit.  A failed flush never stops a gateway
+    # that is already listening (as for the Tailnet line in ``recovered``).
+    with contextlib.suppress(OSError, ValueError):
+        stdout.flush()
     if site_handle is not None and cfg.tailnet_bind_host is not None:
         await _wait_for_gateway_shutdown(deps.wait_for_shutdown, site_handle)
     else:

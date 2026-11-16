@@ -343,12 +343,32 @@ have not yet been tested.
    stay on your machine and out of the repository. Copy the tracked
    placeholder-only `bridge/.env.example` to a private owner-only `.env` in the
    same private directory from step 2, then replace every `<placeholder>`. From
-   the `bridge/` directory, in the same private shell (`umask 077`):
+   the `bridge/` directory, in the same private shell, create it with this
+   command, not with `cp`, so that an existing filled-in file is never replaced:
 
    ```sh
-   cp .env.example "$XDG_CONFIG_HOME/.env"
-   chmod 600 "$XDG_CONFIG_HOME/.env"
+   PET_ENV_EXAMPLE=".env.example"
+   PET_ENV_FILE="$XDG_CONFIG_HOME/.env"
+   if [ -e "$PET_ENV_FILE" ] || [ -L "$PET_ENV_FILE" ]; then
+     echo "Stopped: the destination already exists. Nothing was copied or changed." >&2; false
+   elif ( umask 077 && set -C && cat "$PET_ENV_EXAMPLE" > "$PET_ENV_FILE" ); then
+     echo "Created a new private settings file."
+   else
+     echo "Stopped: the copy did not complete. No existing file was overwritten." >&2; false
+   fi
    ```
+
+   Proceed only on `Created a new private settings file.` The command creates
+   the file only if nothing is at the destination. An existing file or symbolic
+   link is left untouched and you see `Stopped: the destination already exists.
+   Nothing was copied or changed.`; keep that file and edit it, or choose a
+   different absent path. `Stopped: the copy did not complete. No existing file
+   was overwritten.` means the shell could not create or fill a new file;
+   inspect the destination before retrying. The new file is owner-only. The
+   command assumes that directory is private and controlled only by you. It is a
+   check followed by a redirect with the shell's no-overwrite option, not an
+   atomic guarantee: something created at that path in between (for example a
+   FIFO) could make it block or fail.
 
    Edit the copy in a private editor that makes no backups or cloud copies. Each
    variable has a one-line comment in the file. Values are literal: no quotes, no
@@ -357,10 +377,21 @@ have not yet been tested.
    `serve --env-file <absolute-path-of-that-file>`; it reads the file itself and
    refuses a file that is not a regular owner-only file, or any unknown,
    repeated, missing or malformed entry, with `error: config_invalid` before
-   listening. The values pass the same checks as the JSON config. See
-   [service setup](../bridge/deploy/README.md) for the exact rules and the
-   service unit. This path is offline-tested only; it has not been demonstrated
-   on a running service or on a second machine.
+   listening. The values pass the same checks as the JSON config. Do not edit
+   the file while the gateway is starting: stop the service, edit, then start.
+   The gateway refuses a file it sees change while reading it, but that is a
+   before-and-after comparison, not a lock, and refusal of every concurrent
+   edit is not claimed. Before you start the service, note the time with the
+   two `date` commands that open the start step in
+   [service setup](../bridge/deploy/README.md); a time taken after the start
+   would make a healthy start look wrong. Afterwards do not rely on finding
+   `gateway: listening on` somewhere in the journal, which also holds earlier
+   runs: use the evidence tied to that start (the unit's `ActiveEnterTimestamp`,
+   a `gateway_start` event-log record that is not older, and journal output
+   restricted to the current invocation) as described under "Check the current
+   start" in [service setup](../bridge/deploy/README.md), which also has the
+   exact rules and the service unit. This path is offline-tested only; it has
+   not been demonstrated on a running service or on a second machine.
 
    **Alternative: a private JSON config** with the same fields, started with
    `serve --config`. This is its shape; replace every value in angle brackets
