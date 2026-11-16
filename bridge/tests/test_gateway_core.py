@@ -27,6 +27,7 @@ from unittest import mock
 import pet_bridge
 from pet_bridge import core
 from pet_bridge import gateway_core as gc
+from pet_bridge import gateway_provider as gp
 from pet_bridge import gateway_state as gs
 from pet_bridge.companion import Preflight
 from pet_bridge.core import BridgeError, CommandResult, ReplyResult
@@ -1442,6 +1443,8 @@ class SessionStartTest(SessionCase):
         await self.h.push(event)
         self.assertEqual(self.ops.count("resume"), 0)
         self.assertNotIn("session.started", self.device.types())
+        self.assertEqual(self.device.close_codes, [1002])
+        await self.h.finish()
 
     async def test_documented_startup_wrong_client_echo_never_becomes_ready(self):
         self.provider.auto_start = False
@@ -1451,6 +1454,144 @@ class SessionStartTest(SessionCase):
         }))
         self.assertEqual(self.ops.count("resume"), 0)
         self.assertNotIn("session.started", self.device.types())
+        self.assertEqual(self.device.close_codes, [1002])
+        await self.h.finish()
+
+    async def test_bad_startup_protocol_is_terminal_before_device_begin(self):
+        mutations = (
+            lambda event: event["session"].update({"status": "invalid"}),
+            lambda event: event["session"].update({"model": "gpt-live-2"}),
+            lambda event: event["session"]["audio"]["output"].update({"voice": "alloy"}),
+            lambda event: event["session"]["audio"]["format"].update({"rate": 16000}),
+            lambda event: event["session"].update({"store": True}),
+            lambda event: event.update({"client_event_id": "gw_wrong"}),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                h = Harness()
+                self.addAsyncCleanup(h.aclose)
+                await h.open()
+                h.provider.auto_start = False
+                await h.boot()
+                event = provider_frame({"type": "session.started"})
+                mutate(event)
+                await h.push(event)
+                outcome = await h.finish()
+                self.assertEqual(h.device.close_codes, [1002])
+                self.assertEqual(h.device.frames, [])
+                self.assertEqual(h.ops.count("resume"), 0)
+                self.assertEqual(h.ops.count("confirm"), 0)
+                self.assertIsNone(outcome.send_outcome)
+
+    async def test_startup_provider_event_does_not_invent_auth_classification(self):
+        self.provider.auto_start = False
+        await self.h.boot()
+        await self.h.push({
+            "type": "error",
+            "error": {"type": "invalid_request_error", "code": "unknown_parameter",
+                      "message": TEXT_CANARY},
+        })
+        outcome = await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1011])
+        self.assertEqual(self.device.frames, [])
+        self.assertEqual(self.ops.count("resume"), 0)
+        self.assertNotIn(TEXT_CANARY, repr(outcome))
+
+    async def test_startup_bad_frame_then_drop_and_drop_then_bad_frame(self):
+        for bad_first, expected in ((True, 1002), (False, 1011)):
+            with self.subTest(bad_first=bad_first):
+                h = Harness()
+                self.addAsyncCleanup(h.aclose)
+                await h.open()
+                h.provider.auto_start = False
+                await h.boot()
+                if bad_first:
+                    h.provider.push("{invalid")
+                    h.provider.push_closed(clean=False)
+                else:
+                    h.provider.push_closed(clean=False)
+                    h.provider.push("{invalid")
+                await h.quiesce()
+                await h.finish()
+                self.assertEqual(h.device.close_codes, [expected])
+                self.assertEqual(h.device.frames, [])
+                self.assertEqual(h.device.close_calls, 1)
+
+    async def test_stop_during_start_wins_over_late_provider_failure(self):
+        self.provider.auto_start = False
+        await self.h.boot()
+        await self.h.feed({"type": "pet.stop"})
+        self.provider.push("{invalid")
+        await self.h.quiesce()
+        await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1000])
+        self.assertEqual(self.ops.count("confirm"), 0)
+
+    async def test_provider_send_failure_snapshot_preserves_first_terminal_evidence(self):
+        cases = (
+            (gp.ProviderEvent("invalid"), None, 1002),
+            (gp.ProviderEvent("invalid_audio"), None, 1002),
+            (gp.ProviderEvent("invalid_transcript"), None, 1002),
+            (gp.ProviderEvent("started", session_id="live", model="gpt-live-2"), None, 1002),
+            (gp.ProviderEvent("error", code="provider_error"), gp.ProviderEvent("invalid"), 1011),
+            (None, gp.ProviderEvent("invalid"), 1011),
+        )
+        for first, later, expected in cases:
+            with self.subTest(first=first, later=later):
+                h = Harness()
+                self.addAsyncCleanup(h.aclose)
+                await h.open()
+                h.provider.auto_start = False
+                await h.boot()
+                if first is not None:
+                    h.session._post_external(("provider", first, None))
+                h.session._provider_send_failed()
+                if later is not None:
+                    h.session._post_external(("provider", later, None))
+                await h.quiesce()
+                await h.finish()
+                self.assertEqual(h.device.close_codes, [expected])
+                self.assertEqual(h.device.close_calls, 1)
+                self.assertEqual(h.device.frames, [])
+                self.assertEqual(h.ops.count("confirm"), 0)
+
+    async def test_send_failure_does_not_promote_an_ignored_second_start(self):
+        self.provider.auto_start = False
+        await self.h.boot()
+        good = gp.ProviderEvent("started", session_id="live", model="gpt-live-1")
+        bad = gp.ProviderEvent("started", session_id="live", model="gpt-live-2")
+        self.h.session._post_external(("provider", good, None))
+        self.h.session._post_external(("provider", bad, None))
+        self.h.session._provider_send_failed()
+        await self.h.quiesce()
+        await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1011])
+        self.assertEqual(self.ops.count("resume"), 0)
+
+    async def test_start_send_failure_preserves_prior_malformed_provider_frame(self):
+        self.provider.auto_start = False
+        async def receive_before_failing(_text):
+            self.provider.push("{bad")
+            await asyncio.sleep(0)
+            raise ConnectionError("offline canary")
+
+        self.provider.send_text = receive_before_failing
+        await self.h.boot()
+        await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1002])
+        self.assertEqual(self.device.frames, [])
+        self.assertEqual(self.ops.count("confirm"), 0)
+
+    async def test_shutdown_queued_before_send_failure_keeps_stop_priority(self):
+        self.provider.auto_start = False
+        await self.h.boot()
+        self.h.session._post(("shutdown",))
+        self.h.session._post_external(("provider", gp.ProviderEvent("invalid"), None))
+        self.h.session._provider_send_failed()
+        await self.h.quiesce()
+        await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1000])
+        self.assertEqual(self.ops.count("confirm"), 0)
 
     async def test_t_core_sess_start_accepts_the_exact_assistant_start_and_emits_started(
         self,
@@ -3086,6 +3227,139 @@ class SessionSpeakTest(SpeakCase):
 
 
 class SessionCloseTest(FlowCase):
+    async def test_foreign_close_requested_after_start_is_terminal_protocol_failure(self):
+        await self.h.boot()
+        event = provider_frame({"type": "session.closed", "reason": "close_requested"})
+        event["session"]["id"] = "live_other"
+        await self.h.push(event)
+        outcome = await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1002])
+        self.assertFalse(outcome.close_confirmed)
+        self.assertEqual(self.device.types(), ["session.started"])
+        self.assertEqual(self.ops.count("confirm"), 0)
+        self.assertNotIn("live_other", repr(outcome) + " ".join(self.device.raw))
+
+    async def test_close_reason_and_identity_negative_controls(self):
+        for reason, foreign in (
+            ("expired", False), ("expired", True),
+            ("connection_lost", False), ("connection_lost", True),
+            ("close_requested", False),
+        ):
+            with self.subTest(reason=reason, foreign=foreign):
+                await self.fresh_harness()
+                await self.h.boot()
+                event = provider_frame({"type": "session.closed", "reason": reason})
+                if foreign:
+                    event["session"]["id"] = "live_other"
+                await self.h.push(event)
+                outcome = await self.h.finish()
+                self.assertEqual(self.device.close_codes, [1011])
+                self.assertFalse(outcome.close_confirmed)
+                self.assertEqual(self.ops.count("confirm"), 0)
+
+    async def test_close_before_start_has_no_pinned_id_so_is_ambiguous(self):
+        self.provider.auto_start = False
+        await self.h.boot()
+        await self.h.push({"type": "session.closed", "reason": "close_requested"})
+        await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1011])
+        self.assertEqual(self.ops.count("resume"), 0)
+
+    async def test_queued_start_and_close_before_send_failure_keep_identity_in_order(self):
+        for order, close_id, reason, expected in (
+            ("start_first", "live_other", "close_requested", 1002),
+            ("start_first", "live_fixture_1", "close_requested", 1011),
+            ("start_first", "live_other", "expired", 1011),
+            ("close_first", "live_other", "close_requested", 1011),
+            ("failure_first", "live_other", "close_requested", 1011),
+        ):
+            with self.subTest(order=order, close_id=close_id, reason=reason):
+                await self.fresh_harness()
+                self.provider.auto_start = False
+                await self.h.boot()
+                start = gp.classify_provider_event(json.dumps(provider_frame({
+                    "type": "session.started",
+                })))
+                close_doc = provider_frame({"type": "session.closed", "reason": reason})
+                close_doc["session"]["id"] = close_id
+                close = gp.classify_provider_event(json.dumps(close_doc))
+                self.assertEqual((start.kind, close.kind), ("started", "closed"))
+                if order == "start_first":
+                    self.h.session._post_external(("provider", start, None))
+                    self.h.session._post_external(("provider", close, None))
+                elif order == "close_first":
+                    self.h.session._post_external(("provider", close, None))
+                    self.h.session._post_external(("provider", start, None))
+                self.h.session._provider_send_failed()
+                if order == "failure_first":
+                    self.h.session._post_external(("provider", start, None))
+                    self.h.session._post_external(("provider", close, None))
+                await self.h.quiesce()
+                result = await self.h.finish()
+                self.assertEqual(self.device.close_codes, [expected])
+                self.assertEqual(self.ops.count("resume"), 0)
+                self.assertEqual(self.ops.count("confirm"), 0)
+                self.assertFalse(result.close_confirmed)
+
+    async def test_foreign_close_after_provider_start_while_resume_pending_is_terminal(self):
+        release = self.ops.hold("resume")
+        await self.h.boot()
+        event = provider_frame({"type": "session.closed", "reason": "close_requested"})
+        event["session"]["id"] = "live_other"
+        await self.h.push(event)
+        outcome = await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1002])
+        self.assertEqual(self.device.frames, [])
+        self.assertFalse(outcome.close_confirmed)
+        release.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.ops.count("confirm"), 0)
+
+    async def test_queued_close_then_send_failure_uses_first_terminal_evidence(self):
+        cases = (
+            ("close_requested", True, "close_first", 1002),
+            ("expired", True, "close_first", 1011),
+            ("connection_lost", False, "close_first", 1011),
+            ("close_requested", False, "close_first", 1011),
+            ("close_requested", True, "send_first", 1011),
+            ("close_requested", True, "transport_first", 1011),
+        )
+        for reason, foreign, order, expected in cases:
+            with self.subTest(reason=reason, foreign=foreign, order=order):
+                await self.fresh_harness()
+                await self.h.boot()
+                frame = provider_frame({"type": "session.closed", "reason": reason})
+                if foreign:
+                    frame["session"]["id"] = "live_other"
+                event = gp.classify_provider_event(json.dumps(frame))
+                self.assertEqual(event.kind, "closed")
+                if order == "transport_first":
+                    self.h.session._post_external(("provider_closed", False))
+                if order != "send_first":
+                    self.h.session._post_external(("provider", event, None))
+                self.h.session._provider_send_failed()
+                if order == "send_first":
+                    self.h.session._post_external(("provider", event, None))
+                await self.h.quiesce()
+                outcome = await self.h.finish()
+                self.assertEqual(self.device.close_codes, [expected])
+                self.assertEqual(self.device.close_calls, 1)
+                self.assertFalse(outcome.close_confirmed)
+                self.assertEqual(self.ops.count("confirm"), 0)
+
+    async def test_foreign_close_during_stop_does_not_replace_stop(self):
+        self.provider.auto_close = False
+        await self.h.boot()
+        await self.h.feed({"type": "pet.stop"})
+        event = provider_frame({"type": "session.closed", "reason": "close_requested"})
+        event["session"]["id"] = "live_other"
+        await self.h.push(event)
+        outcome = await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1000])
+        self.assertEqual(self.device.error_codes(), ["close_unconfirmed"])
+        self.assertFalse(outcome.close_confirmed)
+        self.assertEqual(self.ops.count("confirm"), 0)
+
     async def test_foreign_or_unrequested_finalization_cannot_confirm_our_close(self):
         for reason, foreign in (("expired", False), ("connection_lost", False),
                                 ("close_requested", True)):
@@ -3190,7 +3464,8 @@ class SessionCloseTest(FlowCase):
     async def test_provider_error_event_after_start_closes_1011_without_pet_error(self):
         await self.h.boot()
         await self.h.push(
-            {"type": "error", "error": {"code": "x", "message": "TEXTCANARY"}}
+            {"type": "error", "error": {
+                "type": "unknown", "code": "x", "message": "TEXTCANARY"}}
         )
         self.assertEqual(self.device.close_codes, [1011])
         self.assertEqual(
@@ -3213,10 +3488,10 @@ class SessionCloseTest(FlowCase):
         self.assertEqual(self.device.close_codes, [1011])
         await self.h.finish()
 
-    async def test_provider_garbage_is_fatal_1011(self):
+    async def test_provider_garbage_is_fatal_1002(self):
         await self.h.boot()
         await self.h.push("{not json")
-        self.assertEqual(self.device.close_codes, [1011])
+        self.assertEqual(self.device.close_codes, [1002])
         self.assertEqual(self.device.error_codes(), [])
         await self.h.finish()
 
@@ -4173,7 +4448,10 @@ class AudioReleaseLivenessTest(SpeakCase):
         self.assertEqual(gc._KNOWN_UNSENT, KNOWN_UNSENT_REASONS)
 
 
-PROVIDER_ERROR = {"type": "error", "error": {"code": "x", "message": "TEXTCANARY"}}
+PROVIDER_ERROR = {
+    "type": "error",
+    "error": {"type": "unknown", "code": "x", "message": "TEXTCANARY"},
+}
 
 
 class RepairFatalTest(SpeakCase):
@@ -4211,6 +4489,49 @@ class RepairFatalTest(SpeakCase):
         await self.h.push(PROVIDER_ERROR)
         outcome = await self.h.finish()
         self.assert_truthful_fatal_end(outcome)
+
+    async def test_invalid_provider_frame_after_accepted_send_never_replays(self):
+        self.ops.results["poll"] = pending_poll
+        await self.to_accepted()
+        await self.h.push("{bad provider frame")
+        outcome = await self.h.finish()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.done_states(), ["unavailable"])
+        self.assertEqual(self.device.close_codes, [1002])
+        self.assertEqual(self.ops.count("confirm"), 1)
+        self.assertEqual(outcome.send_outcome, "accepted")
+        self.assertNotIn("session.closed", self.device.types())
+
+    async def test_invalid_provider_frame_with_confirm_inflight_never_replays(self):
+        release = self.ops.hold("confirm")
+        await self.to_preview()
+        await self.h.feed(self.confirm_frame())
+        await self.h.push("{bad provider frame")
+        outcome = await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1002])
+        self.assertEqual(outcome.send_outcome, "inflight")
+        self.assertIsNotNone(outcome.confirm_job)
+        self.assertEqual(self.frames("pet.turn.send_result"), [])
+        release.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.ops.count("confirm"), 1)
+
+    async def test_foreign_close_with_confirm_inflight_preserves_reconciliation(self):
+        release = self.ops.hold("confirm")
+        await self.to_preview()
+        await self.h.feed(self.confirm_frame())
+        event = provider_frame({"type": "session.closed", "reason": "close_requested"})
+        event["session"]["id"] = "live_other"
+        await self.h.push(event)
+        outcome = await self.h.finish()
+        self.assertEqual(self.device.close_codes, [1002])
+        self.assertEqual(outcome.send_outcome, "inflight")
+        self.assertIsNotNone(outcome.confirm_job)
+        self.assertEqual(self.frames("pet.turn.send_result"), [])
+        release.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(outcome.confirm_job).outcome, "accepted")
+        self.assertEqual(self.ops.count("confirm"), 1)
 
     async def test_u2r_m6_unexpected_provider_close_and_provider_send_failure_are_the_same_funnel(
         self,

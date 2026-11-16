@@ -396,6 +396,40 @@ class ConversationTest(ConversationCase):
         self.assertEqual(self.h.ops.count("confirm"), 1)
         self.assertEqual(self.h.clock.pending, 0)
 
+    async def test_protocol_failure_mid_inflight_send_preserves_reconciliation(self):
+        gate = self.h.ops.hold("confirm")
+        await self.request()
+        await self.h.push("{invalid provider frame")
+        result = await self.h.finish()
+        self.assertEqual(self.h.device.close_codes, [1002])
+        self.assertFalse(result.close_confirmed)
+        self.assertEqual(result.send_outcome, "inflight")
+        self.assertEqual((result.requests_submitted, result.requests_sent), (1, 0))
+        gate.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(result.confirm_job).outcome, "accepted")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_foreign_provider_close_mid_inflight_send_preserves_reconciliation(self):
+        gate = self.h.ops.hold("confirm")
+        await self.request()
+        await self.h.push({
+            "type": "session.closed", "reason": "close_requested",
+            "session": {
+                "id": "live_other", "expires_at": 2000000000,
+                "model": "gpt-live-1", "status": "active",
+            },
+        })
+        result = await self.h.finish()
+        self.assertEqual(self.h.device.close_codes, [1002])
+        self.assertFalse(result.close_confirmed)
+        self.assertEqual(result.send_outcome, "inflight")
+        self.assertEqual((result.requests_submitted, result.requests_sent), (1, 0))
+        gate.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(result.confirm_job).outcome, "accepted")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
     async def test_turn_frames_after_converse_are_protocol_error(self):
         await self.h.feed('{"type":"pet.turn.begin"}')
         result = await self.h.finish()

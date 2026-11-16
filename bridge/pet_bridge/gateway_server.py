@@ -51,6 +51,7 @@ from typing import Any, TextIO, TypeVar
 
 import aiohttp
 from aiohttp import web
+from aiohttp.http_websocket import WebSocketError
 
 from . import auth, core, transport
 from . import gateway_provider as gp
@@ -60,6 +61,7 @@ from .gateway_core import (
     DeviceLink,
     DeviceMessage,
     PetSession,
+    ProviderError,
     ProviderLink,
     ProviderMessage,
     RealClock,
@@ -131,21 +133,6 @@ class LinkError(Exception):
     """A device-link failure: the fixed code ``device_link`` and nothing else."""
 
     def __init__(self, code: str = "device_link") -> None:
-        super().__init__(code)
-        self.code = code
-
-    def __str__(self) -> str:
-        return self.code
-
-
-class ProviderError(Exception):
-    """A provider failure: ``provider_connect`` | ``provider_redirect`` | ``provider_link``."""
-
-    CODES = frozenset({"provider_connect", "provider_redirect", "provider_link"})
-
-    def __init__(self, code: str) -> None:
-        if code not in self.CODES:
-            raise ValueError("unknown provider code")
         super().__init__(code)
         self.code = code
 
@@ -560,11 +547,17 @@ class AiohttpProviderLink:
         kind = msg.type
         if kind == aiohttp.WSMsgType.TEXT:
             return ProviderMessage("text", msg.data)
+        if kind == aiohttp.WSMsgType.BINARY:
+            return ProviderMessage("invalid")  # fixed classification; discard bytes
+        if kind == aiohttp.WSMsgType.ERROR and isinstance(msg.data, WebSocketError):
+            # Locally detected frame/UTF-8 parser error, not a peer close code.
+            # Never retain its message or code.
+            return ProviderMessage("invalid")
         if kind == aiohttp.WSMsgType.CLOSE:
             return ProviderMessage("closed", None, self._ws.close_code == 1000)
         # CLOSED is aiohttp's own end-of-stream marker: a bare EOF / connection loss also
         # arrives as CLOSED with close_code 1000 and NO close frame, so it proves nothing.
-        return ProviderMessage("closed", None, False)  # closed/closing/error/binary
+        return ProviderMessage("closed", None, False)  # closed/closing/other error
 
     async def _close_all(self) -> None:
         await self._ws.close()
@@ -652,6 +645,14 @@ async def connect_provider(key: Secret, *, timeout: float) -> AiohttpProviderLin
     except ProviderError:
         await _discard(dial)
         raise
+    except aiohttp.WSServerHandshakeError as err:
+        # Only explicit upstream authentication/authorization refusals are
+        # definitive. Never retain or forward the exception, status or headers.
+        if type(err.status) is int and err.status in (401, 403):
+            failure = "provider_auth"
+        elif type(err.status) is int and err.status == 101:
+            # aiohttp rejected the 101 upgrade's WebSocket headers/accept value.
+            failure = "provider_protocol"
     except Exception:  # noqa: BLE001 - fixed ProviderError below; no aiohttp text is kept
         pass
     except BaseException:

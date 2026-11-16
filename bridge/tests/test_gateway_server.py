@@ -36,8 +36,9 @@ from unittest import mock
 
 import aiohttp
 from aiohttp import web
-from aiohttp._websocket.reader import WebSocketDataQueue
+from aiohttp._websocket.reader import WebSocketDataQueue, WebSocketReader
 from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT
+from aiohttp.http_websocket import WebSocketError
 from aiohttp.test_utils import make_mocked_request
 from multidict import CIMultiDict
 
@@ -1185,7 +1186,8 @@ class ProviderLinkTest(OfflineAsyncCase):
             (T.CLOSING, 1006, False),
             (T.CLOSE, None, False),
             (T.ERROR, 1000, False),  # an error is never a confirmation
-            (T.BINARY, 1000, False),
+            (T.CLOSE, 1002, False),
+            (T.CLOSE, 1008, False),  # upstream reasons are not device verdicts
         ):
             with self.subTest(kind=kind, code=code):
                 self.ws.close_code = code
@@ -1195,6 +1197,63 @@ class ProviderLinkTest(OfflineAsyncCase):
                     (msg.kind, msg.data, msg.clean), ("closed", None, clean)
                 )
 
+    async def test_binary_is_invalid_and_payload_is_not_retained(self):
+        self.ws.inbound.put_nowait(ws_msg(aiohttp.WSMsgType.BINARY, KEY_CANARY.encode()))
+        msg = await self.link.receive()
+        self.assertEqual((msg.kind, msg.data, msg.clean), ("invalid", None, False))
+        self.assertNotIn(KEY_CANARY, repr(msg))
+
+    async def test_typed_parser_error_is_invalid_but_generic_error_is_transport_loss(self):
+        T = aiohttp.WSMsgType
+        for data, want in (
+            (WebSocketError(1002, KEY_CANARY), "invalid"),
+            (WebSocketError(1007, KEY_CANARY), "invalid"),
+            (RuntimeError(KEY_CANARY), "closed"),
+        ):
+            with self.subTest(error_type=type(data).__name__):
+                self.ws.close_code = 1002  # never classify from this number
+                self.ws.inbound.put_nowait(ws_msg(T.ERROR, data))
+                msg = await self.link.receive()
+                self.assertEqual((msg.kind, msg.data, msg.clean), (want, None, False))
+                self.assertNotIn(KEY_CANARY, repr(msg))
+
+    async def test_binary_adapter_to_session_closes_1002_without_payload(self):
+        h = Harness()
+        self.addAsyncCleanup(h.aclose)
+        await h.open()
+
+        async def connect():
+            return self.link
+
+        h.session._provider_connect = connect
+        self.ws.inbound.put_nowait(ws_msg(aiohttp.WSMsgType.BINARY, KEY_CANARY.encode()))
+        await h.boot()
+        outcome = await h.finish()
+        self.assertEqual(h.device.close_codes, [1002])
+        self.assertEqual(h.device.frames, [])
+        self.assertNotIn(KEY_CANARY, repr(outcome))
+        self.assertEqual(h.ops.count("confirm"), 0)
+
+    async def test_upstream_close_codes_are_not_invented_device_verdicts(self):
+        for code in (1002, 1008):
+            with self.subTest(code=code):
+                ws = FakeClientWS()
+                ws.close_code = code
+                link = gsv.AiohttpProviderLink(ws, FakeClientSession(), FakeConnector())
+                h = Harness()
+                self.addAsyncCleanup(h.aclose)
+                await h.open()
+
+                async def connect():
+                    return link
+
+                h.session._provider_connect = connect
+                ws.inbound.put_nowait(ws_msg(aiohttp.WSMsgType.CLOSE, code))
+                await h.boot()
+                await h.finish()
+                self.assertEqual(h.device.close_codes, [1011])
+                self.assertEqual(h.ops.count("confirm"), 0)
+
     async def _real_ws(self) -> aiohttp.ClientWebSocketResponse:
         """A REAL aiohttp client WebSocket over a real data queue: no socket, no parser."""
         loop = asyncio.get_running_loop()
@@ -1202,6 +1261,7 @@ class ProviderLinkTest(OfflineAsyncCase):
         self.real_queue = WebSocketDataQueue(protocol, 2**16, loop=loop)
         writer = mock.Mock()
         writer.close = mock.AsyncMock()
+        writer.send_frame = mock.AsyncMock()
         response = mock.Mock(connection=None)
         return aiohttp.ClientWebSocketResponse(
             self.real_queue,
@@ -1213,6 +1273,74 @@ class ProviderLinkTest(OfflineAsyncCase):
             True,
             loop,
         )
+
+    async def test_real_parser_errors_reach_device_as_terminal_without_payload(self):
+        # Real installed aiohttp parser -> its real WebSocket client -> production
+        # adapter -> whole session. These invalid provider bytes never use a socket.
+        for malformed, error_code in ((b"\x83\x00", 1002), (b"\x81\x01\xff", 1007)):
+            with self.subTest(malformed=malformed, error_code=error_code):
+                proof_ws = await self._real_ws()
+                proof_parser = WebSocketReader(self.real_queue, 1048576, False, True)
+                proof_parser.feed_data(malformed)
+                parser_error = self.real_queue.exception()
+                self.assertIsInstance(parser_error, WebSocketError)
+                proof_msg = await proof_ws.receive()
+                self.assertEqual(proof_msg.type, aiohttp.WSMsgType.ERROR)
+                self.assertIs(proof_msg.data, parser_error)
+                self.assertEqual(proof_msg.data.code, error_code)
+
+                ws = await self._real_ws()
+                parser = WebSocketReader(self.real_queue, 1048576, False, True)
+                parser.feed_data(malformed)
+                link = gsv.AiohttpProviderLink(ws, FakeClientSession(), FakeConnector())
+                h = Harness()
+                self.addAsyncCleanup(h.aclose)
+                await h.open()
+
+                async def connect():
+                    return link
+
+                h.session._provider_connect = connect
+                await h.boot()
+                outcome = await h.finish()
+                self.assertEqual(h.device.close_codes, [1002])
+                self.assertEqual(h.device.frames, [])
+                self.assertEqual(h.ops.count("resume"), 0)
+                self.assertEqual(h.ops.count("confirm"), 0)
+                self.assertIsNone(outcome.send_outcome)
+
+    async def test_real_client_non_parser_error_is_not_terminal_protocol(self):
+        class OtherError(Exception):
+            code = 1002
+
+        ws = await self._real_ws()
+        self.real_queue.set_exception(OtherError(KEY_CANARY))
+        link = gsv.AiohttpProviderLink(ws, FakeClientSession(), FakeConnector())
+        h = Harness()
+        self.addAsyncCleanup(h.aclose)
+        await h.open()
+
+        async def connect():
+            return link
+
+        h.session._provider_connect = connect
+        await h.boot()
+        outcome = await h.finish()
+        self.assertEqual(h.device.close_codes, [1011])
+        self.assertEqual(h.device.frames, [])
+        self.assertNotIn(KEY_CANARY, repr(outcome))
+        self.assertEqual(h.ops.count("confirm"), 0)
+
+    async def test_real_parser_close_frames_are_not_local_protocol_errors(self):
+        for raw in (b"\x88\x02\x03\xea", b"\x88\x02\x03\xf0"):
+            with self.subTest(frame=raw):
+                ws = await self._real_ws()
+                parser = WebSocketReader(self.real_queue, 1048576, False, True)
+                parser.feed_data(raw)
+                msg = await gsv.AiohttpProviderLink(
+                    ws, FakeClientSession(), FakeConnector()
+                ).receive()
+                self.assertEqual((msg.kind, msg.data, msg.clean), ("closed", None, False))
 
     async def test_r1_a_real_bare_eof_is_an_unclean_close_never_a_confirmation(self):
         """aiohttp's own receive() turns EOF into CLOSED with close_code 1000 (no frame)."""
@@ -1440,6 +1568,50 @@ class ConnectProviderTest(OfflineAsyncCase):
         self.assertNotIn(KEY_CANARY, str(error) + repr(error) + repr(error.args))
         self.assertEqual(FakeConnector.instances[0].closes, [True])
         self.assertEqual(FakeClientSession.instances[0].closes, 1)
+
+    async def test_handshake_status_classification_reaches_device_before_started(self):
+        # Actual aiohttp handshake exception type, but no real socket or key.
+        for status, code, close in (
+            (401, "provider_auth", 1008), (403, "provider_auth", 1008),
+            (101, "provider_protocol", 1002),
+            (400, "provider_connect", 1011), (404, "provider_connect", 1011),
+            (429, "provider_connect", 1011), (500, "provider_connect", 1011),
+            (503, "provider_connect", 1011),
+        ):
+            with self.subTest(status=status):
+                async def behavior(_session: Any) -> Any:
+                    raise aiohttp.WSServerHandshakeError(
+                        None, (), status=status, message=KEY_CANARY,
+                        headers=CIMultiDict({"X-Private": CANARY}),
+                    )
+
+                FakeClientSession.ws_behavior = behavior
+                with self.assertRaises(gsv.ProviderError) as ctx:
+                    await gsv.connect_provider(self.key, timeout=5.0)
+                error = ctx.exception
+                self.assertEqual(error.code, code)
+                self.assertIsNone(error.__cause__)
+                self.assertIsNone(error.__context__)
+                for private in (KEY_CANARY, CANARY):
+                    self.assertNotIn(private, repr(error) + str(error) + repr(error.args))
+
+                h = Harness()
+                self.addAsyncCleanup(h.aclose)
+                await h.open()
+                h.session._provider_connect = lambda: gsv.connect_provider(
+                    self.key, timeout=5.0
+                )
+                await h.boot()
+                outcome = await h.finish()
+                self.assertEqual(h.device.close_codes, [close])
+                self.assertEqual(h.device.frames, [])
+                self.assertEqual(h.ops.count("resume"), 0)
+                self.assertEqual(h.ops.count("confirm"), 0)
+                self.assertIsNone(outcome.send_outcome)
+                self.assertNotIn(KEY_CANARY, repr(outcome))
+                self.assertNotIn(CANARY, repr(outcome))
+                self.assertEqual(FakeConnector.instances[-1].closes, [True])
+                self.assertEqual(FakeClientSession.instances[-1].closes, 1)
 
     async def test_t_srv_provider_the_handshake_is_bounded_by_an_outer_timeout(self):
         async def behavior(_s: Any) -> Any:

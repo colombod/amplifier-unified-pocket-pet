@@ -682,8 +682,9 @@ REVIEWED_SURFACE = {
     # gateway_core (U2): asyncio only.  threading is a non-capability stdlib root here;
     # the worker thread is the CoreRunner.  No socket/ssl/http/subprocess, no aiohttp.
     "gateway_core.py": {"import asyncio"},
-    # gateway_server (U3): the ONLY aiohttp importer.  asyncio + ssl + aiohttp(+web) and
-    # nothing else: no socket, http.client, subprocess, selectors, no dial/listen/executor
+    # gateway_server (U3): the ONLY aiohttp importer. asyncio + ssl + aiohttp, web,
+    # and the reviewed WebSocket parser exception class only: no socket, http.client,
+    # subprocess, selectors, no dial/listen/executor
     # CALL spelling (the scanner pins those too).  The device/provider sockets are
     # created by aiohttp inside its own objects; this module never opens one itself.
     "gateway_server.py": {
@@ -691,6 +692,7 @@ REVIEWED_SURFACE = {
         "import ssl",
         "import aiohttp",
         "import aiohttp.web",
+        "import aiohttp.http_websocket.WebSocketError",
     },
 }
 CLASSIFIED_MODULES = frozenset(
@@ -852,6 +854,9 @@ class NetworkModuleBoundaryTest(OfflineTestCase):
         self.assertEqual(holders("import aiohttp"), {"gateway_server.py"})
         self.assertEqual(holders("import aiohttp.web"), {"gateway_server.py"})
         self.assertEqual(
+            holders("import aiohttp.http_websocket.WebSocketError"), {"gateway_server.py"}
+        )
+        self.assertEqual(
             holders("import ssl"), {"_https_worker.py", "gateway_server.py"}
         )
         self.assertEqual(
@@ -862,11 +867,14 @@ class NetworkModuleBoundaryTest(OfflineTestCase):
         self.assertEqual(findings["gateway_provider.py"], set())
         for name, found in findings.items():  # no other aiohttp form anywhere
             extra = {f for f in found if f.startswith("import aiohttp")}
-            self.assertLessEqual(extra, {"import aiohttp", "import aiohttp.web"}, name)
+            self.assertLessEqual(extra, {
+                "import aiohttp", "import aiohttp.web",
+                "import aiohttp.http_websocket.WebSocketError",
+            }, name)
 
     def test_the_gateway_server_surface_is_pinned_exactly(self):
-        # `from aiohttp import web` and `import aiohttp` are the reviewed spellings: any
-        # other aiohttp name, socket/http/subprocess import or dial/listen/executor call
+        # Reviewed imports include exactly the WebSocketError type from aiohttp's
+        # protocol module; any other aiohttp name, socket/http/subprocess import or dial/listen/executor call
         # added to gateway_server changes the scanned surface and fails the pin above.
         original = (self.package / "gateway_server.py").read_text(encoding="utf-8")
         self.assertEqual(scan_source(original), REVIEWED_SURFACE["gateway_server.py"])

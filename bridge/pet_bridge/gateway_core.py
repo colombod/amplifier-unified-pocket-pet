@@ -119,6 +119,24 @@ _EXC_NAMES = frozenset(
 )
 
 
+class ProviderError(Exception):
+    """A locally classified link failure with only a fixed, non-provider code."""
+
+    CODES = frozenset({
+        "provider_connect", "provider_redirect", "provider_link", "provider_auth",
+        "provider_protocol",
+    })
+
+    def __init__(self, code: str) -> None:
+        if code not in self.CODES:
+            raise ValueError("unknown provider code")
+        super().__init__(code)
+        self.code = code
+
+    def __str__(self) -> str:
+        return self.code
+
+
 class RunnerError(Exception):
     """A runner refusal identified only by a fixed ``code``.
 
@@ -1069,7 +1087,7 @@ class DeviceLink(Protocol):
 
 @dataclass(frozen=True)
 class ProviderMessage:
-    """One inbound provider WebSocket message: ``text`` | ``closed`` (``clean`` = code 1000)."""
+    """Provider message: ``text``, ``invalid``, or ``closed`` (clean = code 1000)."""
 
     kind: str
     data: str | None = field(default=None, repr=False)
@@ -1155,6 +1173,7 @@ _SPEAKING = "SPEAKING"
 _CLOSING = "CLOSING"
 _CLOSED = "CLOSED"
 _CONVERSE_RECOVERING = "CONVERSE_RECOVERING"
+_INVALID_PROVIDER_KINDS = frozenset({"invalid", "invalid_audio", "invalid_transcript"})
 
 # After the shared close deadline there is no more clock waiting: an unblocked peer gets
 # this many event-loop TURNS (not seconds) to finish its final frames, a blocked one is
@@ -1644,6 +1663,11 @@ class PetSession:
     async def _connect(self) -> None:
         try:
             link = await self._provider_connect()
+        except ProviderError as err:
+            # Only fixed connector classifications, never exception details.
+            code = {"provider_auth": 1008, "provider_protocol": 1002}.get(err.code, 1011)
+            self._post(("provider_failed", code))
+            return
         except Exception:  # noqa: BLE001 - fixed outcome, no detail
             self._post(("provider_failed",))
             return
@@ -1665,7 +1689,7 @@ class PetSession:
         try:
             await self._provider_send(start)
         except Exception:  # noqa: BLE001 - fixed outcome, no detail
-            self._post(("provider_failed",))
+            self._provider_send_failed()
 
     def _provider_sent(self, tag: str | None) -> None:
         """A provider frame finished sending: commentary chunks (ACK timing) and the close.
@@ -1694,7 +1718,34 @@ class PetSession:
             self._post(("sent", tag))
 
     def _provider_send_failed(self) -> None:
-        self._post(("provider_failed",))
+        # An already admitted terminal provider event must not be silently
+        # overtaken by a later send failure on the higher-priority queue.
+        # Scan only the bounded inbox; do not execute queued input or allow a
+        # later malformed frame to retroactively change an earlier failure.
+        code = 1011
+        starting = self._state == _STARTING and not self._resume_submitted
+        pinned = self._provider_session_id if self._provider_started else None
+        for queued in self._inbox:
+            if queued[0] == "provider_closed":
+                break
+            if queued[0] == "provider":
+                event = queued[1]
+                if event.kind in _INVALID_PROVIDER_KINDS:
+                    code = 1002
+                    break
+                if event.kind == "started" and starting:
+                    if self._startup_mismatch(event):
+                        code = 1002
+                        break
+                    pinned = event.session_id
+                    starting = False  # a later started event would be ignored
+                if event.kind == "closed":
+                    if self._foreign_requested_close(event, pinned):
+                        code = 1002
+                    break
+                if event.kind == "error":
+                    break
+        self._post(("provider_failed", code))
 
     async def _read_provider(self, link: ProviderLink) -> None:
         while True:
@@ -1708,12 +1759,15 @@ class PetSession:
                 # bounded FIFO, never the higher-priority internal event queue.
                 self._post_external(("provider_closed", message.clean))
                 return
-            if message.data is None:
+            if message.kind == "invalid":
+                event = gp.ProviderEvent("invalid")
+            elif message.data is None:
                 continue
+            else:
+                event = gp.classify_provider_event(message.data)
             # Stamp eligibility at LOCAL receive, not eventual dispatch: internal
             # send-completion events have priority over earlier queued provider
             # events and must never retroactively admit that earlier audio.
-            event = gp.classify_provider_event(message.data)
             eligible = (self._audio_token if self._converse or (
                 self._state == _SPEAKING and self._commentary_committed) else None)
             if self._converse:
@@ -1916,7 +1970,7 @@ class PetSession:
 
     def _final_code(self) -> int:
         if self._fatal:
-            return 1011
+            return self._device_code
         if self._policy_close:
             return 1008  # a preview policy violation, even though the provider started
         return 1000 if self._provider_started else self._device_code
@@ -1942,11 +1996,11 @@ class PetSession:
             self._converse_end = self._converse_end or "device_lost"
         self._begin_close(1000)
 
-    def _on_provider_failed(self) -> None:
+    def _on_provider_failed(self, device_code: int = 1011) -> None:
         self._provider_closed_seen = True  # a dead link: no close frame can be sent
-        self._provider_fatal()
+        self._provider_fatal(device_code)
 
-    def _provider_fatal(self) -> None:
+    def _provider_fatal(self, device_code: int = 1011) -> None:
         """The ONE funnel for a fatal provider failure (error, bad event, close, send fail).
 
         A preflight still pending is a proven no-send; an ACCEPTED turn without a
@@ -1957,7 +2011,7 @@ class PetSession:
             return
         self._settle_unsent_send()
         self._finish_reply("unavailable")
-        self._begin_close(1011, fatal=True)
+        self._begin_close(device_code, fatal=True)
 
     def _on_overflow(self) -> None:
         self._fail("overflow")
@@ -2598,6 +2652,16 @@ class PetSession:
         self._fail("deadline")  # 58 s work + up to 2 s cleanup, never extend the 60 s cap
 
     # -- provider events ---------------------------------------------------------------
+    @staticmethod
+    def _foreign_requested_close(event: gp.ProviderEvent, pinned: str | None) -> bool:
+        """A pinned, started session cannot close under another session's identity."""
+        return (
+            pinned is not None
+            and event.kind == "closed"
+            and event.close_reason == "close_requested"
+            and event.session_id != pinned
+        )
+
     def _on_provider(
         self, event: gp.ProviderEvent, eligible: int | None = None,
         window: tuple[int, str, bool, bool] | None = None,
@@ -2611,7 +2675,10 @@ class PetSession:
             if self._state == _CLOSING:
                 self._finalize()
             else:
-                self._provider_fatal()
+                self._provider_fatal(
+                    1002 if self._foreign_requested_close(event, self._provider_session_id)
+                    else 1011
+                )
             return
         if kind == "audio":
             self._on_provider_audio(event, eligible, window)
@@ -2625,16 +2692,14 @@ class PetSession:
             return
         if kind == "started":
             self._on_provider_started(event)
-        elif kind in (
-            "closed",
-            "error",
-            "invalid",
-            "invalid_audio",
-            "invalid_transcript",
-        ):
+        elif kind in ("closed", "error", "invalid", "invalid_audio", "invalid_transcript"):
             if kind == "closed":
                 self._provider_closed_seen = True  # it ended the session itself
-            self._provider_fatal()
+            # A malformed frame is a definite protocol failure, not a transport
+            # loss. A provider error event has no reliably classified cause.
+            self._provider_fatal(
+                1002 if kind in _INVALID_PROVIDER_KINDS else 1011
+            )
         elif kind == "transcript":
             if self._converse:
                 self._converse_transcript(event, window)
@@ -2688,10 +2753,8 @@ class PetSession:
         elif self._delegation_id != event.delegation_id:
             self._delegation_ambiguous = True  # permanent: never "last one wins"
 
-    def _on_provider_started(self, event: gp.ProviderEvent) -> None:
-        if self._state != _STARTING or self._resume_submitted:
-            return
-        if (
+    def _startup_mismatch(self, event: gp.ProviderEvent) -> bool:
+        return (
             event.session_id is None
             or event.model != self._settings.model
             or (event.client_event_id is not None and event.client_event_id != self._provider_start_id)
@@ -2700,8 +2763,13 @@ class PetSession:
             or (event.format_type is not None and event.format_type != "audio/pcm")
             or event.stored is True
             or (event.delegation_type is not None and event.delegation_type != "client")
-        ):
-            self._provider_fatal()
+        )
+
+    def _on_provider_started(self, event: gp.ProviderEvent) -> None:
+        if self._state != _STARTING or self._resume_submitted:
+            return
+        if self._startup_mismatch(event):
+            self._provider_fatal(1002)
             return
         self._provider_session_id = event.session_id
         self._provider_started = True

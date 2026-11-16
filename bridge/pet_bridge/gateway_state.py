@@ -65,6 +65,14 @@ Gateway -> device (outbound builders; each returns ``str``)
     ``pet.converse.state``           {"type","state"} (CONVERSE_STATES only)
     ``pet.converse.notice``          {"type","code"} (CONVERSE_NOTICES only)
     An argument outside these sets raises ``ValueError`` (a programming error).
+
+    Fatal provider failures close the device WebSocket without a reason string:
+    1008 is upstream authentication/authorization refusal, 1002 is an invalid
+    or incompatible upstream protocol (not a claim about the device's frames),
+    1011 is an ambiguous provider/network failure. The 1002/1008 distinction is
+    best-effort: a lost close frame is not evidence of either cause. Existing
+    build-11 firmware ignores close codes; reconnecting firmware must interpret
+    them without replaying audio or commands.
 """
 
 from __future__ import annotations

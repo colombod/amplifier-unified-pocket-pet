@@ -444,6 +444,8 @@ class ServeEventsTest(gf.OfflineAsyncCase):
         self.addCleanup(sink.close)
         gw._event_log = sink
         for error, code in ((gsv.ProviderError("provider_redirect"), "provider_redirect"),
+                            (gsv.ProviderError("provider_auth"), "provider_auth"),
+                            (gsv.ProviderError("provider_protocol"), "provider_protocol"),
                             (RuntimeError(gf.KEY_CANARY), "provider_connect"),
                             (asyncio.CancelledError(), "provider_connect")):
             gw._deps.provider_connect = mock.AsyncMock(side_effect=error)
