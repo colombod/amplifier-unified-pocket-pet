@@ -522,13 +522,22 @@ confirm consequential actions and inspect Unified if it reports uncertainty.
 
 An ordinary call ends after about 90 seconds of silence or at the ten-minute
 limit. The demonstrated build 11 needs another tap after a lost connection,
-once cleanup has settled. If it remains closing or cannot safely release the
-transport, seek maintainer help instead of repeatedly retrying. A
-newer automatic-reconnect implementation is being developed, not established as
-installed or demonstrated. The gateway can reconcile some lost acknowledgements
-by exact input identity and hash; it never re-sends to find out. If the outcome
-is unknown, inspect the conversation and preserve the journal rather than
-repeating an action. A response arriving after the wait limit may not be spoken.
+once cleanup has settled. The newer source attempts bounded automatic
+reconnection while the mic remains on; it is offline-tested, not installed or
+physically demonstrated. Pair it with the gateway's pre-dial safeguard described
+below, not an older gateway. Each new connection can incur provider charges.
+Known terminal or uncertain endings do not authorize automatic replacement.
+If it remains closing or cannot safely release the transport, seek maintainer
+help instead of repeatedly retrying. The gateway can reconcile some lost
+acknowledgements by exact input identity and hash; it never re-sends to find out.
+If the outcome is unknown, inspect the conversation and preserve the journal
+rather than repeating an action. A response arriving after the wait limit may
+not be spoken.
+
+In the current reconnect source, a connection failure without an HTTP status can
+receive bounded retries even when its cause is a certificate or TLS error.
+Retries do not disable certificate verification, but cannot yet distinguish
+every permanent security or configuration failure from a temporary outage.
 
 The draft gateway source checks for unresolved sends before opening a new paid
 provider connection. When eligible, it may read up to four pages of the bound
