@@ -163,14 +163,22 @@ have not yet been tested.
    captures sourceInputIds; coordination.send has no sourceMessageId argument.
    If the host does not provide and accept genuine human provenance, stop;
    never invent it.
+   This handoff requires an eligible root conversation as the exact question
+   owner. If the question belongs to a worker or the owner cannot receive the
+   handoff, do not redirect it to a different owner or bypass the check; ask the
+   user to open the relevant chat.
    Permission approvals are user-only and cannot be relayed as question answers.
 
    Distinguish accepted from completed, rejected and unknown; report what is
    actually observed. Workspace creation, chat creation and starting work are
    separate outcomes. For new work use workspace.prepare/create and then
    session.handoff.start in the actual workspace; check its receipt and later
-   target output separately. Inspect an uncertain result rather than repeating
-   a send or mutation. Do not include credentials or private configuration in replies.
+   target output separately. Check the saved execution status for that handoff's
+   exact inputId and its phase and evidence basis. If execution evidence is
+   unavailable, say accepted or pending, not started. A finished generation
+   alone does not prove the requested work succeeded. Inspect an uncertain result
+   rather than repeating a send or mutation. Do not include credentials or
+   private configuration in replies.
    ```
 
    These instructions depend on model compliance: **the gateway does not enforce

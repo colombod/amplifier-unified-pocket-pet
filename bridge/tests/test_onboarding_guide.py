@@ -162,3 +162,17 @@ class FrontDoorGuideTest(unittest.TestCase):
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, block)
+
+    def test_instruction_block_distinguishes_owner_and_execution_evidence(self) -> None:
+        guide = GUIDE.read_text(encoding="utf-8")
+        block = guide.split("   ```text\n", 1)[1].split("   ```", 1)[0]
+        for requirement in (
+            "eligible root conversation as the exact question\n   owner",
+            "question belongs to a worker",
+            "do not redirect it to a different owner or bypass the check",
+            "exact inputId and its phase and evidence basis",
+            "say accepted or pending, not started",
+            "A finished generation\n   alone does not prove the requested work succeeded",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, block)
