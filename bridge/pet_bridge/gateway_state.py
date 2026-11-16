@@ -66,13 +66,16 @@ Gateway -> device (outbound builders; each returns ``str``)
     ``pet.converse.notice``          {"type","code"} (CONVERSE_NOTICES only)
     An argument outside these sets raises ``ValueError`` (a programming error).
 
-    Fatal provider failures close the device WebSocket without a reason string:
-    1008 is upstream authentication/authorization refusal, 1002 is an invalid
-    or incompatible upstream protocol (not a claim about the device's frames),
-    1011 is an ambiguous provider/network failure. The 1002/1008 distinction is
-    best-effort: a lost close frame is not evidence of either cause. Existing
-    build-11 firmware ignores close codes; reconnecting firmware must interpret
-    them without replaying audio or commands.
+    Provider endings close the device WebSocket without a reason string. A validated
+    same-session ``close_requested``, ``expired`` or ``remote_hangup`` emits 1000;
+    1008 is upstream authentication/authorization refusal or a provider safety
+    filter. 1002 indicates invalid/incompatible upstream protocol (not a claim
+    about the device's frames); 1011 is an ambiguous provider/network failure
+    including ``connection_lost``. A 1000 says only that the voice session ended,
+    not that our close was acknowledged or that a request or reply completed.
+    These distinctions are best-effort: a lost close frame carries no cause.
+    Existing build-11 firmware ignores close codes; reconnecting firmware must
+    interpret them without replaying audio or commands.
 """
 
 from __future__ import annotations

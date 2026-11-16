@@ -1740,8 +1740,7 @@ class PetSession:
                     pinned = event.session_id
                     starting = False  # a later started event would be ignored
                 if event.kind == "closed":
-                    if self._foreign_requested_close(event, pinned):
-                        code = 1002
+                    code = self._provider_end_code(event, pinned)
                     break
                 if event.kind == "error":
                     break
@@ -1770,14 +1769,15 @@ class PetSession:
             # events and must never retroactively admit that earlier audio.
             eligible = (self._audio_token if self._converse or (
                 self._state == _SPEAKING and self._commentary_committed) else None)
+            close_eligible = self._state == _CLOSING and self._close_committed
             if self._converse:
                 # Input that arrived while pending cannot become a new request
                 # just because an internal render timer dispatched ahead of it.
                 window = (self._request_seq, self._state, self._sealing,
                           self._commentary_committed)
-                self._post_external(("provider", event, eligible, window))
+                self._post_external(("provider", event, eligible, window, close_eligible))
             else:
-                self._post_external(("provider", event, eligible))
+                self._post_external(("provider", event, eligible, None, close_eligible))
 
     # -- runner results ----------------------------------------------------------------
     def _submit(self, op: str, fn: Callable[[], Any], tag: str) -> None:
@@ -2662,39 +2662,52 @@ class PetSession:
             and event.session_id != pinned
         )
 
+    @classmethod
+    def _provider_end_code(cls, event: gp.ProviderEvent, pinned: str | None) -> int:
+        """Classify a validated provider end, not the success of any user request.
+
+        OpenAI Live SessionClosedEvent (OpenAPI-generated SDK 3.51.0): expiry
+        is a duration limit, content is a safety filter, remote_hangup is
+        graceful, connection_lost is an unexpected primary/upstream disconnect,
+        and close_requested is an application close or hangup request.
+        A session identity must match before attributing a reason to this call.
+        """
+        if cls._foreign_requested_close(event, pinned):
+            return 1002
+        if pinned is None or event.session_id != pinned:
+            return 1011
+        if event.close_reason == "content":
+            return 1008
+        if event.close_reason in ("close_requested", "expired", "remote_hangup"):
+            return 1000
+        return 1011
+
     def _on_provider(
         self, event: gp.ProviderEvent, eligible: int | None = None,
         window: tuple[int, str, bool, bool] | None = None,
+        close_eligible: bool = False,
     ) -> None:
         kind = event.kind
-        if kind == "closed" and (
-            event.session_id != self._provider_session_id
-            or event.close_reason != "close_requested"
-        ):
-            # A different session or expiry/loss is not our successful close.
+        if kind == "closed":
             if self._state == _CLOSING:
+                if (not self._fatal and close_eligible
+                        and event.session_id == self._provider_session_id
+                        and event.close_reason == "close_requested"):
+                    self._close_confirmed = True
+                # Otherwise this is not confirmation of our requested close.
                 self._finalize()
-            else:
-                self._provider_fatal(
-                    1002 if self._foreign_requested_close(event, self._provider_session_id)
-                    else 1011
-                )
+            elif self._state != _CLOSED:
+                self._provider_closed_seen = True
+                self._provider_fatal(self._provider_end_code(event, self._provider_session_id))
             return
         if kind == "audio":
             self._on_provider_audio(event, eligible, window)
             return
         if self._state in (_CLOSING, _CLOSED):
-            if kind == "closed" and not self._fatal:
-                # The provider's own session.closed confirms ONLY once our session.close
-                # really left; otherwise it ended the session itself: finalize, unconfirmed.
-                self._close_confirmed = self._close_confirmed or self._close_committed
-                self._finalize()
             return
         if kind == "started":
             self._on_provider_started(event)
-        elif kind in ("closed", "error", "invalid", "invalid_audio", "invalid_transcript"):
-            if kind == "closed":
-                self._provider_closed_seen = True  # it ended the session itself
+        elif kind in ("error", "invalid", "invalid_audio", "invalid_transcript"):
             # A malformed frame is a definite protocol failure, not a transport
             # loss. A provider error event has no reliably classified cause.
             self._provider_fatal(

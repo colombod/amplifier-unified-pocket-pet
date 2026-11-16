@@ -116,6 +116,43 @@ class ConversationCase(OfflineAsyncCase):
 
 
 class ConversationTest(ConversationCase):
+    async def test_provider_end_while_listening_has_expected_device_close(self):
+        await self.h.push({"type": "session.closed", "reason": "expired"})
+        result = await self.h.finish()
+        self.assertEqual(self.h.device.close_codes, [1000])
+        self.assertEqual(result.conversation_end, "provider_failure")
+        self.assertFalse(result.close_confirmed)
+        self.assertNotIn("session.closed", self.h.device.types())
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
+    async def test_safety_end_during_confirm_preserves_retained_outcome(self):
+        gate = self.h.ops.hold("confirm")
+        await self.request()
+        await self.h.push({"type": "session.closed", "reason": "content"})
+        result = await self.h.finish()
+        self.assertEqual(self.h.device.close_codes, [1008])
+        self.assertEqual(result.send_outcome, "inflight")
+        self.assertEqual((result.requests_submitted, result.requests_sent), (1, 0))
+        self.assertFalse(result.close_confirmed)
+        self.assertNotIn("session.closed", self.h.device.types())
+        gate.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(result.confirm_job).outcome, "accepted")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_provider_remote_hangup_during_speaking_never_replays(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.push({"type": "session.closed", "reason": "remote_hangup"})
+        result = await self.h.finish()
+        self.assertEqual(self.h.device.close_codes, [1000])
+        self.assertEqual(result.requests_accepted, 1)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertFalse(result.close_confirmed)
+        self.assertNotIn("session.closed", self.h.device.types())
+
     async def test_batched_transcript_delegation_and_tail_share_the_settle_window(self):
         self.h.provider.push(old.delta("a", "hello ", 0, 500))
         self.h.provider.push(old.delegation("d"))
