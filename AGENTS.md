@@ -40,6 +40,11 @@ Run `node tests/setup_page_test.mjs` for independent save/pending/edit behavior.
 
 Bounded physical Tailscale/TLS/HTTP success and persisted identity reuse are recorded in the workspace evidence. This does not qualify continuous audio over Tailscale, off-site operation or coexistence with the UI. The restrictions below describe the current spike implementation, not the final product architecture.
 
+Do not run the diagnostic tunnel until its shutdown race is repaired and verified.
+Source review found that a task-done event can wake destruction while the signaling
+task still accesses the event group. The earlier bounded probe did not prove safe
+teardown; retain resources whenever task exit has not been established.
+
 `tailnet_spike` is boot-idle and starts only from Settings or USB Serial/JTAG commands `tailnet start`, `tailnet cancel`, `tailnet status` (newline terminated, 31-byte input cap, unknown input discarded without echo). Init creates one idle test worker plus the USB receiver; saving any phone setting never connects. Voice/local audio and the spike share atomic exclusive admission. Failed teardown retains the runtime and blocks retry/audio until restart; never free it or restart it to conceal missing task-exit proof.
 
 Phone `action: "unified_target"` saves one checked versioned nonsecret `pet_setup/unified_target` record (blank host, default port 8941). Only canonical lowercase FQDNs, not IPs/URLs, are accepted; user edits survive late prefill/save responses. Before any TailTiny start the network worker must acknowledge actual HTTP/DNS listener stop and AP pause, not merely queue AP closure. Restoration follows proven tunnel teardown.
