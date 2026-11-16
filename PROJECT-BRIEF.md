@@ -158,9 +158,12 @@ cost; otherwise keep the existing path and record the finding.
   calls through the Unified front door. A later call through the installed,
   independent gateway yielded one user-heard answer with the exact input matched
   to the chat; it ended normally on quiet. Survival across Unified restart and
-  automatic reconnect remain unverified. Any firmware update requires a concrete
-  candidate, a reviewed safe app-only installation path and applicable device
-  authority. Do not replay prior one-shot operations.
+  automatic reconnect remain unverified. A later post-upgrade test reached the
+  front-door chat, but the call had closed before its answer was ready; the
+  reason for the device-side stop is unknown. Do not resend that request. Any
+  firmware update requires a concrete candidate, a reviewed safe app-only
+  installation path and applicable device authority. Do not replay prior
+  one-shot operations.
 
 ## Provenance
 

@@ -471,6 +471,16 @@ by exact input identity and hash; it never re-sends to find out. If the outcome
 is unknown, inspect the conversation and preserve the journal rather than
 repeating an action. A response arriving after the wait limit may not be spoken.
 
+The draft gateway source checks for unresolved sends before opening a new paid
+provider connection. When eligible, it may read up to four pages of the bound
+conversation and record an exact, proven delivery before allowing a new call;
+it does not resend the earlier input. Incomplete history, unavailable reads,
+ambiguous proof or expired records remain blocked. The refusal uses a generic
+policy close that can also indicate other causes. A proof read already in flight
+may finish recording delivery after mute, but cannot restart that stopped call.
+This safeguard is offline-tested source, not an installed or physically verified
+recovery experience.
+
 ## Remaining acceptance work
 
 - A matched package and a verified factory-board install, phone setup and first
