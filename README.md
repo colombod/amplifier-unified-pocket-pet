@@ -15,9 +15,9 @@ The goal remains access to all authorized work, not just one fixed conversation.
 
 One pet running build 11 has been used for two real multi-exchange calls on a
 home LAN: five requests and replies in the first call and three in the second.
-The user reported hearing the replies. Workspace discovery, attention summaries
-and a confirmed message to another chat were exercised by voice; creating a
-workspace and chat was exercised by text, not voice.
+The user reported hearing the replies. Specific cross-workspace voice actions
+have not been independently verified; creating a workspace and chat was
+exercised by text, not voice.
 
 This is an early prototype, **not yet a turnkey team release**. First-time
 installation on a fresh board, another person's setup, a waiting-question answer

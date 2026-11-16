@@ -557,8 +557,9 @@ it does not resend the earlier input. Incomplete history, unavailable reads,
 ambiguous proof or expired records remain blocked. The refusal uses a generic
 policy close that can also indicate other causes. A proof read already in flight
 may finish recording delivery after mute, but cannot restart that stopped call.
-This safeguard is offline-tested source, not an installed or physically verified
-recovery experience.
+On the original host, the LAN service now runs a version containing this
+safeguard. Voice through that version and the complete reconnect experience
+remain physically unverified; it has not been demonstrated on another host.
 
 ## Remaining acceptance work
 

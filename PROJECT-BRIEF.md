@@ -160,7 +160,9 @@ cost; otherwise keep the existing path and record the finding.
   to the chat; it ended normally on quiet. Survival across Unified restart and
   automatic reconnect remain unverified. A later post-upgrade test reached the
   front-door chat, but the call had closed before its answer was ready; the
-  reason for the device-side stop is unknown. Do not resend that request. Any
+  reason for the device-side stop is unknown. Do not resend that request. The
+  original host's LAN service now runs the pre-dial safeguard, but voice after
+  that cutover has not yet been verified. Any
   firmware update requires a concrete candidate, a reviewed safe app-only
   installation path and applicable device authority. Do not replay prior
   one-shot operations.
