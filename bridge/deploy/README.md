@@ -91,12 +91,17 @@ certificate on both paths. Do not disable TLS verification.
 
 CGNAT range validation does **not** prove the address is a Tailscale interface
 or restrict who can reach it. Choose the intended local Tailscale address
-yourself and configure appropriate host firewall and Tailnet ACLs. Binding an
-unavailable or already occupied address causes the **whole** gateway startup to
-fail with `listen_failed`: no partial LAN-only service is retained. Wait for the
-selected interfaces to be ready before starting it; network ordering does not
-guarantee Tailscale readiness, and the gateway does not automatically rebind a
-changed address. Failure to bind can occur after the existing same-host
+yourself and configure appropriate host firewall and Tailnet ACLs. If the
+optional address is unavailable at bind time (`EADDRNOTAVAIL`), the gateway
+serves the existing LAN listener and retries that exact Tailnet address every
+10 seconds. Startup reports `Tailnet address unavailable; retrying` and reports
+`Tailnet listener ready` once the bind succeeds. This is listener readiness, not
+proof that the Tailnet or device can reach it. Other bind/start failures, including
+address in use or permission errors, fail closed with `listen_failed`. LAN bind
+failure also fails the whole startup. Network ordering does not guarantee
+Tailscale readiness. The gateway does not detect interface loss after a successful
+bind or automatically select a changed address; recovery after an interface goes
+away and returns is unverified. Failure to bind can occur after the existing same-host
 attachment refresh, so do not assume no prior startup state change. Cleanup
 failure or forced process interruption is not proof all sockets were released;
 verify the old process has exited before starting another owner. A stalled

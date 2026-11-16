@@ -35,6 +35,7 @@ import asyncio
 import base64
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import hmac
 import os
@@ -95,6 +96,7 @@ _KEY_RE = re.compile(r"[\x21-\x7e]{20,512}")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{43})")
 _DUMMY_DIGEST = hashlib.sha256(b"pet-gateway-dummy-token").hexdigest().encode("ascii")
 _RUNNER_SHUTDOWN_S = 2.0
+_TAILNET_RETRY_S = 10.0
 _PEER_MAX = 64
 _REJECTIONS = {
     "method_not_allowed": 405,
@@ -719,6 +721,10 @@ async def _settle_owned(awaitable: Awaitable[T]) -> T:
     return task.result()
 
 
+class _BindAddressAbsent(OSError):
+    """Only the actual bind reported EADDRNOTAVAIL; no request data is retained."""
+
+
 class _OwnedSite:
     """One IPv4 TLS listener, owning its socket before bind and server before listen."""
 
@@ -747,7 +753,12 @@ class _OwnedSite:
         self._socket = sock
         if self._reuse_address:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self._host, self._port))
+        try:
+            sock.bind((self._host, self._port))
+        except OSError as err:
+            if err.errno == errno.EADDRNOTAVAIL:
+                raise _BindAddressAbsent from None
+            raise
         server = self._runner.server
         if server is None:
             raise RuntimeError("runner is not set up")
@@ -767,23 +778,50 @@ class _OwnedSite:
                 self._socket.close()
 
 
+class _SiteHandle:
+    """Owned listener cleanup plus optional Tailnet readiness and failure signal."""
+
+    def __init__(
+        self,
+        close: Callable[[], Awaitable[None]],
+        begin_close: Callable[[], None],
+    ) -> None:
+        self._close = close
+        self.begin_close = begin_close
+        self.failure = asyncio.Event()
+        self.tailnet_state = "none"
+        self.on_tailnet_ready: Callable[[], None] | None = None
+
+    async def __call__(self) -> None:
+        self.begin_close()
+        await self._close()
+
+
 async def _start_site(
     handler: Callable[[web.BaseRequest], Awaitable[web.StreamResponse]],
     cfg: gs.GatewayConfig,
     ssl_ctx: ssl.SSLContext,
-) -> Callable[[], Awaitable[None]]:
+) -> _SiteHandle:
     """Listen on the configured private addresses; return an async closer.
 
     A low-level ``web.Server`` (no router, no middleware, no access log, a null logger); the
-    shutdown timeout is set on the runner. One runner owns both sites. Requests are refused
-    until every requested site starts. A failed start or cancellation runs cleanup;
-    if cleanup itself fails, no successful release is claimed.
+    shutdown timeout is set on the runner. One runner owns both sites. Only an
+    unavailable optional bind permits LAN-only admission and a bounded-interval
+    retry. Other failures or ambiguous cleanup close admission.
     """
     ready = False
+    stopping = False
+    retry_task: asyncio.Task[None] | None = None
+    handle: _SiteHandle
 
     async def gated(request: web.BaseRequest) -> web.StreamResponse:
         if not ready:
             return reject_response(Rejection(503, "core_binding_required"))
+        if cfg.tailnet_bind_host is not None and handle.tailnet_state != "ready":
+            conn = request.transport
+            local = conn.get_extra_info("sockname") if conn is not None else None
+            if local == (cfg.tailnet_bind_host, cfg.port):
+                return reject_response(Rejection(503, "core_binding_required"))
         return await handler(request)
 
     options: dict[str, Any] = {"access_log": None, "logger": _NullLogger()}
@@ -793,6 +831,8 @@ async def _start_site(
 
     async def cleanup() -> None:
         failure: Exception | None = None
+        if retry_task is not None:
+            await asyncio.gather(retry_task, return_exceptions=True)
         for site in sites:
             try:
                 await site.stop()
@@ -807,34 +847,84 @@ async def _start_site(
         if failure is not None:
             raise failure
 
+    def begin_close() -> None:
+        nonlocal ready, stopping
+        ready = False
+        stopping = True
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
+
+    async def close() -> None:
+        await _settle_owned(cleanup())
+
+    handle = _SiteHandle(close, begin_close)
+
+    def new_site(address: str) -> _OwnedSite:
+        site = _OwnedSite(
+            runner, address, cfg.port, ssl_context=ssl_ctx,
+            reuse_address=True, reuse_port=False,
+        )
+        sites.append(site)
+        return site
+
+    async def start_tailnet() -> bool:
+        assert cfg.tailnet_bind_host is not None
+        site = new_site(cfg.tailnet_bind_host)
+        try:
+            await site.start()
+        except _BindAddressAbsent:
+            # Only discard the failed site after its socket has been closed.
+            await site.stop()
+            sites.remove(site)
+            return False
+        return True
+
+    async def retry_attempt() -> bool:
+        nonlocal ready
+        try:
+            return await start_tailnet()
+        except Exception:  # noqa: BLE001 - latch before a cancelled waiter can discard it
+            ready = False
+            handle.tailnet_state = "failed"
+            handle.failure.set()
+            raise
+
+    async def retry_tailnet() -> None:
+        nonlocal ready
+        try:
+            while not stopping:
+                await asyncio.sleep(_TAILNET_RETRY_S)
+                if stopping:
+                    return
+                if await _settle_owned(retry_attempt()):
+                    if not stopping:
+                        handle.tailnet_state = "ready"
+                        if handle.on_tailnet_ready is not None:
+                            handle.on_tailnet_ready()
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - fixed failure, no exception text
+            ready = False
+            handle.tailnet_state = "failed"
+            handle.failure.set()
+
     try:
         await _settle_owned(runner.setup())
-        addresses = (cfg.bind_host,) if cfg.tailnet_bind_host is None else (
-            cfg.bind_host, cfg.tailnet_bind_host
-        )
-        for address in addresses:
-            site = _OwnedSite(
-                runner,
-                address,
-                cfg.port,
-                ssl_context=ssl_ctx,
-                reuse_address=True,
-                reuse_port=False,
-            )
-            sites.append(site)
-            await _settle_owned(site.start())
+        await _settle_owned(new_site(cfg.bind_host).start())
+        if cfg.tailnet_bind_host is not None:
+            if await _settle_owned(start_tailnet()):
+                handle.tailnet_state = "ready"
+            else:
+                handle.tailnet_state = "retrying"
+                retry_task = asyncio.create_task(retry_tailnet())
         ready = True
     except BaseException:
+        begin_close()
         await _settle_owned(cleanup())
         raise
 
-    async def closer() -> None:
-        # _release is the only production closer owner; calls are not concurrent.
-        nonlocal ready
-        ready = False
-        await _settle_owned(cleanup())
-
-    return closer
+    return handle
 
 
 async def _wait_for_signals() -> None:
@@ -1358,6 +1448,26 @@ def _follow_host_restart(
         raise StartupError("core_binding_required") from None
 
 
+async def _wait_for_gateway_shutdown(
+    wait: Callable[[], Awaitable[None]], handle: _SiteHandle
+) -> None:
+    """Wait for shutdown or a fatal optional-listener error, owning both waiters."""
+    shutdown = asyncio.ensure_future(wait())
+    failure = asyncio.create_task(handle.failure.wait())
+    try:
+        await asyncio.wait((shutdown, failure), return_when=asyncio.FIRST_COMPLETED)
+        if handle.failure.is_set():
+            raise StartupError("listen_failed")
+        await shutdown
+    finally:
+        for task in (shutdown, failure):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(shutdown, failure, return_exceptions=True)
+    if handle.failure.is_set():
+        raise StartupError("listen_failed")
+
+
 async def _startup(
     held: _Held,
     config_path: Path,
@@ -1416,10 +1526,25 @@ async def _startup(
     if held.closer is None:
         raise StartupError("listen_failed")
     addresses = f"{cfg.bind_host}:{cfg.port}"
-    if cfg.tailnet_bind_host is not None:
+    site_handle = held.closer if isinstance(held.closer, _SiteHandle) else None
+    if cfg.tailnet_bind_host is not None and (
+        site_handle is None or site_handle.tailnet_state == "ready"
+    ):
         addresses += f", {cfg.tailnet_bind_host}:{cfg.port}"
     print(f"gateway: listening on {addresses} for session ...{cfg.session_id_short}", file=stdout)
-    await deps.wait_for_shutdown()
+    if site_handle is not None and site_handle.tailnet_state == "retrying":
+        stdout.write("gateway: Tailnet address unavailable; retrying\n")
+
+        def recovered() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                stdout.write("gateway: Tailnet listener ready\n")
+                stdout.flush()
+
+        site_handle.on_tailnet_ready = recovered
+    if site_handle is not None and cfg.tailnet_bind_host is not None:
+        await _wait_for_gateway_shutdown(deps.wait_for_shutdown, site_handle)
+    else:
+        await deps.wait_for_shutdown()
 
 
 async def _release(held: _Held) -> None:
@@ -1431,6 +1556,8 @@ async def _release(held: _Held) -> None:
     gateway, runner = held.gateway, held.runner
     idle = runner is None
     try:
+        if isinstance(held.closer, _SiteHandle):
+            held.closer.begin_close()
         if gateway is not None:
             await gateway.shutdown()
         if held.closer is not None:
@@ -1477,6 +1604,8 @@ async def _serve(
     finally:
         try:
             await _release(held)
+            if isinstance(held.closer, _SiteHandle) and held.closer.failure.is_set():
+                failure = "listen_failed"
         finally:
             if held.event_log is not None:
                 held.event_log.write("gateway_stop", code=failure)

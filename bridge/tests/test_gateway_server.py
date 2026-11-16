@@ -18,6 +18,7 @@ import ast
 import asyncio
 import base64
 import copy
+import errno
 import hashlib
 import hmac
 import io
@@ -2087,6 +2088,376 @@ class SiteHandoffTest(OfflineAsyncCase):
                             sock.close()
 
 
+class TailnetRecoveryTest(OfflineAsyncCase):
+    async def asyncSetUp(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        self.cfg = make_cfg(Path("/synthetic"), tailnet_bind_host="100.64.12.34",
+                            tailnet_fqdn="gateway.example.test")
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.sockets: list[Any] = []
+        self.live: dict[Any, Any] = {}
+        self.http: list[Any] = []
+        self.tail_absent = True
+        self.fail_stage: tuple[str, str, int] | None = None
+        self.close_error = False
+        case = self
+
+        class Sock:
+            def __init__(self, family: Any, kind: Any, proto: Any = 0) -> None:
+                self.family, self.type, self.proto = family, kind, proto
+                self.address: Any = None
+                self.closed = self.listening = False
+                case.sockets.append(self)
+
+            def setsockopt(self, *_args: Any) -> None:
+                if case.fail_stage and case.fail_stage[0] == "setsockopt":
+                    raise OSError(case.fail_stage[2], CANARY)
+
+            def bind(self, address: Any) -> None:
+                self.address = address
+                if case.fail_stage and case.fail_stage[:2] == ("bind", address[0]):
+                    raise OSError(case.fail_stage[2], CANARY)
+                if address[0] == case.cfg.tailnet_bind_host and case.tail_absent:
+                    raise OSError(errno.EADDRNOTAVAIL, CANARY)
+
+            def setblocking(self, _value: Any) -> None:
+                if case.fail_stage and case.fail_stage[:2] == ("setblocking", self.address[0]):
+                    raise OSError(case.fail_stage[2], CANARY)
+
+            def listen(self, _backlog: Any) -> None:
+                self.listening = True
+                if case.fail_stage and case.fail_stage[:2] == ("listen", self.address[0]):
+                    raise OSError(case.fail_stage[2], CANARY)
+
+            def getsockname(self) -> Any:
+                return self.address
+
+            def close(self) -> None:
+                if case.close_error and self.address and self.address[0] == case.cfg.tailnet_bind_host:
+                    raise OSError(CANARY)
+                self.closed = True
+                self.listening = False
+
+        def start_serving(_factory: Any, sock: Any, _ctx: Any,
+                          server: Any, *_args: Any) -> None:
+            self.live[sock] = server
+            if self.fail_stage and self.fail_stage[:2] == ("selector", sock.address[0]):
+                raise OSError(self.fail_stage[2], CANARY)
+
+        def stop_serving(sock: Any) -> None:
+            self.live.pop(sock, None)
+            sock.close()
+
+        real_server = web.Server
+
+        def server_spy(*args: Any, **kwargs: Any) -> Any:
+            server = real_server(*args, **kwargs)
+            self.http.append(server)
+            return server
+
+        fake_socket = SimpleNamespace(**{**vars(socket), "socket": Sock})
+        for target, attribute, value in (
+            (asyncio.base_events, "socket", fake_socket),
+            (gsv, "socket", fake_socket),
+            (self.loop, "_start_serving", start_serving),
+            (self.loop, "_stop_serving", stop_serving),
+            (self.loop, "create_server", MethodType(_REAL_CREATE_SERVER, self.loop)),
+            (web, "Server", server_spy),
+            (gsv, "_TAILNET_RETRY_S", 0.01),
+        ):
+            patcher = mock.patch.object(target, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addAsyncCleanup(self.fixture_cleanup)
+
+    async def fixture_cleanup(self) -> None:
+        self.close_error = False
+        for server in tuple(self.live.values()):
+            server.close()
+        for sock in self.sockets:
+            sock.close()
+
+    async def start(self) -> Any:
+        async def handler(_request: Any) -> Any:
+            return web.Response(status=204)
+        return await gsv._start_site(handler, self.cfg, self.ctx)
+
+    def route(self, local: tuple[str, int], host: str) -> Any:
+        return request_for(host=host, transport=transport_for(local=local))
+
+    async def test_absent_at_boot_keeps_lan_serving_and_recovers_exact_tailnet(self):
+        handle = await self.start()
+        self.addAsyncCleanup(handle.__call__)
+        handler = self.http[0].request_handler
+        lan = self.route(("10.1.2.3", 8941), HOST_HEADER)
+        tail = self.route(("100.64.12.34", 8941), "gateway.example.test:8941")
+        self.assertEqual(handle.tailnet_state, "retrying")
+        self.assertEqual((await handler(lan)).status, 204)
+        self.assertEqual((await handler(tail)).status, 503)
+        await until(lambda: len(self.sockets) >= 4
+                    and all(sock.closed for sock in self.sockets[1:]))
+        self.assertTrue(all(sock.closed for sock in self.sockets[1:]))
+        self.assertEqual((await handler(lan)).status, 204)
+        self.assertEqual(len(self.live), 1)  # the original LAN, no failed Tailnet site
+        self.tail_absent = False
+        await until(lambda: handle.tailnet_state == "ready")
+        self.assertEqual((await handler(lan)).status, 204)
+        self.assertEqual((await handler(tail)).status, 204)
+        self.assertEqual(len(self.live), 2)
+        self.assertEqual([sock.address for sock in self.live],
+                         [("10.1.2.3", 8941), ("100.64.12.34", 8941)])
+        await handle()
+        self.assertEqual(self.live, {})
+        self.assertTrue(all(sock.closed for sock in self.sockets))
+
+    async def test_only_optional_bind_address_absence_is_retryable(self):
+        tail = "100.64.12.34"
+        lan = "10.1.2.3"
+        for stage, host, error in (
+            ("bind", lan, errno.EADDRNOTAVAIL),
+            ("setsockopt", tail, errno.EADDRNOTAVAIL),
+            ("bind", tail, errno.EADDRINUSE),
+            ("bind", tail, errno.EACCES),
+            ("setblocking", tail, errno.EADDRNOTAVAIL),
+            ("listen", tail, errno.EADDRNOTAVAIL),
+            ("selector", tail, errno.EADDRNOTAVAIL),
+        ):
+            with self.subTest(stage=stage, host=host, error=error):
+                self.sockets.clear()
+                self.live.clear()
+                self.tail_absent = False
+                self.fail_stage = (stage, host, error)
+                with self.assertRaises(OSError):
+                    await self.start()
+                self.assertEqual(self.live, {})
+                self.assertTrue(all(sock.closed for sock in self.sockets))
+        self.fail_stage = None
+
+    async def test_absent_bind_with_failed_cleanup_refuses_lan_and_does_not_retry(self):
+        self.close_error = True
+        with self.assertRaises(OSError):
+            await self.start()
+        self.assertEqual(len(self.sockets), 2)
+        self.assertTrue(self.sockets[0].closed)
+        self.assertFalse(self.sockets[1].closed)
+        self.assertEqual(self.live, {})
+
+    async def test_fatal_retry_closes_gate_and_signals_owner_without_more_attempts(self):
+        handle = await self.start()
+        self.addAsyncCleanup(handle.__call__)
+        self.tail_absent = False
+        self.fail_stage = ("bind", "100.64.12.34", errno.EACCES)
+        await asyncio.wait_for(handle.failure.wait(), 2)
+        self.assertEqual(handle.tailnet_state, "failed")
+        lan = self.route(("10.1.2.3", 8941), HOST_HEADER)
+        self.assertEqual((await self.http[0].request_handler(lan)).status, 503)
+        attempts = len(self.sockets)
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(self.sockets), attempts)
+        with self.assertRaises(gsv.StartupError) as caught:
+            await gsv._wait_for_gateway_shutdown(lambda: asyncio.Event().wait(), handle)
+        self.assertEqual(caught.exception.code, "listen_failed")
+
+    async def test_stop_while_waiting_joins_retry_and_never_binds_again(self):
+        handle = await self.start()
+        self.assertEqual(handle.tailnet_state, "retrying")
+        await handle()
+        count = len(self.sockets)
+        self.tail_absent = False
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(self.sockets), count)
+        self.assertEqual(self.live, {})
+        self.assertTrue(all(sock.closed for sock in self.sockets))
+
+    async def test_post_bind_interface_loss_is_not_inferred_from_listener_flag(self):
+        self.tail_absent = False
+        handle = await self.start()
+        self.addAsyncCleanup(handle.__call__)
+        self.assertEqual(handle.tailnet_state, "ready")
+        self.assertEqual(len(self.live), 2)
+        count = len(self.sockets)
+        # This changes future fake bind behavior only; no real interface is observed.
+        self.tail_absent = True
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(self.sockets), count)
+        self.assertEqual(len(self.live), 2)
+        self.assertEqual(handle.tailnet_state, "ready")  # local bind only, not reachability
+        self.tail_absent = False
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(self.sockets), count)
+
+    async def test_stop_during_retry_handoff_owns_late_result_through_repeated_cancel(self):
+        real_start = gsv._OwnedSite.start
+        entered, release = asyncio.Event(), asyncio.Event()
+        attempts = 0
+
+        async def delayed(site: Any) -> None:
+            nonlocal attempts
+            if site._host == self.cfg.tailnet_bind_host:
+                attempts += 1
+                if attempts == 2:
+                    entered.set()
+                    await release.wait()
+            await real_start(site)
+
+        with mock.patch.object(gsv._OwnedSite, "start", delayed):
+            handle = await self.start()
+            self.tail_absent = False
+            await asyncio.wait_for(entered.wait(), 2)
+            closer = asyncio.create_task(handle())
+            try:
+                await asyncio.sleep(0)  # the closer has disabled admission
+                self.assertFalse(closer.done())
+                self.assertEqual(len(self.live), 1)
+                lan = self.route(("10.1.2.3", 8941), HOST_HEADER)
+                self.assertEqual((await self.http[0].request_handler(lan)).status, 503)
+                closer.cancel()
+                await asyncio.sleep(0)
+                closer.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(closer.done())
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(closer, 5)
+                self.assertEqual(handle.tailnet_state, "retrying")
+                self.assertEqual(self.live, {})
+                self.assertTrue(all(sock.closed for sock in self.sockets))
+                count = len(self.sockets)
+                await asyncio.sleep(0.03)
+                self.assertEqual(len(self.sockets), count)
+            finally:
+                release.set()
+                await asyncio.gather(closer, return_exceptions=True)
+
+    async def test_fatal_retry_is_latched_even_if_stop_cancels_its_waiter(self):
+        real_start, real_stop = gsv._OwnedSite.start, gsv._OwnedSite.stop
+        for kind in ("start", "cleanup"):
+            for failure_first in (True, False):
+                with self.subTest(kind=kind, failure_first=failure_first):
+                    self.sockets.clear()
+                    self.live.clear()
+                    self.http.clear()
+                    self.tail_absent = True
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    attempts = 0
+                    gated_site: Any = None
+                    fired = False
+                    handle: Any = None
+
+                    async def start(site: Any) -> None:
+                        nonlocal attempts
+                        if site._host == self.cfg.tailnet_bind_host:
+                            attempts += 1
+                            if attempts == 2 and kind == "start":
+                                entered.set()
+                                await release.wait()
+                                if failure_first:
+                                    self.loop.call_soon(handle.begin_close)
+                                raise OSError(errno.EACCES, CANARY)
+                        await real_start(site)
+
+                    async def stop(site: Any) -> None:
+                        nonlocal gated_site, fired
+                        if (site._host == self.cfg.tailnet_bind_host and attempts == 2
+                                and kind == "cleanup" and not fired):
+                            gated_site = site
+                            fired = True
+                            entered.set()
+                            await release.wait()
+                            if failure_first:
+                                self.loop.call_soon(handle.begin_close)
+                            raise OSError(CANARY)
+                        await real_stop(site)
+
+                    with (mock.patch.object(gsv._OwnedSite, "start", start),
+                          mock.patch.object(gsv._OwnedSite, "stop", stop)):
+                        handle = await self.start()
+                        closer: Any = None
+                        try:
+                            await asyncio.wait_for(entered.wait(), 2)
+                            if failure_first:
+                                release.set()
+                                await asyncio.wait_for(handle.failure.wait(), 2)
+                                closer = asyncio.create_task(handle())
+                            else:
+                                handle.begin_close()
+                                closer = asyncio.create_task(handle())
+                                await asyncio.sleep(0)
+                                self.assertFalse(closer.done())
+                                release.set()
+                            await asyncio.wait_for(closer, 5)
+                            self.assertTrue(handle.failure.is_set())
+                            self.assertEqual(handle.tailnet_state, "failed")
+                            self.assertEqual(self.live, {})
+                            self.assertTrue(all(sock.closed for sock in self.sockets))
+                            with self.assertRaises(gsv.StartupError) as caught:
+                                await gsv._wait_for_gateway_shutdown(
+                                    lambda: asyncio.Event().wait(), handle)
+                            self.assertEqual(caught.exception.code, "listen_failed")
+                            self.assertNotIn(CANARY, str(caught.exception))
+                        finally:
+                            release.set()
+                            handle.begin_close()
+                            if closer is not None:
+                                await asyncio.gather(closer, return_exceptions=True)
+                            if gated_site is not None:
+                                await real_stop(gated_site)
+                            await handle()
+
+    async def test_recovery_keeps_auth_and_the_original_gateway_single_call_slot(self):
+        h = Harness()
+        h.runner.start()
+        self.addAsyncCleanup(h.aclose)
+        provider_calls: list[Any] = []
+
+        async def provider(_key: Any, *, timeout: float) -> Any:
+            provider_calls.append(timeout)
+            raise AssertionError("no provider dial expected")
+
+        devices = [h.device]
+        gw = gsv._Gateway(
+            self.cfg, gsv.Secret(KEY_CANARY),
+            gsv.AuthRegistry(clock=lambda: h.clock.now()), h.runner, h.ops,
+            gsv.ServeDeps(provider_connect=provider, clock=lambda: h.clock),
+            ws_factory=FakeServerWS,
+            device_factory=lambda _ws, _transport: devices.pop(0),
+        )
+        handle = await gsv._start_site(gw.handle, self.cfg, self.ctx)
+        self.addAsyncCleanup(handle.__call__)
+        handler = self.http[0].request_handler
+        lan = self.route(("10.1.2.3", 8941), HOST_HEADER)
+        tail = self.route(("100.64.12.34", 8941), "gateway.example.test:8941")
+        task = asyncio.create_task(handler(lan))
+        try:
+            await h.quiesce()
+            self.assertTrue(gw.busy)
+            self.assertEqual((await handler(tail)).status, 503)
+            self.tail_absent = False
+            await until(lambda: handle.tailnet_state == "ready")
+            wrong_host = self.route(("100.64.12.34", 8941), HOST_HEADER)
+            wrong_bearer = request_for(
+                host="gateway.example.test:8941", bearer="Bearer " + OTHER_TOKEN,
+                transport=transport_for(local=("100.64.12.34", 8941)))
+            self.assertEqual((await handler(wrong_host)).status, 421)
+            self.assertEqual((await handler(wrong_bearer)).status, 401)
+            self.assertEqual((await handler(tail)).status, 409)
+            self.assertEqual(provider_calls, [])
+            await h.feed({"type": "session.close"})
+            self.assertTrue((await asyncio.wait_for(task, 5)).prepared)
+            await until(lambda: not gw.busy)
+            next_device = FakeDeviceLink(h.clock)
+            next_device.disconnect()
+            devices.append(next_device)
+            self.assertTrue((await asyncio.wait_for(handler(tail), 5)).prepared)
+            self.assertEqual(gw.sessions_started, 2)
+            self.assertEqual(h.ops.count("confirm"), 0)
+            self.assertEqual(provider_calls, [])
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 class StartSiteTest(OfflineAsyncCase):
     def setUp(self) -> None:
         super().setUp()
@@ -3291,6 +3662,116 @@ class Spies:
 
 
 class ServeStartupTest(OfflineAsyncCase):
+    async def test_degraded_startup_reports_retry_then_restored_listener(self):
+        path = self.fx.build(cfg={
+            "tailnet_bind_host": "100.64.12.34",
+            "tailnet_fqdn": "gateway.example.test",
+        })
+        available = False
+        attempts = 0
+        sites: list[Any] = []
+
+        class Site:
+            def __init__(self, runner: Any, host: str, port: int, **_kw: Any):
+                self.runner, self.host, self.closed = runner, host, False
+                sites.append(self)
+
+            async def start(self) -> None:
+                nonlocal attempts
+                if self.host == "100.64.12.34":
+                    attempts += 1
+                    if not available:
+                        raise gsv._BindAddressAbsent()
+
+            async def stop(self) -> None:
+                self.closed = True
+
+        async def start(handler: Any, cfg: Any, ctx: Any) -> Any:
+            return await gsv._start_site(handler, cfg, ctx)
+
+        async def exercise() -> None:
+            nonlocal available
+            self.assertIn("gateway: Tailnet address unavailable; retrying\n",
+                          self.out.getvalue())
+            handler = sites[0].runner.server.request_handler
+            lan = request_for(transport=transport_for(local=("10.1.2.3", 8941)),
+                              bearer="Bearer " + OTHER_TOKEN)
+            self.assertEqual((await handler(lan)).status, 401)
+            await until(lambda: attempts >= 2 and all(site.closed for site in sites[1:]))
+            available = True
+            await until(lambda: "gateway: Tailnet listener ready\n" in self.out.getvalue())
+            tail = request_for(host="gateway.example.test:8941",
+                               transport=transport_for(local=("100.64.12.34", 8941)),
+                               bearer="Bearer " + OTHER_TOKEN)
+            self.assertEqual((await handler(tail)).status, 401)
+
+        deps = self.spies.deps(self.clock)
+        deps.start_site = start
+        deps.wait_for_shutdown = exercise
+        with (mock.patch.object(gsv, "_OwnedSite", Site),
+              mock.patch.object(gsv, "_TAILNET_RETRY_S", 0.01)):
+            self.assertEqual(await gsv._serve(path, {}, self.out, self.err, deps), 0)
+        self.assertTrue(all(site.closed for site in sites))
+        self.assertEqual(self.err.getvalue(), "")
+        self.assertEqual(self.spies.provider_calls, 0)
+        self.assertEqual(runner_threads(), [])
+        self.fx.stores_reopen()
+
+    async def test_fatal_retry_finishing_during_shutdown_reports_listen_failed(self):
+        path = self.fx.build(cfg={
+            "tailnet_bind_host": "100.64.12.34",
+            "tailnet_fqdn": "gateway.example.test",
+        })
+        entered, release, shutdown = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        sites: list[Any] = []
+        attempts = 0
+
+        class Site:
+            def __init__(self, runner: Any, host: str, port: int, **_kw: Any):
+                self.host, self.closed = host, False
+                sites.append(self)
+
+            async def start(self) -> None:
+                nonlocal attempts
+                if self.host == "100.64.12.34":
+                    attempts += 1
+                    if attempts == 1:
+                        raise gsv._BindAddressAbsent()
+                    entered.set()
+                    await release.wait()
+                    raise OSError(errno.EACCES, CANARY)
+
+            async def stop(self) -> None:
+                self.closed = True
+
+        async def start(handler: Any, cfg: Any, ctx: Any) -> Any:
+            return await gsv._start_site(handler, cfg, ctx)
+
+        deps = self.spies.deps(self.clock)
+        deps.start_site = start
+        deps.wait_for_shutdown = shutdown.wait
+        with (mock.patch.object(gsv, "_OwnedSite", Site),
+              mock.patch.object(gsv, "_TAILNET_RETRY_S", 0.01)):
+            task = asyncio.create_task(gsv._serve(path, {}, self.out, self.err, deps))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                shutdown.set()
+                await asyncio.sleep(0)
+                release.set()
+                self.assertEqual(await asyncio.wait_for(task, 5), 1)
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(all(site.closed for site in sites))
+        self.assertEqual(self.err.getvalue(), "error: listen_failed\n")
+        self.assertNotIn(CANARY, self.out.getvalue() + self.err.getvalue())
+        self.assertNotIn("Tailnet listener ready", self.out.getvalue())
+        self.assertEqual(self.spies.provider_calls, 0)
+        self.assertEqual(runner_threads(), [])
+        self.fx.stores_reopen()
+
     # -- the same host restarted: follow its new process instance ---------------------
     def _binding_record(self) -> dict[str, Any]:
         raw = (self.base / "state/journal/binding.json").read_bytes()
