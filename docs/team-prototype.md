@@ -136,7 +136,12 @@ have not yet been tested.
    and new-work actions above reflect a source review of Unified 0.98.6, not a
    live cross-chat voice qualification. In particular, recognized speech reaching
    this chat has not been proven to provide the human provenance needed to answer
-   a different chat's question. Use the host's normal interface if it does not.
+   a different chat's question. The pet token authenticates a device connection,
+   not the person speaking. On the reviewed Unified 0.98.6 path, the host records
+   gateway-submitted text as `ui` input; that classification is not independent
+   proof of who spoke or that a confirmation was heard correctly. Until this
+   voice handoff is verified for your setup, use Unified's normal interface to
+   answer another chat's waiting question.
 2. On the gateway host, choose a **new** absolute private directory outside Git,
    under an existing owner-controlled private parent. Do not use symlinks in
    the path or change permissions on someone else's existing directory. Keep the same
