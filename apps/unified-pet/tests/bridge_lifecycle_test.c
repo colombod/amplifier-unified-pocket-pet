@@ -32,6 +32,7 @@
 #endif
 
 typedef void *TaskHandle_t;
+TaskHandle_t xTaskGetCurrentTaskHandle(void){return (void*)(uintptr_t)pthread_self();}
 typedef struct fixture_events {unsigned bits;} *EventGroupHandle_t;
 typedef void *esp_event_loop_handle_t;
 #ifndef BRIDGE_RECEIVE_TEST
@@ -51,7 +52,7 @@ typedef struct {int error_type,esp_ws_handshake_status_code;} esp_websocket_erro
 struct fixture_lock {pthread_mutex_t mutex;bool io;};
 struct fixture_timer {esp_timer_create_args_t args;bool active;};
 struct fixture_ws {esp_transport_handle_t ssl;char *auth;int status;};
-enum gate_id {G_BEGIN,G_FINISH,G_STOPPED,G_DESTRUCTOR,G_TIMER,G_COUNT};
+enum gate_id {G_BEGIN,G_FINISH,G_STOPPED,G_DESTRUCTOR,G_TIMER,G_TIMER_START,G_COUNT};
 static struct {bool armed,reached,released;} gates[G_COUNT];
 static pthread_mutex_t control=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed=PTHREAD_COND_INITIALIZER;
@@ -60,9 +61,12 @@ static pthread_t worker;
 static bool worker_exists,early_exit=true,creating_client;
 static bool fail_create,fail_timer_start,fail_key,fail_setspecific,fail_self_destroy;
 static bool fail_timer_stop,fail_timer_delete,connect_failure,peer_failure;
+static atomic_uint task_create_attempts;
 static atomic_uint connects,control_sends,payload_sends,closed_events,disconnect_events;
 static atomic_uint clients_live,ws_live,ssl_live,locks_live,timers_live,destructors,start_tail;
 static atomic_uint client_frees,app_frees;
+static atomic_bool observe_io_contention,io_contended;
+static atomic_int_fast64_t forced_clock;
 static esp_event_handler_t event_handler;
 static void *event_arg;
 static esp_websocket_client_handle_t last_client;
@@ -72,23 +76,64 @@ static void *app_slot;static size_t app_size;static bool app_slot_live;
 #ifdef BRIDGE_RECEIVE_TEST
 static unsigned char rx_wire[200000],tx_wire[10000];
 static size_t rx_size,rx_at,tx_size,tcp_split=8192;
+static struct {size_t first,last;} fixture_headers[128];
+static unsigned fixture_header_count;
 static bool fixture_eof,fixture_socket=true;
+static bool fault_raw_once;
+static size_t fault_raw_at;
+static int fault_raw_result;
 static unsigned data_events,control_events,zero_control_events,continuation_events,split_events;
 static size_t controlled_payload_begin;
 static unsigned payload_reads,fault_payload_read,cancel_payload_read;
 static int fault_payload_result,payload_waits[130];
+static bool cancel_raw_once;
+static size_t cancel_raw_at;
 static int64_t payload_latency_us;
 static bool fake_clock;
 static int64_t fake_now;
+static int64_t timer_start_delay_us;
 static esp_websocket_event_data_t pending_event;
 static int pending_id;static bool pending_valid;
+static bool admit_on_data_dispatch;
+static bool consume_ticket_before_dispatch;
+static unsigned consumed_ticket_faults;
+static int64_t data_dispatch_delay_us;
+static int64_t nondata_dispatch_delay_us;
+static bool fail_next_data_post;
+static unsigned data_post_count,fail_data_post_at;
 static struct {esp_event_handler_t fn;void *arg;} handlers[2];
 static unsigned handler_count;
 static const char *WEBSOCKET_EVENTS="fixture websocket";
 static int (*vendor_ws_destroy)(esp_transport_handle_t);
+/* The actual pinned IDF event-post body executes for the allocator-failure
+ * branch. Its allocator and RTOS/event-loop data structures are synthetic. */
+typedef int BaseType_t;
+typedef struct {union {void *ptr;} data;esp_event_base_t base;int32_t id;} esp_event_post_instance_t;
+typedef struct {void *task,*running_task,*queue;SemaphoreHandle_t mutex;} esp_event_loop_instance_t;
+#define ESP_EVENT_ANY_BASE NULL
+#define ESP_EVENT_ANY_ID (-1)
+#ifndef pdFALSE
+#define pdFALSE 0
+#endif
+static esp_event_loop_instance_t post_loop;
+static unsigned failed_allocations;
+static void *event_fault_calloc(size_t n,size_t size){(void)n;(void)size;failed_allocations++;return NULL;}
+static int xQueueSendToBack(void *q,const void *p,unsigned ticks){(void)q;(void)p;(void)ticks;assert(!"fault branch cannot enqueue");return 0;}
+static void post_instance_delete(esp_event_post_instance_t *p){free(p->data.ptr);}
+#define calloc event_fault_calloc
+#define esp_event_post_to fixture_sdk_event_post_to
+#define TAG "fixture event post"
+#include "pinned_event_post.inc"
+#undef TAG
+#undef esp_event_post_to
+#undef calloc
 static esp_err_t esp_event_post_to(void *loop,esp_event_base_t base,int id,
                                   const void *event,size_t n,unsigned ticks){
     (void)loop;(void)ticks;assert(base==WEBSOCKET_EVENTS&&!pending_valid&&n==sizeof(pending_event));
+    if(id==WEBSOCKET_EVENT_DATA&&++data_post_count==fail_data_post_at)fail_next_data_post=true;
+    if(id==WEBSOCKET_EVENT_DATA&&fail_next_data_post){
+        fail_next_data_post=false;return fixture_sdk_event_post_to(&post_loop,base,id,event,n,ticks);
+    }
     pending_event=*(const esp_websocket_event_data_t*)event;pending_id=id;pending_valid=true;return ESP_OK;
 }
 static int esp_tls_get_and_clear_last_error(void *e,int *stack,int *flags){
@@ -97,6 +142,8 @@ static int esp_tls_get_and_clear_last_error(void *e,int *stack,int *flags){
 #endif
 
 int64_t esp_timer_get_time(void){
+    int64_t forced=atomic_load(&forced_clock);
+    if(forced)return forced;
 #ifdef BRIDGE_RECEIVE_TEST
     if(fake_clock)return fake_now;
 #endif
@@ -154,7 +201,11 @@ static int fixture_shutdown(int fd,int how){
 #define calloc app_calloc
 #define free app_free
 #define shutdown fixture_shutdown
+#ifdef BRIDGE_TEST_TRANSPORT_MUTANT
+#include "bridge-transport-mutant.inc"
+#else
 #include "../main/bridge_transport.c"
+#endif
 #undef shutdown
 #undef free
 #undef calloc
@@ -179,6 +230,7 @@ static void wait_finishing(bridge_transport_t *t){
 static void *task_entry(void *arg);
 static int xTaskCreate(void(*fn)(void*),const char *name,unsigned stack,void *arg,unsigned prio,TaskHandle_t *out){
     (void)name;assert(stack==8192&&prio==5&&!worker_exists);
+    atomic_fetch_add(&task_create_attempts,1);
     if(fail_create)return 0;
     extern void fixture_check_task_function(void(*)(void*));fixture_check_task_function(fn);
     *out=(void*)(uintptr_t)1;worker_exists=true;
@@ -218,7 +270,21 @@ static int esp_event_loop_run(void *loop,unsigned ticks){
 #ifdef BRIDGE_RECEIVE_TEST
     if(pending_valid){
         pending_valid=false;
+        if(pending_id!=WEBSOCKET_EVENT_DATA&&nondata_dispatch_delay_us){
+            assert(fake_clock);fake_now+=nondata_dispatch_delay_us;nondata_dispatch_delay_us=0;
+        }
         if(pending_id==WEBSOCKET_EVENT_DATA){
+            if(data_dispatch_delay_us){assert(fake_clock);fake_now+=data_dispatch_delay_us;data_dispatch_delay_us=0;}
+            if(admit_on_data_dispatch){
+                admit_on_data_dispatch=false;
+                assert(bridge_transport_admit_control(atomic_load(&chain),esp_timer_get_time()+1000000));
+            }
+            if(consume_ticket_before_dispatch){
+                bool after;int64_t at;
+                consume_ticket_before_dispatch=false;
+                assert(bridge_transport_take_data(atomic_load(&chain),&after,&at));
+                consumed_ticket_faults++;
+            }
             assert(pending_event.payload_offset>=0&&pending_event.payload_len>=0);
             data_events++;
             if(pending_event.op_code>=8){
@@ -286,6 +352,10 @@ SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(void){
 int xSemaphoreTakeRecursive(SemaphoreHandle_t s,unsigned ticks){
     assert(s);if(timer_thread)at_gate(G_TIMER);
     if(!ticks)return pthread_mutex_trylock(&s->mutex)==0;
+    if(s->io&&atomic_load(&observe_io_contention)){
+        assert(pthread_mutex_trylock(&s->mutex)==EBUSY);
+        atomic_store(&io_contended,true);
+    }
     assert(!pthread_mutex_lock(&s->mutex));return pdTRUE;
 }
 int xSemaphoreGiveRecursive(SemaphoreHandle_t s){assert(s&&!pthread_mutex_unlock(&s->mutex));return pdTRUE;}
@@ -297,7 +367,14 @@ void vSemaphoreDelete(SemaphoreHandle_t s){
 esp_err_t esp_timer_create(const esp_timer_create_args_t *a,esp_timer_handle_t *out){
     assert(a&&a->callback&&a->arg);*out=calloc(1,sizeof(**out));assert(*out);(*out)->args=*a;atomic_fetch_add(&timers_live,1);return ESP_OK;
 }
-esp_err_t esp_timer_start_once(esp_timer_handle_t t,uint64_t us){assert(t&&us);if(fail_timer_start)return ESP_FAIL;t->active=true;return ESP_OK;}
+esp_err_t esp_timer_start_once(esp_timer_handle_t t,uint64_t us){
+    assert(t&&us);if(fail_timer_start)return ESP_FAIL;t->active=true;
+    at_gate(G_TIMER_START);
+#ifdef BRIDGE_RECEIVE_TEST
+    if(timer_start_delay_us){assert(fake_clock);fake_now+=timer_start_delay_us;timer_start_delay_us=0;}
+#endif
+    return ESP_OK;
+}
 esp_err_t esp_timer_stop(esp_timer_handle_t t){assert(t);if(fail_timer_stop)return ESP_FAIL;bool active=t->active;t->active=false;return active?ESP_OK:ESP_ERR_INVALID_STATE;}
 esp_err_t esp_timer_delete(esp_timer_handle_t t){assert(t&&!t->active);if(fail_timer_delete)return ESP_FAIL;atomic_fetch_sub(&timers_live,1);free(t);return ESP_OK;}
 void esp_log_level_set(const char *tag,int level){(void)tag;assert(level==ESP_LOG_NONE);}
@@ -309,6 +386,12 @@ static int raw_read(esp_transport_handle_t t,char *b,int n,int ms){
     (void)t;(void)ms;
 #ifdef BRIDGE_RECEIVE_TEST
     assert(n>0&&b);
+    /* Cancellation inside an admitted read does not undo bytes that the TLS
+     * operation subsequently returns to the parser. */
+    if(cancel_raw_once&&rx_at==cancel_raw_at){
+        cancel_raw_once=false;bridge_transport_cancel(atomic_load(&chain));
+    }
+    if(fault_raw_once&&rx_at==fault_raw_at){fault_raw_once=false;return fault_raw_result;}
     if(controlled_payload_begin&&rx_at>=controlled_payload_begin){
         assert(payload_reads<sizeof(payload_waits)/sizeof(*payload_waits));
         payload_waits[payload_reads++]=ms;
@@ -324,7 +407,19 @@ static int raw_read(esp_transport_handle_t t,char *b,int n,int ms){
     }
     if(rx_at==rx_size)return fixture_eof?-1:0;
     size_t count=rx_size-rx_at;if(count>(size_t)n)count=(size_t)n;
-    if(count>tcp_split)count=tcp_split;
+    /* Positive-path frames have deliberately complete headers: the pinned
+     * parser's exact header reads cannot be forced to one byte and still be
+     * expected to succeed. Payload splitting remains active. Hand-built
+     * partial-header cases below do not register a complete header here. */
+    bool header=false;
+    for(unsigned i=0;i<fixture_header_count;i++){
+        if(rx_at>=fixture_headers[i].first&&rx_at<fixture_headers[i].last){
+            size_t remaining=fixture_headers[i].last-rx_at;
+            if(count>remaining)count=remaining;
+            header=true;break;
+        }
+    }
+    if(!header&&count>tcp_split)count=tcp_split;
     memcpy(b,rx_wire+rx_at,count);rx_at+=count;return (int)count;
 #else
     (void)b;(void)n;assert(!"no TLS byte read in lifecycle seam");return -1;
@@ -468,7 +563,8 @@ static void *dispose_entry(void *unused){(void)unused;dispose_result=bridge_tran
 /* Focused receive integration, not a generic RTOS emulator. These bounded
  * queues/buffers are the same 4-pointer/zero-wait boundaries as the runtime
  * fixture. The callback and owner consumer below are literal source excerpts. */
-typedef struct {char *items[4];unsigned n;} *QueueHandle_t;
+typedef struct {char *text;int64_t received_at;bool after_local_control;} fixture_frame_t;
+typedef struct {fixture_frame_t items[4];unsigned n;} *QueueHandle_t;
 typedef struct {unsigned char bytes[96000];size_t n;} *StreamBufferHandle_t;
 typedef struct {unsigned unused;} StaticStreamBuffer_t;
 typedef unsigned EventBits_t;
@@ -483,10 +579,10 @@ typedef struct {unsigned unused;} audio_session_t;
 static char sent_app[8][7000];static unsigned app_sends,inhibits;
 static struct fixture_lock model_guard={.mutex=PTHREAD_MUTEX_INITIALIZER};
 static int xQueueSend(QueueHandle_t q,const void *p,unsigned ticks){
-    assert(!ticks);if(q->n==4)return 0;q->items[q->n++]=*(char *const*)p;return pdTRUE;
+    assert(!ticks);if(q->n==4)return 0;memcpy(&q->items[q->n++],p,sizeof(q->items[0]));return pdTRUE;
 }
 static int xQueueReceive(QueueHandle_t q,void *out,unsigned ticks){
-    (void)ticks;if(!q->n)return 0;*(char**)out=q->items[0];
+    (void)ticks;if(!q->n)return 0;memcpy(out,&q->items[0],sizeof(q->items[0]));
     memmove(q->items,q->items+1,--q->n*sizeof(*q->items));return pdTRUE;
 }
 static unsigned uxQueueMessagesWaiting(QueueHandle_t q){return q->n;}
@@ -520,16 +616,20 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t c,const 
 #undef bridge_transport_upgraded
 #include "receive_golden.inc"
 static bridge_voice_t receive_context;
-static struct {char *items[4];unsigned n;} receive_queue;
+static struct {fixture_frame_t items[4];unsigned n;} receive_queue;
 static struct {unsigned char bytes[96000];size_t n;} capture_buffer,playback_buffer;
 static struct fixture_events audio_events={.bits=BV_IDLE};
 static char assembly_storage[BV_FRAME],append_json[7000];
 static unsigned char append_storage[BV_APPEND],decode_storage[BV_APPEND];
 static void add_frame(unsigned op,bool fin,const void *payload,size_t n){
     assert(rx_at==0&&n<65536&&rx_size+n+4<sizeof(rx_wire));
+    assert(fixture_header_count<sizeof(fixture_headers)/sizeof(*fixture_headers));
+    unsigned index=fixture_header_count++;
+    fixture_headers[index].first=rx_size;
     rx_wire[rx_size++]=(unsigned char)((fin?0x80:0)|op);
     if(n<126)rx_wire[rx_size++]=(unsigned char)n;
     else{rx_wire[rx_size++]=126;rx_wire[rx_size++]=(unsigned char)(n>>8);rx_wire[rx_size++]=(unsigned char)n;}
+    fixture_headers[index].last=rx_size;
     if(n)memcpy(rx_wire+rx_size,payload,n);rx_size+=n;
 }
 static void add_text(const char *json){add_frame(1,true,json,strlen(json));}
@@ -541,7 +641,7 @@ static void add_message(const char *json,bool fragmented){
     add_frame(9,true,"ping",4);add_frame(10,true,NULL,0);
     add_frame(0,true,json+split,n-split);
 }
-static void empty_wire(void){assert(rx_at==rx_size);rx_at=rx_size=0;fixture_eof=false;}
+static void empty_wire(void){assert(rx_at==rx_size);rx_at=rx_size=0;fixture_header_count=0;fixture_eof=false;}
 static void read_batch(bool eof){
     fixture_eof=eof;unsigned calls=0;
     while(rx_at<rx_size&&!atomic_load(&receive_context.failed)){
@@ -647,12 +747,433 @@ static void failed_control(bridge_transport_t *t){
     assert(!app_sends&&!(c->actions&BR_ACT_CONFIRM)&&!playback_buffer.n);
 }
 static void receive_finish(bridge_transport_t *t){
-    char *p=NULL;while(xQueueReceive((void*)&receive_queue,&p,0)==pdTRUE){setup_bridge_wipe(p,strlen(p));free(p);}
+    bv_frame_t p;while(xQueueReceive((void*)&receive_queue,&p,0)==pdTRUE){setup_bridge_wipe(p.text,strlen(p.text));free(p.text);}
     assert(bridge_transport_dispose(t,esp_timer_get_time()+1000000));
     clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
 }
 static int run_receive(const char *which){
+    if(!strcmp(which,"start-before-timer-delay")){
+        /* Actual bridge admission and extracted pinned SDK start; only the
+         * timer setup time is injected. No real task or connection may start. */
+        fake_clock=true;fake_now=100000000;
+        bridge_transport_t *t=make();assert(t);
+        int64_t start_by=fake_now+100000;
+        timer_start_delay_us=200000;fail_create=true; /* backstop if guard regresses */
+        assert(bridge_transport_start_before(t,start_by)==ESP_ERR_TIMEOUT);
+        assert(!timer_start_delay_us&&fake_now>start_by&&atomic_load(&t->started));
+        assert(atomic_load(&t->cancelled)&&!t->task_created&&!worker_exists);
+        assert(!atomic_load(&task_create_attempts)&&!atomic_load(&connects)&&!atomic_load(&payload_sends));
+        bridge_transport_terminal_t result=BR_TRANSPORT_PROTOCOL;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==BR_TRANSPORT_NONE);clean();
+        if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        puts("PASS RECEIVE start-before-timer-delay: no SDK task admitted after cutoff.");return 0;
+    }
     bridge_transport_t *t=receive_init();bridge_voice_t *c=&receive_context;
+    if(!strncmp(which,"cleanup-race-rx-",16)){
+        /* These sanitized literal text payloads match 70df142's builders and
+         * gateway shutdown branch; they are NOT a captured gateway execution.
+         * Actual pinned WS header/payload parsing, recv/dispatch, transport
+         * tickets, callback, cleanup tail and end classification execute here.
+         *
+         * The owner/audio scheduler is NOT present in this receive fixture.
+         * failure("overflow"), began_at and a full mocked send establish its
+         * synthetic cleanup preconditions only. The cleanup-race-* whole-owner
+         * cases independently prove actual capture-buffer overflow/full stop.
+         * No receive-only result is a one-call or gateway-cause proof.
+         */
+        static const char unconfirmed[]="{\"type\":\"pet.error\",\"code\":\"close_unconfirmed\"}";
+        static const char closed[]="{\"type\":\"session.closed\"}";
+        static const char stop[]="{\"type\":\"pet.stop\"}";
+        static const char close[]="{\"type\":\"session.close\"}";
+        static const unsigned char normal_close[]={0x03,0xe8};
+        bool unconfirmed_case=!strcmp(which,"cleanup-race-rx-unconfirmed");
+        bool unconfirmed_only=!strcmp(which,"cleanup-race-rx-unconfirmed-only");
+        bool json_only=!strcmp(which,"cleanup-race-rx-json-closed");
+        bool confirmed=!strcmp(which,"cleanup-race-rx-confirmed");
+        bool normal=!strcmp(which,"cleanup-race-rx-normal");
+        bool before=!strcmp(which,"cleanup-race-rx-normal-before");
+        bool bare=!strcmp(which,"cleanup-race-rx-bare-loss");
+        assert(unconfirmed_case||unconfirmed_only||json_only||confirmed||normal||before||bare);
+        app_rx_size(8192);tcp_split=8192;
+        fake_clock=true;fake_now=100000000;t->deadline=fake_now+60000000;
+        c->hard=t->deadline;c->work=t->deadline-2000000;
+        bridge_init(&c->model);bridge_command(&c->model,BR_CMD_CONVERSE,0);
+        atomic_store(&c->converse,true);c->began_at=fake_now-1000000;
+        /* Generated-before-stop is external fixture metadata, not firmware
+         * input. There are NO peer bytes available to the parser at that time.
+         * Exactly the same bytes could instead be generated by local cleanup. */
+        const struct {bool generated_before_stop;int64_t generated_at;} peer={
+            .generated_before_stop=!bare,.generated_at=fake_now
+        };
+        failure(c,"overflow");
+        assert(c->model.phase==BR_CLOSING&&atomic_load(&c->exit_reason)==BV_EXIT_QUEUE);
+        assert(!receive_queue.n&&!rx_size&&!app_sends);
+        fake_now+=1000;
+        if(!before){
+            /* The real send/admission helper runs with the existing mocked
+             * send_text boundary. This is NOT a provider/owner execution. */
+            c->cleanup_stop_sent=send_frame_timed(c,stop,&c->cleanup_stop_started_at);
+            assert(c->cleanup_stop_sent&&send_frame(c,close));
+            assert(app_sends==2&&!strcmp(sent_app[0],stop)&&!strcmp(sent_app[1],close));
+            assert(t->local_control_admitted);
+            if(!bare)assert(peer.generated_before_stop&&peer.generated_at<c->cleanup_stop_started_at);
+        }
+        fake_now+=10000;
+        const char *text=unconfirmed_case||unconfirmed_only?unconfirmed:json_only||confirmed?closed:NULL;
+        if(text){
+            add_text(text);
+            assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+            assert(receive_queue.n==1&&!strcmp(receive_queue.items[0].text,text));
+            assert(receive_queue.items[0].after_local_control);
+            assert(receive_queue.items[0].received_at>c->cleanup_stop_started_at);
+            empty_wire();
+        }
+        if(!json_only&&!bare&&!unconfirmed_only){
+            fake_now+=1000;
+            add_frame(8,true,normal_close,sizeof(normal_close));
+            assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+            assert(control_events==1&&!atomic_load(&t->data_pending));
+            assert(!t->ws_read_active&&!atomic_load(&t->data_lost));
+            /* A parser ingress timestamp, even for COMPLETE WS1000, cannot
+             * reveal the earlier peer-generation metadata recorded above. */
+            assert(peer.generated_before_stop&&peer.generated_at<fake_now);
+        }else if(bare){
+            receive_eof();
+            assert(!control_events&&!receive_queue.n&&!atomic_load(&t->data_lost));
+        }
+        bridge_transport_terminal_t result=BR_TRANSPORT_PROTOCOL;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        c->transport=NULL;c->ws=NULL;c->transport_terminal=result;
+        converse_tail(c); /* exact final cleanup-tail function, after exit proof */
+        assert(!receive_queue.n&&!c->send_pending&&!c->send_uncertain_seen);
+        assert(!c->model.confirmed&&c->model.send==BR_SEND_NONE&&!playback_buffer.n);
+        assert(!atomic_load(&connects)&&!atomic_load(&payload_sends));
+        char line[112]={0};unsigned end=converse_end(c,line,sizeof(line));
+        fprintf(stderr,"CLEANUP RECEIVE %s: terminal=%u end=%u (retry=%u), generated_before_stop=%d; generation is NOT firmware-observable\n",
+                which,(unsigned)result,end,(unsigned)BV_END_RETRY,peer.generated_before_stop);
+        if(bare)assert(end==BV_END_RETRY); /* no terminal evidence: recovery control */
+        else assert(end!=BV_END_RETRY); /* red-first normal/JSON/unconfirmed regressions */
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: exact parser/admission/cleanup-tail disposition, synthetic owner preconditions; NOT full-owner or causal proof.\n",which);
+        return 0;
+    }
+    if(!strcmp(which,"missing-ticket")||!strcmp(which,"missing-ticket-inactive")){
+        /* Inject a consumed ticket immediately before the real callback:
+         * this tests an unknown delivery, not a claimed SDK failure. */
+        app_rx_size(8192);
+        if(!strcmp(which,"missing-ticket-inactive"))atomic_store(&c->accepting,false);
+        consume_ticket_before_dispatch=true;add_text(g_closed);
+        assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+        assert(!consume_ticket_before_dispatch&&consumed_ticket_faults==1&&data_events==1);
+        assert(atomic_load(&c->ingress_incomplete)&&atomic_load(&c->failed));
+        assert(atomic_load(&t->data_lost)&&!atomic_load(&t->data_pending));
+        assert(!receive_queue.n&&!playback_buffer.n&&!app_sends);
+        bridge_transport_terminal_t result=BR_TRANSPORT_NONE;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==BR_TRANSPORT_EVENT_LOSS);
+        c->transport=NULL;c->transport_terminal=result;c->model.converse=true;
+        atomic_store(&c->exit_reason,BV_EXIT_DISCONNECTED);char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_ERROR&&!strcmp(line,"Voice connection interrupted."));
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: injected missing ticket fails closed.\n",which);return 0;
+    }
+    if(!strcmp(which,"lost-post-middle")){
+        app_rx_size(8192);fail_data_post_at=2;
+        add_frame(1,false,"abc",3);add_frame(0,false,"def",3);add_frame(0,true,"ghi",3);
+        assert(esp_websocket_client_recv(c->ws)==ESP_OK&&!receive_queue.n&&c->assembly.active);
+        assert(esp_websocket_client_recv(c->ws)==ESP_OK&&failed_allocations==1&&!receive_queue.n);
+        size_t before=rx_at;assert(esp_websocket_client_recv(c->ws)==ESP_FAIL&&rx_at==before);
+        assert(esp_websocket_client_abort_connection(c->ws,WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT)==ESP_OK);
+        bridge_transport_terminal_t outcome=BR_TRANSPORT_NONE;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&outcome)&&outcome==BR_TRANSPORT_EVENT_LOSS);
+        c->transport=NULL;c->transport_terminal=outcome;c->model.converse=true;char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_ERROR&&!strcmp(line,"Voice connection interrupted."));
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        puts("PASS RECEIVE lost-post-middle: later fragment not admitted after missing callback.");return 0;
+    }
+    if(!strncmp(which,"lost-post-",10)){
+        /* Exact pinned SDK recv ignores dispatch's failure. The dropped DATA
+         * callback cannot tell the owner what was in the received frame. */
+        const char *msg=!strcmp(which,"lost-post-error")?
+            "{\"type\":\"pet.error\",\"code\":\"model_mismatch\"}":
+            "{\"type\":\"pet.converse.notice\",\"code\":\"idle_timeout\"}";
+        app_rx_size(8192);fail_next_data_post=true;
+        add_text(msg);assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+        assert(failed_allocations==1&&!data_events&&!receive_queue.n&&!atomic_load(&c->failed));
+        assert(c->ws->payload_offset==(int)strlen(msg)); /* SDK ignored post error */
+        /* The next read detects the outstanding ticket and aborts without
+         * consuming more input; the normal SDK error/disconnect follows. */
+        receive_eof();
+        bridge_transport_terminal_t outcome=BR_TRANSPORT_NONE;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&outcome));
+        assert(outcome==BR_TRANSPORT_EVENT_LOSS); /* unknown ingress must veto retry */
+        c->transport=NULL;c->transport_terminal=outcome;
+        c->model.converse=true;char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_ERROR);
+        assert(!strcmp(line,"Voice connection interrupted.")&&!app_sends);
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: event post failed before callback, retry veto preserved.\n",which);return 0;
+    }
+    if(!strncmp(which,"header-loss-",12)||!strncmp(which,"text-first-",11)){
+        /* The production observer surrounds the real pinned WS parser. A
+         * prior complete zero control tests that no old length/opcode is used
+         * as identity when the new header fails before it is published. */
+        app_rx_size(8192);tcp_split=8192;
+        bool prior=strstr(which,"-prior")!=NULL;
+        if(prior){
+            add_frame(10,true,NULL,0);
+            assert(esp_websocket_client_recv(c->ws)==ESP_OK&&data_events==1&&!receive_queue.n);
+            assert(!atomic_load(&t->data_pending)&&!atomic_load(&t->data_lost));
+            empty_wire();data_events=control_events=zero_control_events=0;
+        }
+        if(!strncmp(which,"text-first-",11)){
+            add_text(g_started);controlled_payload_begin=2;
+            fault_payload_read=1;
+            fault_payload_result=!strcmp(which,"text-first-zero")?0:-123;
+        }else if(!strcmp(which,"header-loss-one")||!strcmp(which,"header-loss-cancel")){
+            rx_wire[rx_size++]=0x81; /* first byte of a TEXT header only */
+            if(!strcmp(which,"header-loss-cancel")){cancel_raw_once=true;cancel_raw_at=0;}
+        }else if(!strcmp(which,"header-loss-extended-prior")||!strcmp(which,"header-loss-extended-zero-prior")){
+            rx_wire[rx_size++]=0x88;rx_wire[rx_size++]=126;
+            rx_wire[rx_size++]=0; /* incomplete extended CLOSE length */
+            if(strstr(which,"-zero-")){rx_wire[rx_size++]=2;fault_raw_once=true;fault_raw_at=2;fault_raw_result=0;}
+        }else{
+            assert(!strcmp(which,"header-loss-masked-prior")||!strcmp(which,"header-loss-masked-zero-prior"));
+            rx_wire[rx_size++]=0x88;rx_wire[rx_size++]=0x82;
+            rx_wire[rx_size++]=0x12;rx_wire[rx_size++]=0x34; /* incomplete mask */
+            if(strstr(which,"-zero-")){
+                rx_wire[rx_size++]=0x56;rx_wire[rx_size++]=0x78;
+                fault_raw_once=true;fault_raw_at=2;fault_raw_result=0;
+            }
+        }
+        fixture_eof=true;
+        assert(esp_websocket_client_recv(c->ws)==ESP_FAIL);
+        size_t expected=!strncmp(which,"text-first-",11)?2:
+            !strcmp(which,"header-loss-one")||!strcmp(which,"header-loss-cancel")?1:
+            strstr(which,"-zero-")?2:strstr(which,"extended")?3:4;
+        assert(rx_at==expected&&!t->ws_read_active&&atomic_load(&t->data_lost));
+        if(!strncmp(which,"text-first-",11))assert(payload_reads==1);
+        if(strstr(which,"-zero-"))assert(!fault_raw_once);
+        assert(!data_events&&!receive_queue.n&&!app_sends);
+        assert(atomic_load(&t->cancelled));
+        assert(esp_websocket_client_abort_connection(c->ws,WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT)==ESP_OK);
+        bridge_transport_terminal_t result=BR_TRANSPORT_NONE;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==BR_TRANSPORT_EVENT_LOSS);
+        c->transport=NULL;c->transport_terminal=result;c->model.converse=true;
+        atomic_store(&c->exit_reason,BV_EXIT_DISCONNECTED);char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_ERROR&&!strcmp(line,"Voice connection interrupted."));
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: undispatched parser ingress vetoes retry.\n",which);return 0;
+    }
+    if(!strcmp(which,"bare-zero")||!strcmp(which,"bare-cancel")||!strcmp(which,"bare-eof-after-data")){
+        app_rx_size(8192);
+        if(!strcmp(which,"bare-eof-after-data")){
+            add_text(g_started);assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+            assert(data_events==1&&receive_queue.n==1&&!atomic_load(&t->data_pending));
+            production_consume_one(c);empty_wire();
+            receive_eof();
+        }else{
+            char buffer[32];
+            if(!strcmp(which,"bare-cancel"))bridge_transport_cancel(t);
+            assert(esp_transport_read(t->ws,buffer,sizeof(buffer),0)<=0);
+        }
+        assert(!atomic_load(&t->data_lost)&&!t->ws_read_active);
+        bridge_transport_terminal_t result=BR_TRANSPORT_PROTOCOL;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==BR_TRANSPORT_NONE);
+        c->transport=NULL;c->transport_terminal=result;c->model.converse=true;
+        atomic_store(&c->exit_reason,BV_EXIT_DISCONNECTED);char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_RETRY);
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: zero-progress loss is retryable.\n",which);return 0;
+    }
+    if(!strcmp(which,"origin-fragment-before")||!strcmp(which,"origin-fragment-after")){
+        /* Real pinned parser and callback: first TEXT fragment, interleaved
+         * control, then final continuation. Admission occurs in the first
+         * dispatch after its parser ticket, or before the first parser read. */
+        app_rx_size(8192);bridge_init(&c->model);bridge_command(&c->model,BR_CMD_CONVERSE,0);
+        atomic_store(&c->converse,true);
+        bool before=!strcmp(which,"origin-fragment-before");
+        size_t n=strlen(g_closed),split=n/2;assert(split>0);
+        add_frame(1,false,g_closed,split);
+        add_frame(9,true,"ping",4);
+        add_frame(0,true,g_closed+split,n-split);
+        if(before)admit_on_data_dispatch=true;
+        else assert(bridge_transport_admit_control(t,esp_timer_get_time()+1000000));
+        assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+        assert(!admit_on_data_dispatch&&c->assembly.active&&!receive_queue.n);
+        assert(c->assembly_after_local_control!=before&&!atomic_load(&c->failed));
+        read_batch(false);
+        assert(!c->assembly.active&&receive_queue.n==1&&control_events&&continuation_events);
+        assert(receive_queue.items[0].after_local_control!=before&&!atomic_load(&t->data_lost));
+        production_consume_one(c);
+        assert(c->model.wire_closed&&c->peer_closed_before_control==before);
+        char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_OFF);
+        assert(!strcmp(line,"Mic off (call ended)")); /* receipt order never grants retry */
+        receive_finish(t);printf("PASS RECEIVE %s: fragmented parser provenance.\n",which);return 0;
+    }
+    if(!strcmp(which,"origin-before-dispatch")||!strcmp(which,"origin-after-admission")){
+        /* Real pinned parser has already produced its DATA ticket when event
+         * dispatch admits local cleanup. The opposite case admits it before
+         * the parser reads any bytes. The owner consumes the same queued frame. */
+        app_rx_size(8192);bridge_init(&c->model);bridge_command(&c->model,BR_CMD_CONVERSE,0);
+        atomic_store(&c->converse,true);
+        bool before=!strcmp(which,"origin-before-dispatch");
+        if(before){
+            fake_clock=true;fake_now=100000000;t->deadline=fake_now+60000000;
+            c->hard=t->deadline;c->work=t->deadline-2000000;
+            c->began_at=fake_now-29700000;c->failures=3;
+            data_dispatch_delay_us=500000;admit_on_data_dispatch=true;
+        }
+        else assert(bridge_transport_admit_control(t,esp_timer_get_time()+1000000));
+        add_text(g_closed);assert(esp_websocket_client_recv(c->ws)==ESP_OK);
+        assert(!admit_on_data_dispatch&&receive_queue.n==1&&!atomic_load(&t->data_pending));
+        if(before)assert(receive_queue.items[0].received_at==100000000&&fake_now==100500000);
+        production_consume_one(c);
+        if(before){unsigned failures=99;assert(retry_left(c,&failures)&&failures==3);}
+        assert(c->model.wire_closed&&c->peer_closed_before_control==before);
+        char line[112]={0};assert(converse_end(c,line,sizeof(line))==BV_END_OFF);
+        assert(!strcmp(line,"Mic off (call ended)")); /* same veto after admission */
+        receive_finish(t);printf("PASS RECEIVE %s: first parser ingress orders provenance.\n",which);return 0;
+    }
+    if(!strcmp(which,"eof-delayed-dispatch")){
+        /* SDK recv observes bare EOF just before the healthy threshold, then
+         * the event loop is delayed beyond it. The delayed callback must not
+         * reset consecutive failures or extend the original loss window. */
+        fake_clock=true;fake_now=100000000;t->deadline=fake_now+60000000;
+        c->hard=t->deadline;c->work=t->deadline-2000000;c->began_at=fake_now-29700000;c->failures=3;
+        bridge_init(&c->model);bridge_command(&c->model,BR_CMD_CONVERSE,0);atomic_store(&c->converse,true);
+        nondata_dispatch_delay_us=500000;receive_eof();
+        assert(!nondata_dispatch_delay_us&&fake_now==100500000);
+        assert(bridge_transport_end_at(t)==100000000&&c->ended_at==100000000);
+        unsigned failures=99;assert(retry_left(c,&failures)&&failures==3);
+        assert(!atomic_load(&t->data_lost));
+        receive_finish(t);puts("PASS RECEIVE eof-delayed-dispatch: failure time precedes delayed callback.");return 0;
+    }
+    if(!strncmp(which,"partial-",8)||!strcmp(which,"bare-eof")){
+        /* Execute the pinned SDK receive and production transport wrapper.
+         * No code is inferred from a partial CLOSE, even when both status
+         * bytes arrived: its declared payload has not completed. */
+        /* This branch classifies a conversation ending; set its mode before
+         * the local failure, rather than converting a one-turn model after it. */
+        c->model.converse=true;
+        app_rx_size(8192);tcp_split=1;
+        bool bare=!strcmp(which,"bare-eof");
+        bool close_frame=!strncmp(which,"partial-close-",14);
+        if(bare){
+            receive_eof();production_consume_one(c);
+        }else{
+            unsigned opcode=close_frame?8:strstr(which,"partial-ping-")?9:10;
+            unsigned code=strstr(which,"-1002")?1002:strstr(which,"-1011")?1011:1008;
+            unsigned char body[]={(unsigned char)(code>>8),(unsigned char)code,'b','y','e'};
+            add_frame(opcode,true,body,sizeof(body));controlled_payload_begin=2;
+            bool first_fault=!strcmp(which,"partial-close-error-0")||!strcmp(which,"partial-close-zero-0");
+            bool cancel=!strcmp(which,"partial-close-cancel");
+            if(cancel)cancel_payload_read=2;
+            if(!first_fault&&!cancel)
+                rx_size=controlled_payload_begin+(!strcmp(which,"partial-close-eof-2")||strstr(which,"-1002")||
+                    strstr(which,"-1008")||strstr(which,"-1011")?2:
+                    !strcmp(which,"partial-close-eof-0")?0:1);
+            fixture_eof=true;
+            bool delayed=strstr(which,"-delayed")!=NULL;
+            if(delayed){
+                fake_clock=true;fake_now=100000000;t->deadline=fake_now+60000000;
+                c->hard=t->deadline;c->work=t->deadline-2000000;c->began_at=fake_now-29700000;c->failures=3;
+                nondata_dispatch_delay_us=500000;
+            }
+            if(first_fault){fault_payload_read=1;fault_payload_result=!strcmp(which,"partial-close-zero-0")?0:-123;}
+            assert(esp_websocket_client_recv(c->ws)==ESP_FAIL);
+            if(first_fault)assert(payload_reads==1);
+            failed_control(t);
+            if(delayed){
+                assert(!nondata_dispatch_delay_us&&bridge_transport_end_at(t)==100000000&&c->ended_at==100000000);
+                unsigned failures=99;assert(retry_left(c,&failures)&&failures==3);
+            }
+        }
+        bridge_transport_terminal_t result=BR_TRANSPORT_PROTOCOL;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==(close_frame?BR_TRANSPORT_EVENT_LOSS:BR_TRANSPORT_NONE));
+        c->transport=NULL;c->transport_terminal=result;c->model.converse=true;
+        atomic_store(&c->exit_reason,BV_EXIT_DISCONNECTED);
+        char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==(close_frame?BV_END_ERROR:BV_END_RETRY));
+        if(close_frame)assert(!strcmp(line,"Voice connection interrupted."));
+        assert(!app_sends);
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: partial control or bare EOF classification at settled disposal.\n",which);return 0;
+    }
+    if(!strcmp(which,"bare-eof-after-close")||!strcmp(which,"bare-zero-after-close")){
+        /* A previously completed 1011 may remain in SDK getters; it is not
+         * evidence that a later EOF began another CLOSE. */
+        app_rx_size(8192);tcp_split=1;
+        static const unsigned char body[]={3,0xf3};
+        add_frame(8,true,body,sizeof(body));fixture_eof=strcmp(which,"bare-zero-after-close")!=0;
+        char bytes[32];
+        assert(esp_transport_read(t->ws,bytes,sizeof(bytes),1000)==2);
+        bridge_transport_data_delivered(t);
+        assert(esp_transport_read(t->ws,bytes,sizeof(bytes),0)<=0);
+        bridge_transport_terminal_t result=BR_TRANSPORT_PROTOCOL;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==BR_TRANSPORT_NONE);
+        c->transport=NULL;c->transport_terminal=result;c->model.converse=true;
+        atomic_store(&c->exit_reason,BV_EXIT_DISCONNECTED);char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==BV_END_RETRY);
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: stale metadata does not veto retry.\n",which);return 0;
+    }
+    if(!strncmp(which,"close-",6)){
+        /* Real SDK parser and recv, with one-byte TCP reads, preserve only
+         * complete peer close codes. The final result survives disposal. */
+        app_rx_size(8192);tcp_split=1;
+        unsigned code=strstr(which,"close-normal")?1000:strstr(which,"close-unsupported")?1003:
+                      strstr(which,"close-bad-payload")?1007:strstr(which,"close-too-large")?1009:
+                      strstr(which,"close-wire-0000")?0:strstr(which,"close-wire-0999")?999:
+                      strstr(which,"close-wire-1015")?1015:strstr(which,"close-wire-3000")?3000:
+                      strstr(which,"close-wire-4999")?4999:strstr(which,"close-wire-5000")?5000:
+                      strstr(which,"close-wire-65535")?65535:
+                      strstr(which,"close-reserved-1004")?1004:strstr(which,"close-reserved-1005")?1005:
+                      strstr(which,"close-reserved-1006")?1006:strstr(which,"close-client-only")?1010:
+                      strstr(which,"close-protocol")?1002:
+                      strstr(which,"close-policy")?1008:
+                      strstr(which,"close-ambiguous")?1011:0;
+        unsigned char body[5]={(unsigned char)(code>>8),(unsigned char)code,'b','y','e'};
+        bool single=!strcmp(which,"close-single");
+        bool cancel_final=strstr(which,"-cancel-final")!=NULL;
+        bool status_present=code!=0||strstr(which,"close-wire-0000")!=NULL;
+        size_t size=single?1:status_present?(strstr(which,"-reason")?5:2):0;
+        add_frame(8,true,body,size);
+        bool local=strstr(which,"-local")!=NULL;
+        if(local)assert(bridge_transport_admit_control(t,esp_timer_get_time()+1000000));
+        if(strstr(which,"-dispatch"))admit_on_data_dispatch=true;
+        /* Injected prior terminal state checks precedence, not a claim that
+         * a real peer normally sends multiple CLOSE frames on one connection. */
+        bridge_transport_terminal_t seed=strstr(which,"-seed-protocol")?BR_TRANSPORT_PROTOCOL:
+            strstr(which,"-seed-policy")?BR_TRANSPORT_POLICY:
+            strstr(which,"-seed-payload")?BR_TRANSPORT_PAYLOAD_REJECTED:BR_TRANSPORT_NONE;
+        atomic_store(&t->terminal,seed);
+        if(cancel_final){controlled_payload_begin=2;cancel_payload_read=2;}
+        assert(esp_websocket_client_recv(c->ws)==((single||cancel_final)?ESP_FAIL:ESP_OK));
+        bridge_transport_terminal_t expected=single||(status_present&&(code<1000||code>=5000||code==1015))||
+            code==1002||code==1004||code==1005||code==1006||code==1010?BR_TRANSPORT_PROTOCOL:
+            seed!=BR_TRANSPORT_NONE?seed:
+            code==1007||code==1009?BR_TRANSPORT_PAYLOAD_REJECTED:
+            code==1003?BR_TRANSPORT_UNSUPPORTED:code==1000?BR_TRANSPORT_PEER_NORMAL:
+            code==1008?BR_TRANSPORT_POLICY:BR_TRANSPORT_NONE;
+        assert(atomic_load(&t->terminal)==(int)expected);
+        bridge_transport_terminal_t result=BR_TRANSPORT_POLICY;
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+1000000,&result));
+        assert(result==expected);
+        c->transport=NULL;c->transport_terminal=result;c->model.converse=true;
+        atomic_store(&c->exit_reason,BV_EXIT_DISCONNECTED);
+        char line[112]={0};
+        assert(converse_end(c,line,sizeof(line))==(result==BR_TRANSPORT_NONE?BV_END_RETRY:
+            result==BR_TRANSPORT_PEER_NORMAL?BV_END_OFF:BV_END_ERROR));
+        clean();if(app_slot){__asan_unpoison_memory_region(app_slot,app_size);free(app_slot);app_slot=NULL;}
+        printf("PASS RECEIVE %s: complete close and final-access result.\n",which);return 0;
+    }
     if(!strncmp(which,"ctrl-",5)){
         /* Real WS header/getters/recv/dispatch and actual wrapper throughout.
          * Only raw TCP/TLS read result/time/cancel are injected below it. */
@@ -696,12 +1217,15 @@ static int run_receive(const char *which){
             bool success=!strcmp(which,"ctrl-len1")||!strcmp(which,"ctrl-len125")||!strcmp(which,"ctrl-len0");
             if(success){
                 assert(result==ESP_OK&&payload_reads==n&&!atomic_load(&t->cancelled));
+                assert(atomic_load(&t->terminal)==BR_TRANSPORT_NONE&&!atomic_load(&t->data_lost)&&!t->ws_read_active);
                 assert(rx_at==rx_size&&receive_queue.n==0);check_one_pong(payload,n);
             }else{
                 fprintf(stderr,"CONTROL %s result=%d payload_reads=%u fake_us=%lld raw_consumed=%zu raw_remaining=%zu cancelled=%d\n",
                         which,result,payload_reads,(long long)(fake_clock?fake_now-1000000:0),
                         rx_at,rx_size-rx_at,atomic_load(&t->cancelled));
                 assert(result==ESP_FAIL);failed_control(t);
+                bool malformed=!strcmp(which,"ctrl-bad-fin")||!strcmp(which,"ctrl-bad-opcode")||!strcmp(which,"ctrl-oversize");
+                assert(atomic_load(&t->terminal)==(malformed?BR_TRANSPORT_PROTOCOL:BR_TRANSPORT_NONE));
                 if(fault_payload_read||eof||cancel_payload_read)assert(payload_reads==2);
                 if(zero_probe)assert(payload_reads==1&&rx_at==controlled_payload_begin+1);
                 if(caller_budget||hard_budget){
@@ -818,6 +1342,7 @@ static int run_receive(const char *which){
                 data_events,continuation_events,receive_queue.n,c->assembly.active,c->assembly.used,rx_size-rx_at);
         /* Valid RFC6455 terminal continuation MUST publish this message. */
         assert(receive_queue.n==1&&!c->assembly.active&&!atomic_load(&c->failed));
+        assert(!atomic_load(&t->data_lost)&&!atomic_load(&t->data_pending)&&!t->ws_read_active);
         consume_batch();assert(c->model.phase==BR_BEGINNING);
     }else{
         if(!strcmp(which,"rx-binary"))add_frame(2,true,g_started,strlen(g_started));
@@ -850,12 +1375,143 @@ static int run_receive(const char *which){
 }
 #endif
 
+static bridge_transport_t *start_target;
+static esp_err_t start_result;
+static atomic_bool fixture_stop;
+static atomic_uint fixture_stop_checks;
+static bool fixture_stop_check(void *context){
+    assert(context==&fixture_stop);atomic_fetch_add(&fixture_stop_checks,1);
+    return atomic_load(&fixture_stop);
+}
+static bool slow_stop_check(void *context){
+    (void)context;struct timespec pause={.tv_nsec=20000000};assert(!nanosleep(&pause,NULL));return false;
+}
+static unsigned delayed_stop_calls;
+static bool first_slow_stop_check(void *context){
+    (void)context;
+    if(!delayed_stop_calls++){struct timespec pause={.tv_nsec=20000000};assert(!nanosleep(&pause,NULL));}
+    return false;
+}
+static unsigned delayed_inner_check;
+static atomic_bool delayed_inner_reached;
+static bool budget_inner_stop_check(void *context){
+    assert(context==&fixture_stop);
+    unsigned call=atomic_fetch_add(&fixture_stop_checks,1)+1;
+    if(call==delayed_inner_check){
+        atomic_store(&delayed_inner_reached,true);atomic_fetch_add(&forced_clock,20000);
+    }
+    return false;
+}
+static void *start_entry(void *unused){
+    (void)unused;start_result=bridge_transport_start(start_target);return NULL;
+}
+static bridge_transport_t *connect_target;
+static int connect_result;
+static void *connect_entry(void *unused){
+    (void)unused;connect_result=esp_transport_connect(connect_target->ws,"192.168.1.50",9443,10000);
+    return NULL;
+}
+
 int main(int argc,char **argv){
     assert(argc==2);const char *which=argv[1];
 #ifdef BRIDGE_RECEIVE_TEST
     return run_receive(which);
 #endif
-    if(!strcmp(which,"key-create-fail")){
+    if(!strcmp(which,"hard-deadline-timer-start")){
+        /* No Stop/retry cutoff: only the absolute hard deadline expires while
+         * the actual timer-start seam is held. Zero means no start_by. */
+        atomic_store(&forced_clock,100000000);arm(G_TIMER_START);
+        start_target=bridge_transport_new(&cfg,synthetic_token,100100000);assert(start_target);
+        pthread_t starter;assert(!pthread_create(&starter,NULL,start_entry,NULL));await(G_TIMER_START);
+        assert(start_target->cutoff->active&&!atomic_load(&fixture_stop));
+        atomic_store(&forced_clock,100100000);release(G_TIMER_START);
+        assert(!pthread_join(starter,NULL));
+        fprintf(stderr,"hard-timer: result=%d task_create=%u raw_connect=%u\n",
+                start_result,atomic_load(&task_create_attempts),atomic_load(&connects));
+        assert(start_result==ESP_ERR_TIMEOUT&&atomic_load(&start_target->cancelled));
+        assert(!atomic_load(&task_create_attempts)&&!atomic_load(&connects));
+        finish_and_dispose(start_target);no_automatic_work(0);
+    }else if(!strcmp(which,"hard-deadline-timer-control")){
+        atomic_store(&forced_clock,100000000);
+        bridge_transport_t *t=bridge_transport_new(&cfg,synthetic_token,160000000);assert(t);
+        assert(bridge_transport_start_before(t,0)==ESP_OK);
+        assert(atomic_load(&task_create_attempts)==1);
+        finish_and_dispose(t);no_automatic_work(1);
+    }else if(!strcmp(which,"slow-inner-before-io-budget")||
+             !strcmp(which,"slow-inner-owned-budget")){
+        bool owned=!strcmp(which,"slow-inner-owned-budget");
+        atomic_store(&forced_clock,100000000);delayed_inner_check=owned?3:2;
+        bridge_transport_t *t=make();assert(t);
+        assert(bridge_transport_set_stop_check(t,budget_inner_stop_check,&fixture_stop));
+        int result=esp_transport_connect(t->ws,"192.168.1.50",9443,5);
+        fprintf(stderr,"slow-inner-%s: checks=%u result=%d raw_connect=%u\n",
+                owned?"owned":"before",atomic_load(&fixture_stop_checks),result,atomic_load(&connects));
+        /* The owned case makes one final stop check after releasing the no-I/O
+         * path; count may therefore exceed the index of the injected delay. */
+        assert(result<0&&atomic_load(&delayed_inner_reached)&&
+               atomic_load(&fixture_stop_checks)>=delayed_inner_check);
+        assert(!atomic_load(&connects)&&!atomic_load(&payload_sends));
+        finish_and_dispose(t);no_automatic_work(0);
+    }else if(!strcmp(which,"stop-inner-io-admission")){
+        connect_target=make();assert(connect_target);
+        assert(bridge_transport_set_stop_check(connect_target,fixture_stop_check,&fixture_stop));
+        assert(xSemaphoreTakeRecursive(connect_target->io,1)==pdTRUE);
+        atomic_store(&observe_io_contention,true);
+        pthread_t connector;assert(!pthread_create(&connector,NULL,connect_entry,NULL));
+        int64_t until=esp_timer_get_time()+5000000;
+        while(!atomic_load(&io_contended)){assert(esp_timer_get_time()<until);sched_yield();}
+        /* Both outer WS and inner pre-lock checks have passed, and another
+         * thread demonstrably owns the I/O lock. */
+        assert(atomic_load(&fixture_stop_checks)>=2&&!atomic_load(&connects));
+        atomic_store(&fixture_stop,true);atomic_store(&observe_io_contention,false);
+        assert(xSemaphoreGiveRecursive(connect_target->io)==pdTRUE);
+        assert(!pthread_join(connector,NULL));
+        fprintf(stderr,"inner-stop: checks=%u result=%d raw_connect=%u sends=%u\n",
+                atomic_load(&fixture_stop_checks),connect_result,atomic_load(&connects),atomic_load(&payload_sends));
+        assert(connect_result<0&&atomic_load(&fixture_stop_checks)>=3);
+        assert(!atomic_load(&connects)&&!atomic_load(&payload_sends));
+        finish_and_dispose(connect_target);no_automatic_work(0);
+    }else if(!strcmp(which,"inner-io-admission-control")){
+        bridge_transport_t *t=make();assert(t);
+        assert(bridge_transport_set_stop_check(t,fixture_stop_check,&fixture_stop));
+        assert(esp_transport_connect(t->ws,"192.168.1.50",9443,10000)==0);
+        assert(atomic_load(&fixture_stop_checks)>=3&&atomic_load(&connects)==1);
+        finish_and_dispose(t);no_automatic_work(1);
+    }else if(!strcmp(which,"cancel-during-timer-start")||!strcmp(which,"stop-during-timer-start")){
+        bool use_callback=!strcmp(which,"stop-during-timer-start");
+        arm(G_TIMER_START);start_target=make();assert(start_target);
+        if(use_callback)assert(bridge_transport_set_stop_check(start_target,fixture_stop_check,&fixture_stop));
+        pthread_t starter;assert(!pthread_create(&starter,NULL,start_entry,NULL));
+        await(G_TIMER_START);
+        if(use_callback)atomic_store(&fixture_stop,true);else bridge_transport_cancel(start_target);
+        release(G_TIMER_START);
+        assert(!pthread_join(starter,NULL));
+        fprintf(stderr,"timer-stop: result=%d SDK_task_create=%u connect=%u\n",
+                start_result,atomic_load(&task_create_attempts),atomic_load(&connects));
+        assert(start_result!=ESP_OK&&!atomic_load(&task_create_attempts)&&!atomic_load(&connects));
+        finish_and_dispose(start_target);no_automatic_work(0);
+    }else if(!strcmp(which,"stop-check-retry-deadline")){
+        bridge_transport_t *t=make();assert(t&&bridge_transport_set_stop_check(t,slow_stop_check,NULL));
+        int result=bridge_transport_start_before(t,esp_timer_get_time()+25000);
+        assert(result==ESP_ERR_TIMEOUT&&!atomic_load(&task_create_attempts)&&!atomic_load(&connects));
+        finish_and_dispose(t);no_automatic_work(0);
+    }else if(!strcmp(which,"stop-check-connect-budget")){
+        bridge_transport_t *t=make();assert(t&&bridge_transport_set_stop_check(t,slow_stop_check,NULL));
+        assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5)<0);
+        assert(!atomic_load(&connects));finish_and_dispose(t);no_automatic_work(0);
+    }else if(!strcmp(which,"stop-check-first-connect-budget")){
+        bridge_transport_t *t=make();assert(t&&bridge_transport_set_stop_check(t,first_slow_stop_check,NULL));
+        assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5)<0);
+        fprintf(stderr,"first-check-budget: callbacks=%u connects=%u\n",delayed_stop_calls,atomic_load(&connects));
+        assert(!atomic_load(&connects));finish_and_dispose(t);no_automatic_work(0);
+    }else if(!strcmp(which,"stop-before-connect")){
+        early_exit=false;arm(G_BEGIN);
+        bridge_transport_t *t=make();assert(t&&bridge_transport_set_stop_check(t,fixture_stop_check,&fixture_stop));
+        assert(bridge_transport_start(t)==ESP_OK);await(G_BEGIN);
+        atomic_store(&fixture_stop,true);release(G_BEGIN);wait_finishing(t);
+        assert(atomic_load(&task_create_attempts)==1&&!atomic_load(&connects));
+        finish_and_dispose(t);no_automatic_work(0);
+    }else if(!strcmp(which,"key-create-fail")){
         fail_key=true;assert(!make()&&!atomic_load(&chain)&&!app_slot);no_automatic_work(0);
     }else if(!strcmp(which,"timer-start-fail")||!strcmp(which,"task-create-fail")){
         fail_timer_start=!strcmp(which,"timer-start-fail");fail_create=!fail_timer_start;
@@ -869,6 +1525,24 @@ int main(int argc,char **argv){
         assert(atomic_load(&t->task_exited)==fail_self_destroy);
         assert(atomic_load(&clients_live)==(fail_self_destroy?1U:0U));
         no_automatic_work(fail_setspecific?0:1);
+    }else if(!strcmp(which,"abandoned-ingress")||!strcmp(which,"abandoned-close")||!strcmp(which,"abandoned-empty")){
+        /* Fixture-injected final parser record: prove no decision/free before
+         * the actual SDK task destructor, then classify only positive ingress.
+         * This does not pretend the SDK task actually exited in its parser. */
+        arm(G_DESTRUCTOR);
+        bridge_transport_t *t=make();assert(t&&bridge_transport_start(t)==ESP_OK);wait_finishing(t);
+        portENTER_CRITICAL(&cutoff_mux);
+        t->ws_read_active=true;t->ws_read_task=xTaskGetCurrentTaskHandle();
+        t->ws_read_ingress=!strcmp(which,"abandoned-ingress");
+        t->ws_close_incomplete=!strcmp(which,"abandoned-close");
+        portEXIT_CRITICAL(&cutoff_mux);
+        bridge_transport_terminal_t outcome=BR_TRANSPORT_POLICY;
+        assert(!bridge_transport_dispose_result(t,esp_timer_get_time()+20000,&outcome));
+        assert(outcome==BR_TRANSPORT_POLICY);await(G_DESTRUCTOR);assert_retained(t);
+        release(G_DESTRUCTOR);join_worker();
+        assert(bridge_transport_dispose_result(t,esp_timer_get_time()+3000000,&outcome));
+        assert(outcome==(!strcmp(which,"abandoned-empty")?BR_TRANSPORT_NONE:BR_TRANSPORT_EVENT_LOSS));
+        clean();no_automatic_work(1);
     }else if(!strcmp(which,"finish-stopped-destructor")){
         arm(G_STOPPED);arm(G_DESTRUCTOR);
         bridge_transport_t *t=make();assert(t&&bridge_transport_start(t)==ESP_OK);wait_finishing(t);

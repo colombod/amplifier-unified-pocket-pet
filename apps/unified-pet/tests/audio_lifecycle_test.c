@@ -45,10 +45,18 @@ static bool fail_create;
 static atomic_int owner;
 static unsigned release_after_delete;
 static bool cleanup_error;
+static atomic_bool pause_bridge_reap,bridge_reap_entered,bridge_reap_release;
+static atomic_uint bridge_reap_count;
 /* Adapter lifecycle seams only; actual bridge bodies have their own native suite. */
 static void bridge_voice_stop(void){}
 static void bridge_voice_init(void){}
-static void bridge_voice_reap_finished(void){assert(!held);}
+static void bridge_voice_reap_finished(void){
+    assert(!held);atomic_fetch_add(&bridge_reap_count,1);
+    if(atomic_load(&pause_bridge_reap)){
+        atomic_store(&bridge_reap_entered,true);
+        while(!atomic_load(&bridge_reap_release))sched_yield();
+    }
+}
 static bool bridge_voice_restart_required(void){return false;}
 void audio_stream_prepare(void){}
 /* Hardware monotonic clock boundary only; production Start computes its own
@@ -263,10 +271,26 @@ static void *concurrent_request(void *arg) {
 static void release_tailnet(void) {
     assert(atomic_load(&owner)==1);atomic_store(&owner,0);
 }
+static atomic_bool gate_stop_ready,gate_stop_done;
+static void *gate_stop_actor(void *unused){
+    (void)unused;atomic_store(&gate_stop_ready,true);live_voice_stop();
+    atomic_store(&gate_stop_done,true);return NULL;
+}
 int main(void) {
     (void)eTaskGetState;(void)vTaskDelete;(void)vTaskSuspend;
     (void)xQueueCreate;(void)xQueueReceive;(void)audio_worker;(void)voice_worker;
     audio_tests_init();live_voice_init();t_lock=xSemaphoreCreateMutex();t_jobs=(void *)1;
+    /* Real parent status mutex and production begin/end/Stop bodies:
+     * whichever wins the mutex is the admission linearization point. */
+    assert(live_voice_bridge_audio_begin());
+    pthread_t stopper;assert(!pthread_create(&stopper,NULL,gate_stop_actor,NULL));
+    while(!atomic_load(&gate_stop_ready))sched_yield();
+    assert(!atomic_load(&stop_requested)&&!atomic_load(&gate_stop_done));
+    live_voice_bridge_audio_end();assert(!pthread_join(stopper,NULL));
+    assert(atomic_load(&stop_requested)&&atomic_load(&gate_stop_done));
+    assert(!live_voice_bridge_audio_begin()); /* Stop already won */
+    atomic_store(&stop_requested,false);
+    passed("bridge-audio-gate-stop-single-arbitration");
     /* Expected RED on old code: init allocates both idle workers. */
     assert(atomic_load(&creates)==0);
     assert(!a_task&&!v_task&&!a_status.busy&&!v_status.active&&a_status.volume==61);
@@ -334,6 +358,19 @@ int main(void) {
     assert(tailnet_spike_audio_acquire());assert(!v_task&&!v_status.active&&v_status.state==LIVE_ERROR);
     assert(!strcmp(v_status.message,"session error retained"));tailnet_spike_audio_release();
     passed("voice-error-preserved-next-audio-reaps");
+    /* Force overlap during the unlocked bridge-reap interval; second caller
+     * must not dispose, delete a task or release another owner's admission. */
+    prepare_job();live_voice_start();complete_to_running(false);
+    task=v_task;atomic_store(&allow_suspend,true);wait_state(task,eSuspended);
+    unsigned before_reap=atomic_load(&bridge_reap_count),before_delete=atomic_load(&deletes),before_release=release_after_delete;
+    atomic_store(&bridge_reap_entered,false);atomic_store(&bridge_reap_release,false);atomic_store(&pause_bridge_reap,true);
+    pthread_t first;assert(!pthread_create(&first,NULL,reap_both,NULL));
+    while(!atomic_load(&bridge_reap_entered))sched_yield();
+    reap_both(NULL);
+    assert(atomic_load(&bridge_reap_count)==before_reap+1&&atomic_load(&deletes)==before_delete&&atomic_load(&owner)==2);
+    atomic_store(&bridge_reap_release,true);assert(!pthread_join(first,NULL));atomic_store(&pause_bridge_reap,false);
+    assert(atomic_load(&deletes)==before_delete+1&&release_after_delete==before_release+1&&!v_task&&!v_status.active&&atomic_load(&owner)==0);
+    passed("overlapping-bridge-reapers-single-owner");
     for(unsigned repeat=0;repeat<3;repeat++) {
         prepare_job();unsigned count=atomic_load(&sessions),d=atomic_load(&deletes);
         live_voice_start();assert(v_task&&!a_task);

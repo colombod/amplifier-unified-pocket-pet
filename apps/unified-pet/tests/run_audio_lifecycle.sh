@@ -38,7 +38,8 @@ def extract(path, names):
 for module, names in [
     ("audio_test", ["update", "audio_test_snapshot", "audio_test_set_volume",
                     "worker", "audio_test_request", "audio_tests_init", "audio_test_reap_finished"]),
-    ("live_voice", ["set_state", "live_voice_snapshot", "worker", "live_voice_start",
+    ("live_voice", ["set_state", "live_voice_snapshot", "session_stop_locked",
+                    "live_voice_bridge_audio_begin", "live_voice_bridge_audio_end", "worker", "live_voice_start",
                     "live_voice_stop", "live_voice_init", "live_voice_reap_finished"]),
 ]:
     path = Path("main") / f"{module}.c"

@@ -26,12 +26,15 @@ static unsigned clock_step_us;
 static unsigned connects,auth_writes,raw_writes,polls,client_starts,client_destroys,closes;
 static unsigned raw_reads,nested_read_polls,nested_write_polls,error_handle_reads,socket_reads;
 static unsigned task=1,live_locks,takes,gives,max_depth,nonrecursive_rejections,contended_takes;
+void *xTaskGetCurrentTaskHandle(void){return (void*)(uintptr_t)task;}
 static unsigned shutdowns,delays,schedule_tx,max_idle_poll_ms;
 static unsigned cancel_give_depth,cancel_give_fired;
 static int fixture_fd=12345; /* synthetic identifier; NEVER a host descriptor */
 static int64_t release_lock_at;
 static int64_t cancel_lock_at,expected_operation_deadline;
 static int64_t scheduled_tx_at;
+static bridge_transport_t *control_probe_target;
+static bool probe_control_during_tls,control_probe_denied;
 static bool start_tx_on_delay,cancel_after_ready,close_after_ready,idle_read_only,immediate_zero;
 static int write_script[4];static size_t write_script_len,write_script_at;
 static const char *expected_write_base;
@@ -53,12 +56,14 @@ static void check_io_owner(unsigned depth);
 static void check_socket_owner(void);
 static void check_exclusion(void);
 static int status=101;static bool fail_write,fail_connect,cancel_during_connect,location=true;
+static const char *gateway_refusal;
 static char redirect[256],response[2048],cn[64];static size_t response_at;
 static bool muted_ws,muted_client,muted_base,bundle;
 static unsigned leaked_logs;
 static const char *T="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 /* Opt-in synthetic select/TLS-byte seam for the named WS contract cases.
- * The original 32-I/O/110-HTTP meanings are retained; SHRINK now targets the
+ * The original 32-I/O/110-HTTP meanings are retained (HTTP is now 150 with
+ * 403/409/429/503 added for the reported upgrade status); SHRINK now targets the
  * caller D and exclusion probes use zero-wait (documented in the handoff).
  * There is no
  * fixture retry loop around WS send/read: each operation calls the real SDK
@@ -137,6 +142,11 @@ typedef struct transport_esp_tls{
 }transport_esp_tls_t;
 ssize_t esp_tls_conn_read(esp_tls_t*tls,void*buffer,size_t n){
     assert(tls&&tls->transport);check_io_owner(1);raw_reads++;
+    if(probe_control_during_tls){
+        probe_control_during_tls=false;
+        task=2;control_probe_denied=!bridge_transport_admit_control(control_probe_target,now+1000);task=1;
+        assert(control_probe_denied); /* the other task cannot pass the held io */
+    }
     if(probe_exclusion)check_exclusion();
     if(wire_enabled){
         assert(wire_stall==WIRE_RX_HEADER&&now>=wire_read_ready&&wire_rx_at<wire_rx_len);
@@ -190,6 +200,12 @@ ssize_t esp_tls_conn_write(esp_tls_t*tls,const void*buffer,size_t n){
         unsigned char sha[20],accept[64];size_t written;
         assert(!mbedtls_sha1((unsigned char*)key,strlen(key),sha));assert(!mbedtls_base64_encode(accept,sizeof(accept),&written,sha,sizeof(sha)));accept[written]=0;
         snprintf(response,sizeof(response),"HTTP/1.1 %d Fixture\r\nSec-WebSocket-Accept: %s\r\n%s%s%s\r\n",status,accept,location?"Location: ":"",location?redirect:"",location?"\r\n":"");response_at=0;
+        /* The gateway's own refusal (reject_response in bridge/pet_bridge/
+         * gateway_server.py): a fixed JSON body, Connection: close, and no
+         * Sec-WebSocket-Accept or Location header at all. */
+        if(gateway_refusal)snprintf(response,sizeof(response),"HTTP/1.1 %d %s\r\nContent-Type: application/json; charset=utf-8\r\n"
+            "Connection: close\r\nContent-Length: %u\r\n\r\n{\"error\":\"%s\"}",status,gateway_refusal,
+            (unsigned)strlen(gateway_refusal)+12,gateway_refusal);
     }
     return fail_write?-1:tls_write_result!=INT_MAX?tls_write_result:(ssize_t)n;
 }
@@ -364,7 +380,7 @@ static void reset(void){
     takes=gives=max_depth=nonrecursive_rejections=contended_takes=0;
     tls_read_result=tls_write_result=INT_MAX;base_poll_result=1;last_poll_ms=-1;
     probe_exclusion=false;exclusion_probes=0;lock_action=LOCK_NONE;action_depth=actions_fired=0;
-    status=101;fail_write=fail_connect=cancel_during_connect=false;location=true;
+    status=101;fail_write=fail_connect=cancel_during_connect=false;location=true;gateway_refusal=NULL;
     strcpy(redirect,"https://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@example.net/evil");
     muted_ws=muted_client=muted_base=bundle=false;response_at=0;response[0]=cn[0]=0;
     wire_enabled=wire_cancel_fired=false;wire_cancel_at=0;wire_polls=0;
@@ -579,8 +595,12 @@ static int run_wire_case(const struct wire_case*c){
             assert(!memcmp(received,first_payload,sizeof(first_payload)));
             assert(esp_transport_ws_get_read_opcode(t->ws)==WS_TRANSPORT_OPCODES_BINARY);
             assert(esp_transport_ws_get_read_payload_len(t->ws)==(int)sizeof(first_payload));
+            /* Transport-only fixture explicitly represents the SDK DATA
+             * callback before issuing its next read. */
+            bridge_transport_data_delivered(t);
             memset(received,0,sizeof(received));
             assert(esp_transport_read(t->ws,received,sizeof(received),c->budget)==(int)sizeof(second_payload));
+            bridge_transport_data_delivered(t);
             assert(!memcmp(received,second_payload,sizeof(second_payload)));
             assert(wire_rx_at==wire_rx_len&&!wire_tx_len);
         }else{
@@ -628,8 +648,27 @@ static const char *const extra_cases[]={
     "immediate-zero-progress","subtick-lock-budget",
     "zero-probe-clock-progress",
     "cancel-final-release","cancel-nested-release","cancel-release-invalidfd",
-    "nested-short-request",
+    "nested-short-request","ws-observation-isolation",
 };
+static unsigned observation_mode;
+static int fixture_observed_ws_read(esp_transport_handle_t ws,char *b,int n,int ms){
+    bridge_transport_t *t=atomic_load(&chain);
+    assert(t&&ws==t->ws&&n>0&&ms>0&&task==1);
+    if(observation_mode>=3){
+        if(observation_mode==3){control_probe_target=t;probe_control_during_tls=true;}
+        assert(esp_transport_read(t->ssl,b,n,1000)==1);
+        task=2;assert(bridge_transport_admit_control(t,now+1000));task=1;
+        return 1;
+    }
+    /* Another task's write during an active parser is not ingress. A foreign
+     * plaintext read of the same socket is different: it steals input and
+     * must fail closed, not be attributed to the parser or ignored. */
+    task=2;assert(esp_transport_write(t->ssl,"START",5,1000)==5);
+    if(observation_mode==1)assert(esp_transport_read(t->ssl,b,n,1000)==1);
+    task=1;
+    if(observation_mode==2)assert(esp_transport_read(t->ssl,b,n,1000)==1);
+    return -1;
+}
 static int guarded_operation(bridge_transport_t*t,unsigned op,int ms){
     struct{uint64_t head;char bytes[8];uint64_t tail;} b={
         .head=UINT64_C(0x1020304050607080),.tail=UINT64_C(0x8070605040302010)};
@@ -812,6 +851,33 @@ static int run_extra_case(size_t which){
             t->operation_deadline=0;give_io(t);
             assert_unlocked(t);fixture_power_cycle(t);
         }
+    }else if(which==23){
+        for(observation_mode=0;observation_mode<3;observation_mode++){
+            t=new_fixture();t->ws_read=fixture_observed_ws_read;
+            char data[8];
+            assert(complete_control_read(t->ws,data,sizeof(data),1000)<0);
+            assert(!t->ws_read_active&&!t->ws_read_ingress&&!t->ws_read_stalled);
+            assert(atomic_load(&t->data_lost)==(observation_mode!=0));
+            assert(atomic_load(&t->cancelled)==(observation_mode!=0));
+            assert(raw_writes==1&&raw_reads==(observation_mode?1U:0U));
+            bridge_transport_terminal_t outcome=BR_TRANSPORT_PROTOCOL;
+            assert_unlocked(t);assert(bridge_transport_dispose_result(t,now,&outcome));
+            assert(outcome==(observation_mode?BR_TRANSPORT_EVENT_LOSS:BR_TRANSPORT_NONE));
+            assert(!atomic_load(&chain)&&!live_locks&&takes==gives);
+        }
+        /* Parser ingress and control admission are ordered even if the
+         * latter races after the TLS read returned but before observation. */
+        for(observation_mode=3;observation_mode<=4;observation_mode++){
+            t=new_fixture();t->ws_read=fixture_observed_ws_read;
+            if(observation_mode==4)assert(bridge_transport_admit_control(t,now+1000));
+            char data[8];ws_read_observation_t observed={0};
+            assert(observed_ws_read(t,t->ws,data,sizeof(data),1000,&observed)==1);
+            assert(observed.ingress&&observed.after_control==(observation_mode==4));
+            assert(t->local_control_admitted&&!t->ws_read_active);
+            if(observation_mode==3)assert(control_probe_denied&&!probe_control_during_tls);
+            control_probe_target=NULL;control_probe_denied=false;
+            assert_unlocked(t);fixture_power_cycle(t);
+        }
     }else{
         assert(which==14||which==15);
         const int scripts[][2]={{3,3},{3,0},{3,-123},{0,0},{-123,0},{7,0}};
@@ -861,7 +927,7 @@ int main(int argc,char**argv){
     if(argc>2){fprintf(stderr,"Usage: %s [legacy|CASE]\n",argv[0]);return 2;}
     unsigned io_cases=sdk_io_regressions();
     unsigned cases=0;
-    const int statuses[]={101,200,300,301,302,303,304,307,308,399,401};
+    const int statuses[]={101,200,300,301,302,303,304,307,308,399,401,403,409,429,503};
     const char *dest[]={"/relative","https://pet.example.net/x","https://foreign.example/x","http://192.168.1.50/x","https://user:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@foreign.example/x"};
     for(size_t i=0;i<sizeof(statuses)/sizeof(*statuses);i++)for(unsigned no=0;no<2;no++)for(size_t d=0;d<sizeof(dest)/sizeof(*dest);d++){
         reset();status=statuses[i];location=!no;strcpy(redirect,dest[d]);bridge_transport_t*t=bridge_transport_new(&cfg,T,61000000);assert(t);
@@ -869,14 +935,49 @@ int main(int argc,char**argv){
         int r=esp_transport_connect(t->ws,"192.168.1.50",9443,5000);
         assert((r==0)==(status==101));assert(connects==1&&auth_writes==1);
         assert(bridge_transport_upgraded(t)==(status==101));
+        /* The host's answer is reported as a number, whatever it was; a
+         * second, refused connect neither repeats the request nor changes it. */
+        assert(bridge_transport_http_status(t)==status);
         assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0&&connects==1);
+        assert(bridge_transport_http_status(t)==status);
         assert(esp_transport_connect_async(t->ssl,"192.168.1.50",9443,100)<0&&connects==1);
         fixture_power_cycle(t);cases++;
     }
+    /* Byte-shaped refusals: the device learns the number (busy 409 is retried
+     * by the caller, 401 is not), and the one connection attempt is spent.
+     * 423/uncertain_unresolved is compatibility input only: the gateway fence
+     * semantics are not frozen, so this does not ratify a product meaning. */
+    static const struct {int status;const char *code;} refusals[]={{409,"busy"},{401,"unauthorized"},
+        {429,"rate_limited"},{404,"not_found"},{400,"bad_request"},{421,"misdirected"},{405,"method_not_allowed"},
+        {423,"uncertain_unresolved"}};
+    unsigned refused=0;
+    for(size_t i=0;i<sizeof(refusals)/sizeof(*refusals);i++){
+        reset();status=refusals[i].status;gateway_refusal=refusals[i].code;
+        bridge_transport_t*r=bridge_transport_new(&cfg,T,61000000);assert(r);
+        assert(bridge_transport_http_status(r)==0);
+        assert(esp_transport_connect(r->ws,"192.168.1.50",9443,5000)<0&&connects==1&&auth_writes==1);
+        assert(!bridge_transport_upgraded(r)&&bridge_transport_http_status(r)==refusals[i].status);
+        if(status==423){
+            /* Real HTTP bytes reach the pinned SDK HTTP/WS parser, not an
+             * injected status getter. No upgrade or redirect headers exist. */
+            assert(!strcmp(response,"HTTP/1.1 423 uncertain_unresolved\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n"
+                "Connection: close\r\nContent-Length: 32\r\n\r\n"
+                "{\"error\":\"uncertain_unresolved\"}"));
+            assert(!strstr(response,"Sec-WebSocket-Accept:")&&!strstr(response,"Location:"));
+        }
+        assert(esp_transport_connect(r->ws,"192.168.1.50",9443,5000)<0&&connects==1&&auth_writes==1);
+        assert(esp_transport_connect_async(r->ssl,"192.168.1.50",9443,100)<0&&connects==1&&auth_writes==1);
+        assert(!bridge_transport_upgraded(r)&&bridge_transport_http_status(r)==refusals[i].status&&leaked_logs==0);
+        fixture_power_cycle(r);refused++;
+    }
+    assert(refused==8);
     reset();bridge_transport_t*t=bridge_transport_new(&cfg,T,61000000);assert(t);
     assert(esp_transport_connect(t->ws,"foreign.example",9443,5000)<0&&connects==0);
     assert(esp_transport_connect(t->ws,"192.168.1.50",9444,5000)<0&&connects==0);
+    assert(bridge_transport_http_status(t)==0&&bridge_transport_http_status(NULL)==0);
     fail_connect=true;assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0&&connects==1&&auth_writes==0);
+    assert(bridge_transport_http_status(t)==0); /* no answer was read: unreachable, not refused */
     fail_connect=false;assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0&&connects==1);fixture_power_cycle(t);
     reset();t=bridge_transport_new(&cfg,T,61000000);assert(t);fail_write=true;
     assert(esp_transport_connect(t->ws,"192.168.1.50",9443,5000)<0);assert(leaked_logs==0);fixture_power_cycle(t);
@@ -893,6 +994,6 @@ int main(int argc,char**argv){
     destroyed=client_destroys;bridge_transport_dispose_unstarted(t);
     assert(client_destroys==destroyed&&atomic_load(&chain)==t&&live_locks==1);
     assert(!bridge_transport_new(&cfg,T,121000000));fixture_power_cycle(t);
-    assert(cases==110&&leaked_logs==0);
-    printf("PASS exact SDK transport+WS/SSL-I/O/adapter: %u SDK-I/O cases + %u HTTP/Location cases + literal fence/failure burn/async denial/cancel-upgrade/deadline-I/O/retention/log canaries. Complete client-task, scheduler timing and real TLS NOT tested.\n",io_cases,cases);
+    assert(cases==150&&leaked_logs==0);
+    printf("PASS exact SDK transport+WS/SSL-I/O/adapter: %u SDK-I/O cases + %u HTTP/Location cases + %u byte-shaped refusals + literal fence/failure burn/async denial/cancel-upgrade/deadline-I/O/retention/log canaries. Complete client-task, scheduler timing and real TLS NOT tested.\n",io_cases,cases,refused);
 }

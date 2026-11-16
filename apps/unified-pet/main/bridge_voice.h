@@ -5,7 +5,11 @@
 #include "bridge_protocol.h"
 /* Adapter invoked only inside the existing explicit-Talk live worker. */
 void bridge_voice_init(void);
-void bridge_voice_run(const setup_bridge_t *cfg,int64_t absolute_deadline_us,bool (*parent_stopped)(void));
+/* One mic-on. first_deadline_us bounds the first call; a call re-established
+ * after a lost connection is bounded by call_limit_us from its own start.
+ * Returns when the mic-on is over: the user's mic off, an ordinary or
+ * non-retryable end, or the reconnect budget running out. */
+void bridge_voice_run(const setup_bridge_t *cfg,int64_t first_deadline_us,int64_t call_limit_us,bool (*parent_stopped)(void));
 /* Mic off. Ends the pet's call only; Unified work already asked for continues. */
 void bridge_voice_stop(void);
 bool bridge_voice_snapshot(bridge_view_t *view);

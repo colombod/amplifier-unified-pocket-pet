@@ -38,7 +38,9 @@
 #define VOICE_SESSION_LIMIT_MS 60000
 /* A host-bridge conversation may run for the host's 600 s limit. The host ends
  * it there; this later local cutoff (startup allowance included) is only the
- * backstop for a host that never closes. Same accepted-Start origin. */
+ * backstop for a host that never closes. The first call counts from the
+ * accepted Start; a call re-established after a lost connection gets the same
+ * allowance from its own start, so the bridge owns these deadlines. */
 #define BRIDGE_SESSION_LIMIT_MS 660000
 #define PLAYBACK_START_MS 320
 #define PLAYBACK_START_BYTES (48000*PLAYBACK_START_MS/1000)
@@ -47,6 +49,8 @@ static SemaphoreHandle_t status_lock;
 static TaskHandle_t worker_task;
 static bool worker_finished;
 static live_status_t status;
+static live_status_t bridge_pending;
+static bool bridge_reaping,bridge_pending_valid;
 static atomic_bool stop_requested;
 /* Admission cutoff from the accepted user Start, not connection/audio readiness.
  * Protected by status_lock; lifetime remains owned until finished-worker reap. */
@@ -86,7 +90,12 @@ typedef struct {
 static void set_state(live_state_t state,const char *message) {
  xSemaphoreTake(status_lock,portMAX_DELAY);
  /* A concurrent audio iteration must not erase an error from the WS callback. */
- if(status.active && status.state==LIVE_ERROR && state!=LIVE_ERROR){xSemaphoreGive(status_lock);return;}
+ if(status.active && status.state==LIVE_ERROR && state!=LIVE_ERROR){
+  /* A completed retained bridge cleanup must publish after the worker has
+   * actually been deleted, without letting ordinary audio mask an error. */
+  if(bridge_reaping){bridge_pending.state=state;strlcpy(bridge_pending.message,message,sizeof(bridge_pending.message));bridge_pending_valid=true;}
+  xSemaphoreGive(status_lock);return;
+ }
  bool changed=status.state!=state || strcmp(status.message,message);
  status.state=state;strlcpy(status.message,message,sizeof(status.message));
  xSemaphoreGive(status_lock);
@@ -105,6 +114,17 @@ static bool session_stop(void) {
  xSemaphoreGive(status_lock);
  return stopped;
 }
+/* The bridge clears session_deadline_us before entering its per-call loop.
+ * The atomic mic-off latch is therefore the only parent Stop condition here;
+ * bridge_voice itself enforces each call's deadline. This callback must not
+ * wait on status_lock while the transport owns its I/O mutex. */
+static bool bridge_session_stop(void) {return atomic_load(&stop_requested);}
+bool live_voice_bridge_audio_begin(void) {
+ xSemaphoreTake(status_lock,portMAX_DELAY);
+ if(session_stop_locked()){xSemaphoreGive(status_lock);return false;}
+ return true;
+}
+void live_voice_bridge_audio_end(void) {xSemaphoreGive(status_lock);}
 static void pipeline_fail(live_connection_t *c,unsigned stage,const char *message) {
  /* Failure, Stop and append admission share one short arbitration section.
   * The winning UI publication is outside it; transport never holds this lock. */
@@ -288,7 +308,8 @@ static void run_session(void) {
   /* Mic turned off before the call began: say so, never leave "connecting". */
   if(session_stop()){set_state(LIVE_OFF,"Mic off");return;}
   xSemaphoreTake(status_lock,portMAX_DELAY);
-  int64_t bridge_deadline=session_deadline_us+=(int64_t)(BRIDGE_SESSION_LIMIT_MS-VOICE_SESSION_LIMIT_MS)*1000;
+  int64_t bridge_deadline=session_deadline_us+(int64_t)(BRIDGE_SESSION_LIMIT_MS-VOICE_SESSION_LIMIT_MS)*1000;
+  session_deadline_us=0; /* per-call deadlines below; mic off still stops everything */
   xSemaphoreGive(status_lock);
   /* Match the working standalone streaming path: modem sleep adds avoidable
    * latency while the bounded microphone queue is being drained over TLS. */
@@ -297,7 +318,7 @@ static void run_session(void) {
   bool restore_ps=saved_ps!=WIFI_PS_NONE;
   if(restore_ps&&esp_wifi_set_ps(WIFI_PS_NONE)!=ESP_OK){set_state(LIVE_ERROR,"Cannot enable low-latency Wi-Fi for bridge.");return;}
   if(!synchronize_clock())set_state(session_stop()?LIVE_OFF:LIVE_ERROR,session_stop()?"Mic off":"Clock sync failed. Check internet access.");
-  else if(!session_stop())bridge_voice_run(&bridge_cfg,bridge_deadline,session_stop);
+  else if(!session_stop())bridge_voice_run(&bridge_cfg,bridge_deadline,(int64_t)BRIDGE_SESSION_LIMIT_MS*1000,bridge_session_stop);
   else set_state(LIVE_OFF,"Mic off");
   if(restore_ps&&esp_wifi_set_ps(saved_ps)!=ESP_OK)ESP_LOGI(TAG,"Cannot restore Wi-Fi power save after bridge.");
   return; /* no direct key, greeting or fallback on ANY bridge outcome */
@@ -468,18 +489,29 @@ static void worker(void *arg) {
 void live_voice_reap_finished(void) {
  if(!status_lock)return;
  xSemaphoreTake(status_lock,portMAX_DELAY);
- if(worker_finished&&worker_task&&eTaskGetState(worker_task)==eSuspended) {
+ if(!bridge_reaping&&worker_finished&&worker_task&&eTaskGetState(worker_task)==eSuspended) {
   /* A late callback/task may finish after the owner's bounded proof wait.
    * Reap local storage only; never reconnect or replay an accepted input. */
+  bridge_reaping=true;bridge_pending_valid=false;
+  TaskHandle_t finished_task=worker_task;
   xSemaphoreGive(status_lock);
   bridge_voice_reap_finished();
   xSemaphoreTake(status_lock,portMAX_DELAY);
+  bridge_reaping=false;
+  if(worker_task!=finished_task||!worker_finished){
+   bridge_pending_valid=false;xSemaphoreGive(status_lock);return;
+  }
   if(bridge_voice_restart_required()){
+   bridge_pending_valid=false;
    status.active=false; /* retain worker/admission and every quarantined resource */
    xSemaphoreGive(status_lock);return;
   }
   vTaskDelete(worker_task);
   worker_task=NULL;worker_finished=false;status.active=false;
+  if(bridge_pending_valid){
+   status.state=bridge_pending.state;strlcpy(status.message,bridge_pending.message,sizeof(status.message));
+   bridge_pending_valid=false;
+  }
   session_deadline_us=0;
   tailnet_spike_audio_release();
  }

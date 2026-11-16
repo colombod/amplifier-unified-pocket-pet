@@ -2,7 +2,7 @@
 
 Run ONLY inside the parent's authorized, offline pinned SDK container:
   python3 tests/run_bridge_transport_native.py /tmp/bridge-transport-red [CASE]
-Default CASE=legacy retains the original 32-I/O + 110-HTTP suite. Named cases:
+Default CASE=legacy retains the original 32-I/O + HTTP suite (150 HTTP cases). Named cases:
   tx-ready60, tx-payload-stall60, tx-partial-stall60, rx-header-gap60
     Positive contracts (old 50ms-clamped adapter was RED). Run EACH as a
     separate process; do not let one assertion hide another. After one compile:
@@ -43,7 +43,7 @@ case_names=(
     'immediate-zero-progress','subtick-lock-budget',
     'zero-probe-clock-progress',
     'cancel-final-release','cancel-nested-release','cancel-release-invalidfd',
-    'nested-short-request','lifecycle','receive',
+    'nested-short-request','ws-observation-isolation','lifecycle','receive',
 )
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('output',type=Path)
@@ -188,6 +188,8 @@ typedef pthread_mutex_t portMUX_TYPE;
 ''',
 'freertos/task.h':'''#pragma once
 #include "freertos/FreeRTOS.h"
+typedef void *TaskHandle_t;
+TaskHandle_t xTaskGetCurrentTaskHandle(void);
 void vTaskDelay(TickType_t);
 ''',
 'freertos/semphr.h':'''#pragma once
@@ -297,6 +299,17 @@ if args.case in ('lifecycle','receive'):
     },indent=2)+'\n')
     files.extend([*proof_pins,types,lifecycle,Path('tests/bridge_lifecycle_test.c')])
     if args.case=='receive':
+        event_source=sdk/'components/esp_event/esp_event.c'
+        event_bytes=event_source.read_bytes()
+        if hashlib.sha256(event_bytes).hexdigest()!='30b9d6bf74d47ee2c2a5015866b3d01c1a04be404b2952f75108864c03cd8016':
+            raise SystemExit('Pinned IDF event source mismatch')
+        event_text=event_bytes.decode('utf-8')
+        signature='esp_err_t esp_event_post_to('
+        assert event_text.count(signature)==1
+        start=event_text.index(signature);end=event_text.index('\n}\n',start)+3
+        event_post=inc/'pinned_event_post.inc'
+        event_post.write_text(licence+f'#line {event_text[:start].count(chr(10))+1} {json.dumps(str(event_source))}\n'+event_text[start:end])
+        files.extend([event_source,event_post])
         header=client_source.parent/'include/esp_websocket_client.h'
         if hashlib.sha256(header.read_bytes()).hexdigest()!='9c318f1280aec39a2ce050f0d2450d45198bed8158761256829ba6478b930a5e':
             raise SystemExit('Pinned client event ABI header mismatch')
@@ -316,19 +329,20 @@ if args.case in ('lifecycle','receive'):
                              'sha256':hashlib.sha256(body.encode()).hexdigest()})
             return f'#line {v[:a].count(chr(10))+1} "main/bridge_voice.c"\n'+body
         chunks=[section('context',v.index('#define BV_MIC'),v.index('static bool take('))]
-        for name in ('take','give','quiet','note_exit','stopping','callback_failed',
-                     'failure','ws_event','transport_lost','send_frame_timed',
-                     'send_frame','send_action','pace_sent_audio','append_audio','finish_capture'):
+        for name in ('take','give','quiet','health_end','note_exit','stopping','exit_status','callback_failed','protocol_failed',
+                     'failure','ws_event','transport_lost','observe_converse_send','converse_end','retry_left','send_frame_timed',
+                     'send_frame','send_action','pace_sent_audio','append_audio','finish_capture',
+                     'cleanup_unconfirmed','converse_tail'):
             import re
-            matches=list(re.finditer(r'^static (?:bool|void) '+name+r'\(',v,re.M))
+            matches=list(re.finditer(r'^static (?:bool|void|unsigned|const char\s*\*)\s*'+name+r'\(',v,re.M))
             if len(matches)!=1:raise SystemExit(f'App extraction anchor mismatch: {name}')
             a=matches[0].start();b=v.index('\n}\n',a)+3 if name not in ('take','give') else v.index('\n',a)
             chunks.append(section(name,a,b))
-        a=v.index('if(xQueueReceive(c->frames,&message,pdMS_TO_TICKS(5))==pdTRUE){')
+        a=v.index('if(xQueueReceive(c->frames,&frame,pdMS_TO_TICKS(5))==pdTRUE){')
         b=v.index('\n        if(transport_lost(c))',a)
         lost_end=v.index('\n        unsigned command=',b)
         chunks.append('static void production_consume_one(bridge_voice_t *c){\n'
-                      '  do {char *message=NULL;\n'+section('owner_consume',a,b)+'\n'
+                      '  do {bv_frame_t frame;\n'+section('owner_consume',a,b)+'\n'
                       +section('owner_transport_lost',b,lost_end)+'\n  }while(0);\n}\n')
         app=inc/'receive_app.inc';app.write_text('\n'.join(chunks)+'\n')
         (out/'receive-extraction.json').write_text(json.dumps({
@@ -395,7 +409,7 @@ base.append(f'-DconfigTICK_RATE_HZ={args.tick_hz}')
 if args.case in ('lifecycle','receive'):
     base.append('-DBRIDGE_LIFECYCLE_TEST=1')
 if args.case=='receive':
-    base.extend(['-DBRIDGE_RECEIVE_TEST=1','-DWS_TRANSPORT_HEADER_CALLBACK_SUPPORT=1'])
+    base.extend(['-DBRIDGE_RECEIVE_TEST=1','-DWS_TRANSPORT_HEADER_CALLBACK_SUPPORT=0'])
 try:
     objects=[]
     for name in (('transport',) if args.case=='lifecycle' else ('transport','transport_ws')):
@@ -410,8 +424,13 @@ try:
     subprocess.run(base+[test_file]+objects+[os.environ['PET_TLS_HOST_LIB']+'/libmbedcrypto.a','-Wl,--gc-sections','-o',str(out/'test')],check=True)
     # Assertion RED is a real nonzero result, never xfail/converted to PASS.
     # timeout bounds a broken repair that spins without polling fake time.
-    cases=(('immediate-exit','finish-stopped-destructor','normal-close','peer-failure',
-            'dispose-timeout','task-create-fail','timer-start-fail','key-create-fail',
+    cases=(('hard-deadline-timer-start','hard-deadline-timer-control',
+            'stop-inner-io-admission','inner-io-admission-control',
+            'slow-inner-before-io-budget','slow-inner-owned-budget',
+            'cancel-during-timer-start','stop-during-timer-start','stop-before-connect',
+            'stop-check-retry-deadline','stop-check-connect-budget','stop-check-first-connect-budget',
+            'immediate-exit','finish-stopped-destructor','normal-close','peer-failure',
+            'dispose-timeout','abandoned-ingress','abandoned-close','abandoned-empty','task-create-fail','timer-start-fail','key-create-fail',
             'setspecific-fail','self-destroy-fail','delayed-cutoff-reuse',
             'active-cutoff-join','active-cutoff-timeout','timer-stop-fail','timer-delete-fail')
            if args.case=='lifecycle' else (args.case,))
@@ -424,7 +443,33 @@ try:
                'ctrl-bad-fin','ctrl-bad-opcode','ctrl-oversize','ctrl-small-buffer',
                'ctrl-partial-eof','ctrl-zero-after-byte','ctrl-error-after-byte',
                'ctrl-caller-budget','ctrl-hard-budget','ctrl-cancel-accumulating',
-               'ctrl-zero-probe','ctrl-text-streaming','rx-converse','rx-converse-split')
+               'ctrl-zero-probe','ctrl-text-streaming','rx-converse','rx-converse-split',
+               'close-protocol','close-policy','close-protocol-reason','close-policy-reason',
+               'close-protocol-local','close-policy-local','close-ambiguous-local',
+               'close-normal','close-normal-local','close-normal-dispatch','close-unsupported','close-unsupported-local',
+               'close-bad-payload','close-bad-payload-local','close-bad-payload-reason',
+               'close-bad-payload-cancel-final','close-too-large','close-too-large-local','close-too-large-reason',
+               'close-too-large-local-cancel-final',
+               'close-bad-payload-seed-protocol','close-too-large-seed-policy','close-normal-seed-payload',
+               'close-wire-0000','close-wire-0000-local','close-wire-0999','close-wire-0999-local',
+               'close-wire-1015','close-wire-1015-local','close-wire-1015-seed-policy',
+               'close-wire-3000','close-wire-3000-local','close-wire-4999','close-wire-4999-local',
+               'close-wire-5000','close-wire-5000-local','close-wire-65535','close-wire-65535-local',
+               'close-reserved-1004','close-reserved-1005-local','close-reserved-1006','close-client-only-1010-local',
+               'close-ambiguous','close-empty','close-empty-local','close-single','close-policy-cancel-final',
+               'partial-close-eof-0','partial-close-error-0','partial-close-zero-0','partial-close-eof-1','partial-close-eof-2',
+               'partial-close-1002','partial-close-1008','partial-close-1011','partial-close-cancel',
+               'partial-ping-eof','partial-pong-eof','partial-ping-delayed','partial-pong-delayed',
+               'bare-eof','bare-eof-after-close','bare-zero-after-close',
+               'header-loss-one','header-loss-cancel','header-loss-extended-prior','header-loss-masked-prior',
+               'header-loss-extended-zero-prior','header-loss-masked-zero-prior',
+               'text-first-error','text-first-zero','bare-zero','bare-cancel','bare-eof-after-data',
+               'origin-before-dispatch','origin-after-admission','origin-fragment-before','origin-fragment-after','eof-delayed-dispatch',
+               'missing-ticket','missing-ticket-inactive','start-before-timer-delay',
+               'lost-post-notice','lost-post-error','lost-post-middle',
+               'cleanup-race-rx-normal','cleanup-race-rx-unconfirmed','cleanup-race-rx-json-closed',
+               'cleanup-race-rx-confirmed','cleanup-race-rx-normal-before','cleanup-race-rx-bare-loss',
+               'cleanup-race-rx-unconfirmed-only')
     for case in cases:
         subprocess.run([str(out/'test'),case],check=True,timeout=30)
 finally:

@@ -192,7 +192,8 @@ static lv_obj_t *label(lv_obj_t *parent,const char *text,int width,int x,int y,c
 static void setup_clicked(lv_event_t *event){return_to_settings=true;lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);panel_requested=true;network_open_setup();}
 static void pet_clicked(lv_event_t *event){wave_ticks=24;}
 /* The one voice control. Mic on: a running spoken conversation. Mic off: the
- * call ends. Only this tap ever starts a call; nothing reconnects by itself. */
+ * call ends. Only this tap ever turns the mic on; while it is on, a lost host
+ * connection is re-established without another tap, and this tap ends that too. */
 static void talk_clicked(lv_event_t *event){
     (void)event;live_status_t s;live_voice_snapshot(&s);
     if(s.active)live_voice_stop();
@@ -271,7 +272,7 @@ static void refresh(lv_timer_t *timer) {
     }
     unsigned frame;
     if(wave_ticks){frame=22+(24-wave_ticks)/6;--wave_ticks;}
-    else if(s.joining || voice.state==LIVE_CONNECTING || voice.state==LIVE_THINKING) frame=45+(tick_count/2)%6;
+    else if(s.joining || voice.state==LIVE_CONNECTING || voice.state==LIVE_THINKING || voice.state==LIVE_RECONNECTING) frame=45+(tick_count/2)%6;
     else frame=(tick_count/3)%6;
     lv_image_set_src(pet,&frames[frame]);tick_count++;
     diag_visibility(lv_obj_has_flag(setup_panel,LV_OBJ_FLAG_HIDDEN),panel_requested);

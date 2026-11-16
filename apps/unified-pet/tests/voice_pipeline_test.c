@@ -284,18 +284,19 @@ static bool tailnet_spike_audio_acquire(void) {bool old=false;return atomic_comp
 static void tailnet_spike_audio_release(void) {assert(!worker_task&&!atomic_load(&opens));assert(atomic_exchange(&admission,false));}
 static void network_snapshot(network_status_t *p) {*p=(network_status_t){true,true};}
 static int bridge_mode,bridge_runs,key_reads;
-static bool bridge_cleanup_held;
+static bool bridge_cleanup_held,bridge_reap_publish;
 static unsigned bridge_reap_checks;
 static wifi_ps_type_t wifi_mode=1;
 static esp_err_t wifi_get_result=ESP_OK,wifi_set_result=ESP_OK;
 static unsigned wifi_sets;
 static esp_err_t network_copy_bridge(setup_bridge_t *p){p->enabled=bridge_mode==1;return bridge_mode==2?ESP_FAIL:ESP_OK;}
-static int64_t bridge_deadline_seen;
-static void bridge_voice_run(const setup_bridge_t *c,int64_t deadline,bool (*stopped)(void)){assert(c->enabled&&deadline>0&&!stopped()&&wifi_mode==WIFI_PS_NONE);bridge_deadline_seen=deadline;bridge_runs++;}
+static int64_t bridge_deadline_seen,bridge_limit_seen;
+static void bridge_voice_run(const setup_bridge_t *c,int64_t deadline,int64_t limit,bool (*stopped)(void)){assert(c->enabled&&deadline>0&&!stopped()&&wifi_mode==WIFI_PS_NONE);bridge_deadline_seen=deadline;bridge_limit_seen=limit;bridge_runs++;}
 static bool bridge_voice_restart_required(void){return bridge_cleanup_held;}
 static void bridge_voice_reap_finished(void){
     assert(!held); /* cleanup publishes state; status_lock must not span it */
     bridge_reap_checks++;
+    if(bridge_reap_publish)set_state(LIVE_OFF,"Mic off"); /* bridge wrapper calls set_state */
 }
 static void bridge_voice_stop(void){}
 static void bridge_voice_init(void){}
@@ -482,7 +483,13 @@ static void test_capture_backpressure(const char *name) {
     bridge_cleanup_held=true;unsigned before=bridge_reap_checks;
     live_voice_reap_finished();
     assert(worker_task&&atomic_load(&admission)&&bridge_reap_checks==before+1);
-    bridge_cleanup_held=false;live_voice_reap_finished();
+    bridge_cleanup_held=false;bridge_reap_publish=true;
+    /* The recovered call can publish its honest final status over the earlier
+     * held-error label even when this is the first successful reap. */
+    xSemaphoreTake(status_lock,portMAX_DELAY);status.active=true;status.state=LIVE_ERROR;
+    strcpy(status.message,"Voice cleanup incomplete. Connection held.");xSemaphoreGive(status_lock);
+    live_voice_reap_finished();bridge_reap_publish=false;
+    live_voice_snapshot(&s);assert(s.state==LIVE_OFF&&!strcmp(s.message,"Mic off"));
     assert(!worker_task&&!atomic_load(&admission));
 #ifdef VOICE_SESSION_LIMIT_MS
     xSemaphoreTake(status_lock,portMAX_DELAY);assert(session_deadline_us==0);xSemaphoreGive(status_lock);
@@ -509,12 +516,16 @@ int main(int argc,char **argv) {
     assert(argc==2);setvbuf(stdout,NULL,_IONBF,0);
     live_voice_init();assert(!worker_task&&!opens&&!reads&&!allocations);
     /* A bridge conversation gets the longer deadline, from the SAME accepted
-     * Start; the standalone path keeps its exact 60000 ms (cap cases below). */
+     * Start, and the same allowance for any call re-established later. The
+     * bridge owns those per-call deadlines, so the worker's own cutoff is
+     * cleared (mic off still stops it). The standalone path keeps its exact
+     * 60000 ms (cap cases below). */
     int64_t accepted=esp_timer_get_time();
     bridge_mode=1;session_deadline_us=accepted+60000000;run_session();
     assert(bridge_runs==1&&key_reads==0&&opens==0&&wifi_mode==1&&wifi_sets==2);
     assert(BRIDGE_SESSION_LIMIT_MS==660000&&VOICE_SESSION_LIMIT_MS==60000);
-    assert(bridge_deadline_seen==accepted+660000000&&session_deadline_us==bridge_deadline_seen);
+    assert(bridge_deadline_seen==accepted+660000000&&bridge_limit_seen==660000000&&session_deadline_us==0);
+    assert(!session_stop());
     /* Mic turned off before the call began: said plainly, no bridge run, no key. */
     live_status_t early;
     atomic_store(&stop_requested,true);session_deadline_us=esp_timer_get_time()+60000000;run_session();

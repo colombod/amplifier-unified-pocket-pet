@@ -43,7 +43,7 @@ struct audio_session { unsigned unused; };
 typedef struct { bool connected, key_saved; } network_status_t;
 typedef struct { bool enabled; } setup_bridge_t; /* route boundary, not config validator */
 static esp_err_t network_copy_bridge(setup_bridge_t *);
-static void bridge_voice_run(const setup_bridge_t *,int64_t,bool (*)(void));
+static void bridge_voice_run(const setup_bridge_t *,int64_t,int64_t,bool (*)(void));
 static bool bridge_voice_restart_required(void);
 static void bridge_voice_reap_finished(void);
 static void bridge_voice_stop(void);

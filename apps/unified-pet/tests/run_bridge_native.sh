@@ -52,7 +52,7 @@ def brace_end(s,start):
     raise AssertionError('unbalanced source')
 
 def function(name):
-    matches=list(re.finditer(r'^(?:static )?(?:bool|void|const char)\s+\**'+re.escape(name)+r'\(',text,re.M))
+    matches=list(re.finditer(r'^(?:static )?(?:bool|void|unsigned|const char)\s+\**'+re.escape(name)+r'\(',text,re.M))
     assert len(matches)==1,('function count',name,len(matches))
     start=matches[0].start();p=text.index('{',start)
     return start,brace_end(text,p)
@@ -62,14 +62,14 @@ def located(start,end):
 
 a=unique(text,'#define BV_MIC');b=unique(text,'static bool take(')
 parts=[text[a:b]]; hashes={};excerpts={}
-for name in ['take','give','quiet','note_exit','stopping','exit_status','callback_failed','failure','speaker_active','capture_task','play_task','ws_event','transport_lost','pace_sent_audio','send_frame_timed','send_frame','send_action','append_audio','finish_capture','finalize_model','bridge_voice_stop','bridge_voice_finish_capture','bridge_voice_confirm','bridge_voice_snapshot','audio_exited','converse_end','converse_tail','cleanup','bridge_voice_reap_finished']:
+for name in ['take','give','quiet','health_end','note_exit','stopping','exit_status','callback_failed','protocol_failed','failure','speaker_active','capture_task','play_task','ws_event','transport_lost','pace_sent_audio','send_frame_timed','send_frame','send_action','append_audio','finish_capture','finalize_model','bridge_voice_stop','bridge_voice_finish_capture','bridge_voice_confirm','bridge_voice_snapshot','audio_exited','observe_converse_send','converse_end','retry_left','cleanup_unconfirmed','converse_tail','cleanup','bridge_voice_reap_finished']:
     start,end=function(name);body=text[start:end]
     hashes[name]=digest(body.encode());parts.append(located(start,end))
 
 # Deliberately NOT a reimplementation of next_audio/append policy. Extract the
 # whole production capture-send block, including its break/failure and cursor
 # argument. append_audio owns timed admission + success-only cursor advancement.
-run_start,run_end=function('bridge_voice_run')
+run_start,run_end=function('run_call')
 header='while(esp_timer_get_time()<c->work&&!stopping(c)&&!atomic_load(&c->failed))'
 h=unique(text,header)
 a=unique(text,'if((phase==BR_CAPTURING||phase==BR_CONVERSING)&&esp_timer_get_time()>=next_audio)')
@@ -164,7 +164,8 @@ for name in legacy realtime-0 realtime-25 realtime-75 \
     timed-out-full timed-out-short timed-out-zero timed-out-negative \
     tick-failed-flag prep-failed-flag lock-failed-flag finish-wait-failed-flag \
     empty-target-failed-flag finish-admission-failed-flag \
-    cleanup-reuse cleanup-unknown cleanup-audio-final cleanup-timeout cleanup-transport-timeout cleanup-hard-cap cleanup-interrupted-tail
+    cleanup-reuse cleanup-unknown cleanup-audio-final cleanup-timeout cleanup-transport-timeout cleanup-hard-cap cleanup-interrupted-tail \
+    cleanup-retained-terminal cleanup-retained-muted
 do
     if "$out/runtime" "$name"; then rc=0; else rc=$?; failed=1; fi
     printf '%s %s\n' "$name" "$rc" >> "$out/case-results.txt"

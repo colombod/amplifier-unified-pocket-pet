@@ -21,7 +21,7 @@ names=["set_state","live_voice_snapshot","fail","send_text","speaker_active",
        "capture_audio","play_audio","synchronize_clock","run_session","worker",
        "live_voice_reap_finished","live_voice_start","live_voice_stop","live_voice_init"]
 # Instrumentation helpers, when present, are also verbatim production, not stubs.
-for name in ("session_stop_locked", "session_stop", "pipeline_fail", "pipeline_log"):
+for name in ("session_stop_locked", "session_stop", "bridge_session_stop", "pipeline_fail", "pipeline_log"):
     if re.search(rf"^static .*?\b{name}\(",text,re.M):
         names.insert(names.index("fail"),name)
 hashes={}

@@ -70,6 +70,21 @@ class PetUI(unittest.TestCase):
             self.assertIn(text, SOURCE)
         self.assertEqual(SOURCE.count("lv_label_set_text(talk_label,"), 1)
 
+    def test_reconnecting_keeps_the_mic_on_look_and_only_while_mic_is_on(self):
+        # Mic-on look is everything except connecting and closing, so the
+        # reconnecting state keeps it; the screen has no reconnect control.
+        self.assertIn("bool mic_on=voice.active&&!closing&&!connecting;", SOURCE)
+        self.assertIn("bool connecting=voice.active&&voice.state==LIVE_CONNECTING;", SOURCE)
+        self.assertNotIn("econnect", SOURCE.replace("LIVE_RECONNECTING", "").split("void app_main(void)")[1])
+        self.assertEqual(SOURCE.count("LIVE_RECONNECTING"), 1)  # the pet's animation only
+        # The bridge reconnects only inside its own mic-on loop: it waits by
+        # polling the parent's mic-off, and nothing else calls run_call.
+        loop = BRIDGE.split("void bridge_voice_run(", 1)[1]
+        self.assertIn('if(parent_stopped&&parent_stopped()){between_calls(LIVE_OFF,"Mic off");return;}', loop)
+        self.assertIn("if(!call_report.again)return;", loop)
+        # live_voice still starts the bridge only from the worker of an accepted tap.
+        self.assertEqual(LIVE.count("bridge_voice_run("), 1)
+
     def test_no_preview_send_or_cancel_in_conversation_mode(self):
         for text in ("Done talking", "Confirm your words", '"Send"', '"Cancel"', "Start voice",
                      "bridge_panel", "bridge_send", "bridge_text", "bridge_display",
@@ -90,8 +105,11 @@ class PetUI(unittest.TestCase):
                 self.assertNotIn(text, LIVE_H)
 
     def test_bridge_voice_starts_conversation_mode_only(self):
-        run = BRIDGE.split("void bridge_voice_run(", 1)[1]
-        self.assertEqual(run.count("bridge_command(&c->model,BR_CMD_CONVERSE,0)"), 1)
+        self.assertEqual(BRIDGE.count("bridge_command(&c->model,BR_CMD_CONVERSE,0)"), 1)
+        # Every call, first or re-established, goes through the one run_call.
+        loop = BRIDGE.split("void bridge_voice_run(", 1)[1]
+        self.assertEqual(loop.count("run_call("), 1)
+        self.assertEqual(BRIDGE.count("run_call("), 2)
         # The one-turn model is never started by the firmware.
         self.assertNotIn("BR_CMD_CONNECT", BRIDGE)
         self.assertEqual(LIVE.count("bridge_voice_run("), 1)

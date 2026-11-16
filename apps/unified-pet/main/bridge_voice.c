@@ -37,6 +37,19 @@
 #define BV_LINGER_US 1500000     /* after our close, let the host close its side before the fence */
 #define BV_SEND_WAITING 4800      /* a further full 100 ms frame of microphone audio is already waiting */
 #define BV_SEND_CATCHUP 2         /* then the next frame may start early: at most this many times real time */
+/* Reconnecting while the mic is on (conversation mode only). After a call ends
+ * for a connection reason the next attempt waits BV_RETRY_DELAY_S[failures].
+ * Six attempts over 82 s of waiting plus connect time: a host restart of up to
+ * about 70 s that refuses connections at once is still outlasted, and each
+ * attempt lands just after a likely recovery (the host's 15 s slot release,
+ * then 30 s, 50 s and 80 s restarts). When attempts fail slowly instead (no
+ * answer at all, up to 25 s each), BV_RETRY_WINDOW_US ends it sooner. */
+#define BV_RETRIES 6             /* attempts in a row that did not give a healthy call, then give up */
+#define BV_HEALTHY_US 30000000   /* a call that conversed this long resets that count */
+#define BV_RECONNECT_MAX 20      /* reconnect attempts per mic-on, whatever happens: a flapping link ends */
+#define BV_RETRY_WINDOW_US 120000000 /* no attempt starts later than this after the connection was lost */
+#define BV_RETRY_POLL_MS 20      /* how often a waiting retry looks for mic off */
+static const unsigned char BV_RETRY_DELAY_S[BV_RETRIES]={2,5,10,15,20,30};
 #define BV_IDLE BIT0
 #define BV_CAPTURE_DONE BIT1
 #define BV_PLAY_DONE BIT2
@@ -46,7 +59,11 @@
 enum { BV_EXIT_NONE, BV_EXIT_MIC, BV_EXIT_QUEUE, BV_EXIT_GUARD,
        BV_EXIT_CALLBACK, BV_EXIT_SEND, BV_EXIT_DISCONNECTED, BV_EXIT_DEADLINE,
        BV_EXIT_USER, BV_EXIT_HOST, BV_EXIT_CONNECT, BV_EXIT_SETUP,
-       BV_EXIT_AUDIO, BV_EXIT_SPEAKER, BV_EXIT_PROTOCOL, BV_EXIT_BEGIN };
+       BV_EXIT_AUDIO, BV_EXIT_SPEAKER, BV_EXIT_PROTOCOL, BV_EXIT_BEGIN, BV_EXIT_RETRY_WINDOW };
+/* How a conversation call ended: an ordinary end, an error that another call
+ * cannot fix, or a lost connection that another call may. */
+enum { BV_END_OFF, BV_END_ERROR, BV_END_RETRY };
+typedef struct {char *text;int64_t received_at;bool after_local_control;} bv_frame_t;
 /* Free callback/worker storage only after transport task-deletion proof and
  * audio workers' final atomic publications AFTER SetBits returns. */
 typedef struct {
@@ -59,7 +76,7 @@ typedef struct {
     StaticStreamBuffer_t capture_meta,playback_meta;
     EventGroupHandle_t events;
     EventBits_t audio_tasks;
-    atomic_bool active,accepting,connected,failed,stop,capture_gate,play_gate,drain;
+    atomic_bool active,accepting,connected,connected_seen,failed,stop,muted,capture_gate,play_gate,drain,invalid_protocol,ingress_incomplete;
     atomic_bool capture_exited,play_exited;
     atomic_uint command,confirm_revision,audio_epoch,exit_reason;
     /* Conversation mode. speaker_until is a millisecond stamp, as live_voice.c:
@@ -67,6 +84,22 @@ typedef struct {
     atomic_bool converse;
     atomic_uint speaker_until;
     int64_t notice_until;
+    /* Reconnecting. failures/reconnects/reached are this mic-on's counts when
+     * the call started; began_at is when this call started conversing. */
+    unsigned failures,reconnects;
+    bool reached;
+    int http_status;
+    bridge_transport_terminal_t transport_terminal;
+    char terminal_code[32]; /* first definite host error; owner only under guard */
+    bool send_uncertain_seen; /* no wire event proves its resolution during this call */
+    bool send_pending; /* observed asking, not yet followed by ordered answering; per call */
+    bool cleanup_stop_sent,cleanup_close_unconfirmed; /* owner only; unconfirmed close vetoes retry */
+    int64_t cleanup_stop_started_at; /* valid only after a full successful pet.stop */
+    bool tail_incomplete;
+    bool assembly_after_local_control,peer_closed_before_control; /* receipt ordering only, never cause */
+    int64_t assembly_received_at;
+    int64_t began_at;
+    int64_t ended_at;bool ended_recorded; /* completion_mux; may predate began_at */
     unsigned actions,received_pcm;
     int64_t hard,work,start;
     bool (*parent_stopped)(void);
@@ -81,24 +114,36 @@ static bridge_view_t terminal_view;
 static bool terminal_valid;
 static portMUX_TYPE completion_mux=portMUX_INITIALIZER_UNLOCKED;
 static atomic_bool restart_required;
+/* Written by the owner's cleanup of a conversation call, read by the same
+ * thread's reconnect loop: whether another call follows, and the counts. */
+static struct { bool again,reached; unsigned failures; int64_t ended_at; } call_report;
 static bool take(void){return guard&&xSemaphoreTake(guard,pdMS_TO_TICKS(100))==pdTRUE;}
 static void give(void){xSemaphoreGive(guard);}
 static void quiet(bridge_voice_t *c){
     atomic_store(&c->capture_gate,false);atomic_store(&c->play_gate,false);
     atomic_fetch_add(&c->audio_epoch,1);audio_stream_inhibit();
 }
+static void health_end(bridge_voice_t *c,int64_t at){
+    portENTER_CRITICAL(&completion_mux);
+    if(!c->ended_recorded||at<c->ended_at){c->ended_at=at;c->ended_recorded=true;}
+    portEXIT_CRITICAL(&completion_mux);
+}
 static void note_exit(bridge_voice_t *c,unsigned reason){
+    health_end(c,esp_timer_get_time());
     unsigned empty=BV_EXIT_NONE;
     atomic_compare_exchange_strong(&c->exit_reason,&empty,reason);
 }
 static bool stopping(bridge_voice_t *c){
     if(c->parent_stopped&&c->parent_stopped()){
         /* The parent stops for the user's tap, or at its own session deadline. */
-        note_exit(c,esp_timer_get_time()<c->work?BV_EXIT_USER:BV_EXIT_DEADLINE);
+        bool user=esp_timer_get_time()<c->work;
+        if(user)atomic_store(&c->muted,true);
+        note_exit(c,user?BV_EXIT_USER:BV_EXIT_DEADLINE);
         atomic_store(&c->stop,true);
     }
     return atomic_load(&c->stop);
 }
+static bool transport_stopping(void *arg){return stopping(arg);}
 static const char *exit_status(bridge_voice_t *c){
     switch(atomic_load(&c->exit_reason)){
     case BV_EXIT_MIC:return "Microphone read failed.";
@@ -115,11 +160,17 @@ static const char *exit_status(bridge_voice_t *c){
     case BV_EXIT_SPEAKER:return "Speaker playback failed.";
     case BV_EXIT_PROTOCOL:return "Host sent an invalid message.";
     case BV_EXIT_BEGIN:return "Host did not start the call.";
+    case BV_EXIT_RETRY_WINDOW:return c->reached?"Connection lost - mic off":"Could not reach the host - mic off";
     default:return atomic_load(&c->stop)?"Stopped. Unified work is not cancelled.":"Voice disconnected.";
     }
 }
 static void callback_failed(bridge_voice_t *c){
     note_exit(c,BV_EXIT_CALLBACK);atomic_store(&c->failed,true);
+}
+/* The host sent something that is not a message of this protocol. Unlike a
+ * lost connection, calling again cannot fix that. */
+static void protocol_failed(bridge_voice_t *c){
+    atomic_store(&c->invalid_protocol,true);note_exit(c,BV_EXIT_PROTOCOL);atomic_store(&c->failed,true);
 }
 static void failure(bridge_voice_t *c,const char *code){
     if(!strcmp(code,"overflow"))note_exit(c,BV_EXIT_QUEUE);
@@ -145,9 +196,13 @@ static void capture_task(void *arg){
         /* Admission/idle handoff shares the model lock. A read admitted before
          * Finish may block; idle is set only AFTER that read has returned. */
         if(!take()){note_exit(c,BV_EXIT_GUARD);failure(c,"reply_unavailable");break;}
+        /* Stop and opening the capture gate share the model guard. Check the
+         * parent latch here too, even if its bridge Stop is waiting for it. */
+        if(stopping(c)||atomic_load(&c->failed)||esp_timer_get_time()>=c->work){give();break;}
         bool enabled=atomic_load(&c->capture_gate);
         if(!enabled){xEventGroupSetBits(c->events,BV_IDLE);give();was_enabled=false;vTaskDelay(pdMS_TO_TICKS(10));continue;}
         xEventGroupClearBits(c->events,BV_IDLE);give();
+        if(stopping(c)||atomic_load(&c->failed)||esp_timer_get_time()>=c->work)break;
         if(!was_enabled){discard=9600;was_enabled=true;} /* first 4800 samples of stale DMA */
         esp_err_t e=audio_stream_read(c->audio,pcm,sizeof(pcm));
         if(e!=ESP_OK){note_exit(c,BV_EXIT_MIC);failure(c,"reply_unavailable");break;}
@@ -168,6 +223,8 @@ static void play_task(void *arg){
     bridge_voice_t *c=arg;uint8_t pcm[BV_CHUNK];unsigned epoch=atomic_load(&c->audio_epoch);bool primed=false;
     bool converse=atomic_load(&c->converse);int64_t waiting=0;
     while(atomic_load(&c->active)){
+        if((stopping(c)||esp_timer_get_time()>=c->work)&&
+           (atomic_load(&c->capture_gate)||atomic_load(&c->play_gate)))quiet(c);
         unsigned next=atomic_load(&c->audio_epoch);
         if(!atomic_load(&c->play_gate)||atomic_load(&c->stop)||atomic_load(&c->failed)){
             while(xStreamBufferReceive(c->playback,pcm,sizeof(pcm),0)){}
@@ -196,7 +253,8 @@ static void play_task(void *arg){
         primed=true;waiting=0;
         size_t n=xStreamBufferReceive(c->playback,pcm,sizeof(pcm),0);
         if(!n)continue;
-        if(epoch!=atomic_load(&c->audio_epoch)||!atomic_load(&c->play_gate)||atomic_load(&c->stop))continue;
+        if(epoch!=atomic_load(&c->audio_epoch)||!atomic_load(&c->play_gate)||stopping(c)||
+           atomic_load(&c->failed)||esp_timer_get_time()>=c->work)continue;
         if(converse){
             if(live_pcm_audible(pcm,n))
                 atomic_store(&c->speaker_until,(uint32_t)(esp_timer_get_time()/1000)+BV_SPEAKER_HOLD_MS);
@@ -213,25 +271,53 @@ static void play_task(void *arg){
 }
 static void ws_event(void *arg,esp_event_base_t base,int32_t id,void *data){
     (void)base;bridge_voice_t *c=arg;esp_websocket_event_data_t *e=data;
+    /* The ticket records first parser ingress, not the potentially delayed
+     * callback time. The first text chunk fixes origin through continuations. */
+    bool after_local_control=false;
+    int64_t received_at=0;
+    if(id==WEBSOCKET_EVENT_DATA&&!bridge_transport_take_data(c->transport,&after_local_control,&received_at)){
+        atomic_store(&c->ingress_incomplete,true);callback_failed(c);return;
+    }
     if(!atomic_load(&c->accepting))return;
     if(id==WEBSOCKET_EVENT_CONNECTED){
         if(!bridge_transport_upgraded(c->transport)){callback_failed(c);return;}
-        atomic_store(&c->connected,true);
-    }else if(id==WEBSOCKET_EVENT_DISCONNECTED||id==WEBSOCKET_EVENT_CLOSED)atomic_store(&c->connected,false);
-    else if(id==WEBSOCKET_EVENT_ERROR)callback_failed(c);
+        atomic_store(&c->connected_seen,true);atomic_store(&c->connected,true);
+    }else if(id==WEBSOCKET_EVENT_DISCONNECTED||id==WEBSOCKET_EVENT_CLOSED){
+        int64_t at=bridge_transport_end_at(c->transport);
+        health_end(c,at?at:esp_timer_get_time());atomic_store(&c->connected,false);
+    }
+    else if(id==WEBSOCKET_EVENT_ERROR){
+        int64_t at=bridge_transport_end_at(c->transport);
+        if(at)health_end(c,at);
+        callback_failed(c);
+    }
     else if(id==WEBSOCKET_EVENT_DATA){
-        if(!e||e->data_len<0||e->payload_len<0||e->payload_offset<0){callback_failed(c);return;}
+        if(!e||e->data_len<0||e->payload_len<0||e->payload_offset<0){protocol_failed(c);return;}
+        /* The transport wrapper only delivers complete validated control
+         * frames. A peer CLOSE ends active conversation at receipt, before the
+         * SDK may spend time acknowledging it or waiting for TCP close. */
+        if(e->op_code==8&&e->fin&&e->payload_offset==0&&e->data_len==e->payload_len)
+            health_end(c,received_at);
+        /* Preserve admission at the first piece of a message, including across
+         * continuations and interleaved controls; queue consumption can be later. */
+        if(e->op_code==1&&e->payload_offset==0&&!c->assembly.active){
+            c->assembly_after_local_control=after_local_control;
+            c->assembly_received_at=received_at;
+        }
         int complete=live_message_feed(&c->assembly,c->assembly_memory,BV_FRAME,e->op_code,e->fin,
             e->payload_offset,e->payload_len,e->data_ptr,e->data_len);
-        if(complete<0){callback_failed(c);return;}
+        if(complete<0){protocol_failed(c);return;}
         if(complete==1){
             /* Queue strings only after rejecting embedded raw NUL. Otherwise
              * owner-side strlen could accept a valid prefix and hide a suffix. */
-            if(memchr(c->assembly_memory,0,c->assembly.used)){callback_failed(c);return;}
+            if(memchr(c->assembly_memory,0,c->assembly.used)){protocol_failed(c);return;}
             char *message=heap_caps_malloc(c->assembly.used+1,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-            if(!message){callback_failed(c);return;}
+            if(!message){atomic_store(&c->ingress_incomplete,true);callback_failed(c);return;}
             memcpy(message,c->assembly_memory,c->assembly.used);message[c->assembly.used]=0;
-            if(xQueueSend(c->frames,&message,0)!=pdTRUE){setup_bridge_wipe(message,c->assembly.used);free(message);callback_failed(c);}
+            bv_frame_t frame={.text=message,.received_at=c->assembly_received_at,.after_local_control=c->assembly_after_local_control};
+            if(xQueueSend(c->frames,&frame,0)!=pdTRUE){
+                atomic_store(&c->ingress_incomplete,true);setup_bridge_wipe(message,c->assembly.used);free(message);callback_failed(c);
+            }
         }
     }
 }
@@ -258,6 +344,16 @@ static bool send_frame_timed(bridge_voice_t *c,const char *json,int64_t *send_st
     if(!admitted||!ms)return false;
     /* No model lock spans blocking I/O. This stamp is the final local send
      * admission boundary, not a claim of peer receipt or TLS transfer timing. */
+    int64_t send_until=started+(int64_t)ms*1000;
+    if(closing&&!bridge_transport_admit_control(c->transport,send_until))return false;
+    int64_t remaining=send_until-esp_timer_get_time();
+    ms=remaining>0?(unsigned)(remaining/1000):0;
+    if(!ms){
+        /* Admission was published but no send can now occur. A close seen
+         * after that boundary cannot safely be called a cleanup response. */
+        if(closing)atomic_store(&c->ingress_incomplete,true);
+        return false;
+    }
     if(esp_websocket_client_send_text(c->ws,json,n,pdMS_TO_TICKS(ms))!=(int)n)return false;
     if(send_started)*send_started=started;
     return true;
@@ -352,13 +448,19 @@ static void publish(bridge_voice_t *c){
         view.phase==BR_CONNECTING||view.phase==BR_BEGINNING?LIVE_CONNECTING:view.phase>=BR_CLOSING?LIVE_CLOSING:LIVE_THINKING;
     if(view.phase==BR_CONVERSING)
         state=view.talk==BR_TALK_ASKING?LIVE_THINKING:view.talk==BR_TALK_ANSWERING?LIVE_SPEAKING:LIVE_LISTENING;
+    /* A call being re-established keeps the mic-on look until the host answers. */
+    if(c->reconnects&&state==LIVE_CONNECTING){live_voice_bridge_status(LIVE_RECONNECTING,"Reconnecting...");return;}
     live_voice_bridge_status(state,view.status); /* only fixed metadata, NOT target/transcript */
 }
 void bridge_voice_init(void){guard=xSemaphoreCreateMutex();assert(guard);}
 bool bridge_voice_restart_required(void){return atomic_load(&restart_required);}
 void bridge_voice_stop(void){
+    /* This latch is independent of the model guard. If a contended guard
+     * times out, the amplifier must still be inhibited immediately. */
+    audio_stream_inhibit();
     if(!take())return;
     bridge_voice_t *c=current;
+    if(c)atomic_store(&c->muted,true);
     if(c&&atomic_load(&c->active)){
         note_exit(c,BV_EXIT_USER);
         atomic_store(&c->stop,true);atomic_store(&c->command,0);
@@ -393,50 +495,150 @@ static bool audio_exited(const bridge_voice_t *c){
     portEXIT_CRITICAL(&completion_mux);
     return exited;
 }
-/* Guard held. One honest line for how a conversation ended, from its FIRST
- * cause; returns whether that is shown as an error. A normal mic-off, the
- * host's own close and either time limit are ordinary ends, not errors. */
-static bool converse_end(bridge_voice_t *c,char *out,size_t cap){
+/* Guard held; parsed frames from this call's owner or cleanup tails only.
+ * The gateway admits confirm before enqueueing asking. An observed asking
+ * therefore fences replacement until a later ordered answering, even when
+ * the frame is consumed after local failure/closing. Listening, unknown state
+ * and cleanup do not settle it. Answering never clears sticky uncertainty.
+ * This cannot detect an asking frame that never reached the device. */
+static void observe_converse_send(bridge_voice_t *c,const bridge_event_t *event){
+    if(!c->model.converse)return;
+    if(event->kind==BR_EV_CONVERSE_NOTICE&&!strcmp(event->code,"send_uncertain"))
+        c->send_uncertain_seen=true;
+    if(event->kind==BR_EV_CONVERSE_STATE){
+        if(!strcmp(event->state,"asking"))c->send_pending=true;
+        else if(c->send_pending&&!strcmp(event->state,"answering"))c->send_pending=false;
+    }
+}
+/* Guard held. Combine the first local exit with all settled closing evidence.
+ * Receipt order relative to our cleanup cannot establish what caused the peer
+ * to end. Any valid session.closed, complete WS1000 or unconfirmed close vetoes
+ * automatic replacement; only a loss without that evidence may be retried. */
+static unsigned converse_end(bridge_voice_t *c,char *out,size_t cap){
     unsigned reason=atomic_load(&c->exit_reason);
-    const char *s=NULL;bool error=true;
-    /* What the host itself said about the ending (its error, its quiet/time
-     * limit or its close) is the status whenever the host or the connection
-     * ended the call, even if the socket then failed before the last frames
-     * were handled in order. bridge_view already holds that wording. */
-    bool host_said=c->model.code[0]||c->model.end_notice!=BR_NOTICE_NONE||c->model.wire_closed;
+    /* What the host itself said about the ending (its quiet/time limit, its
+     * error or its close) decides whenever the host or the connection ended
+     * the call, even if the socket then failed before the last frames were
+     * handled in order. bridge_view already holds the wording for its error. */
     bool link=reason==BV_EXIT_HOST||reason==BV_EXIT_DISCONNECTED||reason==BV_EXIT_CALLBACK||reason==BV_EXIT_SEND;
-    if(reason==BV_EXIT_USER){s="Mic off";error=false;}
-    else if(link&&host_said)error=c->model.code[0]!=0;
-    else if(reason==BV_EXIT_DEADLINE){s="Mic off (time limit)";error=false;}
-    else s=exit_status(c);
+    const char *s=NULL;unsigned end=BV_END_ERROR;
+    if(reason==BV_EXIT_USER||atomic_load(&c->muted)){s="Mic off";end=BV_END_OFF;}
+    else if(atomic_load(&c->invalid_protocol))s="Host sent an invalid message.";
+    else if(c->transport_terminal==BR_TRANSPORT_PROTOCOL)s="Voice connection protocol error.";
+    else if(c->transport_terminal==BR_TRANSPORT_POLICY)s="Host refused the voice connection.";
+    else if(c->transport_terminal==BR_TRANSPORT_UNSUPPORTED)s="Host rejected the voice format.";
+    else if(c->transport_terminal==BR_TRANSPORT_PAYLOAD_REJECTED)s="Host rejected the voice payload.";
+    else if(c->transport_terminal==BR_TRANSPORT_EVENT_LOSS)s="Voice connection interrupted.";
+    else if(c->tail_incomplete||atomic_load(&c->ingress_incomplete))s="Voice connection interrupted.";
+    else if(c->terminal_code[0]){
+        if(!strcmp(c->terminal_code,"protocol"))s="Host sent an unexpected message";
+        else{snprintf(out,cap,"Host error: %s%s",c->terminal_code,
+            c->send_uncertain_seen?"; send unconfirmed":"");return BV_END_ERROR;}
+    }
+    else if(c->send_uncertain_seen)s="Could not confirm it was sent";
+    else if(c->send_pending)s="Send unconfirmed";
+    else if(c->cleanup_close_unconfirmed)s="Host error: close_unconfirmed";
+    else if(link&&c->model.code[0]){
+        snprintf(out,cap,"Host error: %s",c->model.code);return BV_END_ERROR;
+    }
+    else if(reason==BV_EXIT_DEADLINE){s="Mic off (time limit)";end=BV_END_OFF;}
+    else if(reason==BV_EXIT_CONNECT){
+        /* No answer, the host's one slot still busy (409) or a server-side
+         * failure may pass. Any other answer is a refusal of this pet. */
+        int http=c->http_status;
+        if(http==0||http==409||http>=500){s=exit_status(c);end=BV_END_RETRY;}
+        else if(http==401||http==403)s="Host refused this pet. Check its token.";
+        else{snprintf(out,cap,"Host refused the connection (HTTP %d).",http);return BV_END_ERROR;}
+    }else{
+        s=exit_status(c);
+        if(link||reason==BV_EXIT_QUEUE||reason==BV_EXIT_BEGIN)end=BV_END_RETRY;
+    }
+    /* Closing evidence vetoes every otherwise retryable exit, including local
+     * queue/begin timeout, regardless of control-admission provenance. It must
+     * not turn definite local/security/host errors into an ordinary ending.
+     * Do not attribute a cause to a close that could race our own cleanup. */
+    if(end==BV_END_RETRY&&c->model.end_notice!=BR_NOTICE_NONE){
+        s=bridge_notice_text(c->model.end_notice);end=BV_END_OFF;
+    }else if(end==BV_END_RETRY&&(c->model.wire_closed||c->transport_terminal==BR_TRANSPORT_PEER_NORMAL)){
+        s="Mic off (call ended)";end=BV_END_OFF;
+    }
     if(s)snprintf(out,cap,"%s",s);
-    return error;
+    return end;
+}
+/* Whether a call that ended on a lost connection may be followed by another:
+ * the count of attempts in a row without a healthy call (cleared by this call
+ * if it conversed long enough), and the ceiling per mic-on. */
+static bool retry_left(const bridge_voice_t *c,unsigned *failures){
+    portENTER_CRITICAL(&completion_mux);
+    int64_t ended=c->ended_at;bool recorded=c->ended_recorded;
+    portEXIT_CRITICAL(&completion_mux);
+    bool healthy=c->began_at&&recorded&&ended>=c->began_at&&ended-c->began_at>=BV_HEALTHY_US;
+    *failures=healthy?0:c->failures;
+    return *failures<BV_RETRIES&&c->reconnects<BV_RECONNECT_MAX;
+}
+/* Guard held, cleanup tail only. Keep this late ambiguous close separate from
+ * the first semantic error and sticky send state, but latch it as a retry veto.
+ * These checks describe receipt order, NOT a locally caused cleanup response.
+ * Every other close_unconfirmed goes through the ordinary terminal-error path. */
+static bool cleanup_unconfirmed(bridge_voice_t *c,const bv_frame_t *frame,const bridge_event_t *event){
+    if(event->kind!=BR_EV_ERROR||strcmp(event->code,"close_unconfirmed")||
+       !c->model.converse||c->model.phase!=BR_CLOSING||
+       atomic_load(&c->exit_reason)!=BV_EXIT_QUEUE||!c->began_at||
+       !c->cleanup_stop_sent||!frame->after_local_control||
+       c->cleanup_stop_started_at<=0||frame->received_at<=c->cleanup_stop_started_at||
+       frame->received_at>esp_timer_get_time())return false;
+    c->cleanup_close_unconfirmed=true;
+    return true;
 }
 /* The call is over with host frames still queued (the socket failed, or the
  * loop ended first). Read them only for the host's stated ending: no audio is
  * played, nothing is sent and nothing here can start or repeat a request. */
 static void converse_tail(bridge_voice_t *c){
-    char *message=NULL;
-    while(xQueueReceive(c->frames,&message,0)==pdTRUE){
+    bv_frame_t frame;
+    while(xQueueReceive(c->frames,&frame,0)==pdTRUE){
+        char *message=frame.text;
         bridge_event_t event;
         if(bridge_parse(message,strlen(message),&event)){
-            if(event.kind!=BR_EV_AUDIO&&take()){(void)bridge_step(&c->model,&event);give();}
+            if(event.kind!=BR_EV_AUDIO){
+                if(take()){
+                    observe_converse_send(c,&event);
+                    bool unconfirmed=cleanup_unconfirmed(c,&frame,&event);
+                    if(event.kind==BR_EV_ERROR&&!unconfirmed&&!c->terminal_code[0])
+                        snprintf(c->terminal_code,sizeof(c->terminal_code),"%s",event.code);
+                    if(event.kind==BR_EV_CLOSED&&!frame.after_local_control)
+                        c->peer_closed_before_control=true;
+                    /* Preserve semantic-error precedence for this ambiguous
+                     * close; its sticky flag independently forbids retry. */
+                    unsigned actions=unconfirmed?0:bridge_step(&c->model,&event);
+                    if(actions&BR_ACT_CLOSE)health_end(c,frame.received_at);
+                    if(!strcmp(c->model.code,"protocol")&&!c->terminal_code[0])
+                        snprintf(c->terminal_code,sizeof(c->terminal_code),"protocol");
+                    give();
+                }else c->tail_incomplete=true;
+            }
             bridge_event_clear(&event);
-        }
+        }else protocol_failed(c);
         setup_bridge_wipe(message,strlen(message));free(message);
     }
 }
 static void cleanup(bridge_voice_t *c,bool wait){
+    health_end(c,esp_timer_get_time()); /* before close, linger or proof waits */
     quiet(c);
     if(wait&&atomic_load(&c->converse)){
+        call_report.again=false;
         if(c->frames)converse_tail(c);
-        live_voice_bridge_status(LIVE_CLOSING,"Mic off"); /* audio is already off; the release follows */
+        /* Audio is off, but the final tail and transport result are not proven.
+         * Never promise a replacement while closing evidence can still arrive. */
+        live_voice_bridge_status(LIVE_CLOSING,"Releasing voice connection...");
     }
     finalize_model(c);
     if(!c->disposal_started&&c->transport&&bridge_transport_started(c->transport)){
         if(atomic_load(&c->connected)&&esp_timer_get_time()<c->hard){
             /* Close the pet only, never cancel or replay Unified input. */
-            (void)send_frame(c,"{\"type\":\"pet.stop\"}");
+            bool stopped=send_frame_timed(c,"{\"type\":\"pet.stop\"}",&c->cleanup_stop_started_at);
+            /* Record full local send completion, not peer receipt or cause.
+             * Cancellation/finish while returning leaves completion unproven. */
+            c->cleanup_stop_sent=stopped&&!bridge_transport_finished(c->transport)&&bridge_transport_upgraded(c->transport);
             bool closed=esp_timer_get_time()<c->hard&&send_frame(c,"{\"type\":\"session.close\"}");
             if(closed&&atomic_load(&c->converse)){
                 /* A conversation's socket is still open here. Give the host a
@@ -450,7 +652,10 @@ static void cleanup(bridge_voice_t *c,bool wait){
         }
     }
     if(c->transport)bridge_transport_cancel(c->transport);
-    atomic_store(&c->active,false);atomic_store(&c->accepting,false);
+    /* In-flight SDK DATA may still complete across cancellation. Keep the
+     * callback queue alive through actual vendor-task exit; audio is already
+     * inhibited and no new client I/O is admitted. */
+    atomic_store(&c->active,false);
     c->disposal_started=true; /* even a later proof check must never use client APIs */
     int64_t until=wait?c->hard:esp_timer_get_time();
     /* A conversation deadline is minutes away. Stopping earlier only retains
@@ -469,8 +674,13 @@ static void cleanup(bridge_voice_t *c,bool wait){
     if(!audio_settled)atomic_store(&restart_required,true);
     /* No client API use after this call, including on false. Proof waits use
      * the original hard deadline, never now+another cleanup allowance. */
-    bool transport_settled=bridge_transport_dispose(c->transport,until);
-    if(transport_settled){c->transport=NULL;c->ws=NULL;}
+    bool transport_settled=!c->transport||bridge_transport_dispose_result(c->transport,until,&c->transport_terminal);
+    if(transport_settled){
+        /* The callback task can still complete a fragmented message while
+         * disposal is pending. Inspect assembly only after final-access proof. */
+        if(c->assembly.active)atomic_store(&c->ingress_incomplete,true);
+        c->transport=NULL;c->ws=NULL;
+    }
     else atomic_store(&restart_required,true);
     if(!audio_settled||!transport_settled){
         c->retained=true;
@@ -480,6 +690,11 @@ static void cleanup(bridge_voice_t *c,bool wait){
         live_voice_bridge_status(LIVE_CLOSING,"Releasing voice connection...");
         return; /* exceptional unproven ownership: never timeout-and-free */
     }
+    atomic_store(&c->accepting,false);
+    /* Only now has the callback task actually finished. A notice can arrive
+     * during close/linger, even after the first tail drain. Process its queued
+     * frames before the final retry decision, never before ingress settles. */
+    if(c->model.converse&&c->frames)converse_tail(c);
     if(c->audio){audio_stream_close(c->audio);c->audio=NULL;}
     if(!take()){
         c->retained=true;
@@ -497,7 +712,34 @@ static void cleanup(bridge_voice_t *c,bool wait){
         snprintf(terminal_view.status,sizeof(terminal_view.status),"%s",
             terminal_view.reply==BR_REPLY_RECEIVED?"Reply finished.":exit_status(c));
     }
-    bool converse_error=c->model.converse&&converse_end(c,terminal_view.status,sizeof(terminal_view.status));
+    bool converse_error=false,again=false;
+    if(c->model.converse){
+        unsigned end=converse_end(c,terminal_view.status,sizeof(terminal_view.status)),failures=c->failures;
+        bool reached=c->reached||c->began_at;
+        if(atomic_load(&c->muted)||(c->parent_stopped&&c->parent_stopped()&&esp_timer_get_time()<c->work)){
+            /* A later explicit tap always wins over any previously recorded
+             * disconnect or notice, including one arriving during cleanup. */
+            snprintf(terminal_view.status,sizeof(terminal_view.status),"Mic off");end=BV_END_OFF;
+        }
+        converse_error=end!=BV_END_OFF;
+        /* Only the owner's own cleanup (wait) may lead to another call; a
+         * late release by the reaper never does. */
+        if(end==BV_END_RETRY&&wait){
+            if(stopping(c)){
+                /* Mic off arrived while this call was being released. */
+                snprintf(terminal_view.status,sizeof(terminal_view.status),"Mic off");converse_error=false;
+            }else if(retry_left(c,&failures)){
+                again=true;snprintf(terminal_view.status,sizeof(terminal_view.status),"Reconnecting...");
+            }else snprintf(terminal_view.status,sizeof(terminal_view.status),"%s",
+                reached?"Connection lost - mic off":"Could not reach the host - mic off");
+        }
+        if(wait){
+            portENTER_CRITICAL(&completion_mux);
+            call_report.ended_at=c->ended_at;
+            portEXIT_CRITICAL(&completion_mux);
+            call_report.again=again;call_report.failures=failures;call_report.reached=reached;
+        }
+    }
     terminal_valid=true;
     bridge_view_t final=terminal_view;
     bool final_error=c->model.converse?converse_error:
@@ -508,9 +750,9 @@ static void cleanup(bridge_voice_t *c,bool wait){
     if(c->capture)vStreamBufferDelete(c->capture);
     if(c->playback)vStreamBufferDelete(c->playback);
     if(c->frames){
-        char *pending=NULL;
+        bv_frame_t pending;
         while(xQueueReceive(c->frames,&pending,0)==pdTRUE){
-            setup_bridge_wipe(pending,strlen(pending));free(pending);
+            setup_bridge_wipe(pending.text,strlen(pending.text));free(pending.text);
         }
         vQueueDelete(c->frames);
     }
@@ -522,7 +764,7 @@ static void cleanup(bridge_voice_t *c,bool wait){
     if(c->append_json){setup_bridge_wipe(c->append_json,7000);free(c->append_json);}
     if(c->decoded){setup_bridge_wipe(c->decoded,BV_APPEND);free(c->decoded);}
     setup_bridge_wipe(c,sizeof(*c));free(c);
-    live_voice_bridge_status(final_error?LIVE_ERROR:LIVE_OFF,final.status);
+    live_voice_bridge_status(again?LIVE_RECONNECTING:final_error?LIVE_ERROR:LIVE_OFF,final.status);
 }
 void bridge_voice_reap_finished(void){
     /* Called only after the outer owner worker is suspended. A late task/timer
@@ -534,18 +776,23 @@ void bridge_voice_reap_finished(void){
     give();
     if(ready)cleanup(c,false);
 }
-void bridge_voice_run(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_stopped)(void)){
+/* One complete call: connect, converse, and release everything through
+ * cleanup. Leaves in call_report whether another call is to follow. */
+static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_stopped)(void),
+                     unsigned failures,unsigned reconnects,bool reached,int64_t retry_until){
+    call_report.again=false;
     if(atomic_load(&restart_required)){live_voice_bridge_status(LIVE_ERROR,"Voice cleanup incomplete. Connection held.");return;}
     bridge_voice_t *c=heap_caps_calloc(1,sizeof(*c),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(!c){live_voice_bridge_status(LIVE_ERROR,"Bridge memory unavailable.");return;}
     c->hard=deadline;c->work=deadline-2000000;c->start=esp_timer_get_time();
     c->parent_stopped=parent_stopped;
+    c->failures=failures;c->reconnects=reconnects;c->reached=reached;
     /* The pet's one voice control is a running conversation: mic on listens and
      * talks back, mic off ends the call. The one-turn preview/Send model stays
      * in this file for its lifecycle tests but is not started from here. */
     atomic_store(&c->converse,true);atomic_store(&c->speaker_until,(uint32_t)(c->start/1000));
     bridge_init(&c->model);bridge_command(&c->model,BR_CMD_CONVERSE,0);
-    c->frames=xQueueCreate(BV_FRAMES,sizeof(char*));c->events=xEventGroupCreate();
+    c->frames=xQueueCreate(BV_FRAMES,sizeof(bv_frame_t));c->events=xEventGroupCreate();
     c->capture_memory=heap_caps_malloc(BV_MIC+1,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     c->playback_memory=heap_caps_malloc(BV_SPEAKER+1,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     c->assembly_memory=heap_caps_malloc(BV_FRAME,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
@@ -560,20 +807,32 @@ void bridge_voice_run(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_s
     esp_err_t loaded=network_copy_bridge_token(token,sizeof(token));
     if(loaded==ESP_OK)c->transport=bridge_transport_new(cfg,token,c->hard);
     setup_bridge_wipe(token,sizeof(token));if(!c->transport)goto setup_failed;
+    if(!bridge_transport_set_stop_check(c->transport,transport_stopping,c))goto setup_failed;
     c->ws=bridge_transport_client(c->transport);
     if(!take())goto setup_failed;
     current=c;terminal_valid=false;setup_bridge_wipe(&terminal_view,sizeof(terminal_view));give();
     if(stopping(c))goto cleanup;
     atomic_store(&c->active,true);atomic_store(&c->accepting,true);
     if(esp_websocket_register_events(c->ws,WEBSOCKET_EVENT_ANY,ws_event,c)!=ESP_OK)goto setup_failed;
-    if(bridge_transport_start(c->transport)!=ESP_OK)goto setup_failed;
+    if(retry_until&&esp_timer_get_time()>retry_until){note_exit(c,BV_EXIT_RETRY_WINDOW);goto cleanup;}
+    if(bridge_transport_start_before(c->transport,retry_until)!=ESP_OK){
+        if(stopping(c))goto cleanup;
+        if(retry_until&&esp_timer_get_time()>retry_until){note_exit(c,BV_EXIT_RETRY_WINDOW);goto cleanup;}
+        goto setup_failed;
+    }
     publish(c);
     int64_t startup=c->start+25000000;
     if(startup>c->work)startup=c->work;
     while(!atomic_load(&c->connected)&&!atomic_load(&c->failed)&&!bridge_transport_finished(c->transport)&&!stopping(c)&&esp_timer_get_time()<startup)vTaskDelay(pdMS_TO_TICKS(10));
     if(!atomic_load(&c->connected)||stopping(c)){
-        /* Before the first connection every failure is "could not reach". */
-        if(!stopping(c)){atomic_store(&c->exit_reason,BV_EXIT_CONNECT);atomic_store(&c->failed,true);}
+        /* Before the connection is up every failure is "could not reach",
+         * told apart only by what the host answered, if it answered. */
+        if(!stopping(c)){
+            c->http_status=bridge_transport_http_status(c->transport);
+            if(atomic_load(&c->connected_seen))note_exit(c,BV_EXIT_DISCONNECTED);
+            else atomic_store(&c->exit_reason,BV_EXIT_CONNECT);
+            atomic_store(&c->failed,true);
+        }
         goto cleanup;
     }
     if(!send_frame(c,PET_LIVE_START)){ /* host discards device reasoning fields */
@@ -582,18 +841,26 @@ void bridge_voice_run(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_s
     }
     int64_t next_audio=0,begin_by=esp_timer_get_time()+BV_BEGIN_US;
     while(esp_timer_get_time()<c->work&&!stopping(c)&&!atomic_load(&c->failed)){
-        char *message=NULL;
-        if(xQueueReceive(c->frames,&message,pdMS_TO_TICKS(5))==pdTRUE){
+        bv_frame_t frame;
+        if(xQueueReceive(c->frames,&frame,pdMS_TO_TICKS(5))==pdTRUE){
+            char *message=frame.text;
             bridge_event_t event;
-            if(!bridge_parse(message,strlen(message),&event)){setup_bridge_wipe(message,strlen(message));free(message);note_exit(c,BV_EXIT_PROTOCOL);failure(c,"invalid_preview");break;}
-            if(!take()){note_exit(c,BV_EXIT_GUARD);bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);break;}
+            if(!bridge_parse(message,strlen(message),&event)){setup_bridge_wipe(message,strlen(message));free(message);protocol_failed(c);failure(c,"invalid_preview");break;}
+            if(!take()){c->tail_incomplete=true;note_exit(c,BV_EXIT_GUARD);bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);break;}
+            observe_converse_send(c,&event);
+            if(event.kind==BR_EV_ERROR&&!c->terminal_code[0])
+                snprintf(c->terminal_code,sizeof(c->terminal_code),"%s",event.code);
+            if(event.kind==BR_EV_CLOSED&&!frame.after_local_control)
+                c->peer_closed_before_control=true;
             unsigned a=bridge_step(&c->model,&event);
+            if(!strcmp(c->model.code,"protocol")&&!c->terminal_code[0])
+                snprintf(c->terminal_code,sizeof(c->terminal_code),"protocol");
             if(c->model.reply==BR_REPLY_RECEIVED&&c->received_pcm==0){
                 c->model.reply=BR_REPLY_UNAVAILABLE;c->model.draining=false;
                 a=BR_ACT_MUTE|BR_ACT_CLOSE;
             }
             c->actions|=a;
-            if(a&BR_ACT_CLOSE)note_exit(c,BV_EXIT_HOST); /* the host's error or close ended it */
+            if(a&BR_ACT_CLOSE){health_end(c,frame.received_at);note_exit(c,BV_EXIT_HOST);} /* host ending */
             if(a&BR_ACT_NOTICE)c->notice_until=esp_timer_get_time()+BV_NOTICE_US;
             if(a&BR_ACT_MUTE)quiet(c);
             if(event.kind==BR_EV_REPLY_STARTED&&c->model.phase==BR_REPLYING&&!atomic_load(&c->stop)&&!atomic_load(&c->failed)){atomic_store(&c->play_gate,true);atomic_store(&c->audio_epoch,c->model.audio_epoch);}
@@ -614,15 +881,28 @@ void bridge_voice_run(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_s
         if((phase==BR_CONNECTING||phase==BR_BEGINNING)&&esp_timer_get_time()>=begin_by){note_exit(c,BV_EXIT_BEGIN);failure(c,"reply_unavailable");break;}
         if(actions&BR_ACT_BEGIN){if(!send_action(c,BR_ACT_BEGIN)){note_exit(c,BV_EXIT_SEND);failure(c,"reply_unavailable");break;}}
         if(actions&BR_ACT_CAPTURE){
-            if(stopping(c))break;
+            if(stopping(c)||esp_timer_get_time()>=c->work)break;
             if(audio_stream_open(&c->audio)!=ESP_OK){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
-            if(atomic_load(&c->stop)){quiet(c);break;}
+            if(stopping(c)||esp_timer_get_time()>=c->work){quiet(c);break;}
             if(xTaskCreate(capture_task,"pet_bridge_mic",4096,c,5,NULL)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
             c->audio_tasks|=BV_CAPTURE_DONE;
             if(xTaskCreate(play_task,"pet_bridge_out",4096,c,5,NULL)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
-            c->audio_tasks|=BV_PLAY_DONE;atomic_store(&c->capture_gate,true);
+            c->audio_tasks|=BV_PLAY_DONE;c->began_at=esp_timer_get_time();
+            if(!take()){note_exit(c,BV_EXIT_GUARD);failure(c,"reply_unavailable");break;}
+            if(stopping(c)||atomic_load(&c->failed)){give();quiet(c);break;}
+            /* The parent latch and these gate stores share the very same
+             * status lock. Stop before admission prevents either gate; a Stop
+             * after admission closes them via bridge_voice_stop. No I/O or
+             * task creation occurs while the status lock is held. */
+            if(!live_voice_bridge_audio_begin()){give();stopping(c);quiet(c);break;}
+            if(atomic_load(&c->stop)||atomic_load(&c->failed)||esp_timer_get_time()>=c->work){
+                live_voice_bridge_audio_end();give();quiet(c);break;
+            }
+            atomic_store(&c->capture_gate,true);
             /* A conversation plays host audio whenever it arrives, from the start. */
-            if(phase==BR_CONVERSING&&!atomic_load(&c->stop)&&!atomic_load(&c->failed))atomic_store(&c->play_gate,true);
+            if(phase==BR_CONVERSING)atomic_store(&c->play_gate,true);
+            live_voice_bridge_audio_end();
+            give();
         }
         if((actions&BR_ACT_FINISH_CAPTURE)&&!finish_capture(c,&next_audio))break;
         if(actions&BR_ACT_CONFIRM){if(!send_action(c,BR_ACT_CONFIRM)){failure(c,"reply_unavailable");break;}}
@@ -643,4 +923,49 @@ setup_failed:
     note_exit(c,BV_EXIT_SETUP);atomic_store(&c->failed,true);
 cleanup:
     cleanup(c,true);
+}
+/* Guard taken here. The last word of a mic-on that ends between two calls. */
+static void between_calls(live_state_t state,const char *text){
+    if(take()){snprintf(terminal_view.status,sizeof(terminal_view.status),"%s",text);give();}
+    live_voice_bridge_status(state,text);
+}
+void bridge_voice_run(const setup_bridge_t *cfg,int64_t first_deadline,int64_t call_limit,bool (*parent_stopped)(void)){
+    unsigned failures=0,reconnects=0;bool reached=false;int64_t deadline=first_deadline,lost_at=0,retry_until=0;
+    for(;;){
+        run_call(cfg,deadline,parent_stopped,failures,reconnects,reached,retry_until);
+        /* Every call has been released in full by its own cleanup before this
+         * point: its codec, tasks, buffers (with any microphone audio not yet
+         * sent) and transport are gone. Nothing of it is carried over, and
+         * nothing is ever sent again. */
+        if(!call_report.again)return;
+        failures=call_report.failures;reached=call_report.reached;
+        if(!failures)lost_at=call_report.ended_at; /* original loss, or loss after a healthy call */
+        if(!lost_at){
+            between_calls(LIVE_ERROR,reached?"Connection lost - mic off":"Could not reach the host - mic off");return;
+        }
+        retry_until=lost_at+BV_RETRY_WINDOW_US;
+        int64_t until=esp_timer_get_time()+(int64_t)BV_RETRY_DELAY_S[failures]*1000000;
+        if(until>retry_until){
+            between_calls(LIVE_ERROR,reached?"Connection lost - mic off":"Could not reach the host - mic off");return;
+        }
+        failures++;reconnects++;
+        /* No microphone, speaker or socket exists while waiting. Mic off ends
+         * the wait at once. */
+        for(;;){
+            if(parent_stopped&&parent_stopped()){between_calls(LIVE_OFF,"Mic off");return;}
+            if(esp_timer_get_time()>=until)break;
+            vTaskDelay(pdMS_TO_TICKS(BV_RETRY_POLL_MS));
+        }
+        /* Ending the last call latched the amplifier off, as every end does.
+         * The mic is still on, so re-arm it for the new call, then look for
+         * mic off once more: a tap from here on finds either no call (and the
+         * new one stops before it opens audio) or a current one, which it
+         * mutes and latches off again exactly as on a first call. */
+        audio_stream_prepare();
+        if(parent_stopped&&parent_stopped()){audio_stream_inhibit();between_calls(LIVE_OFF,"Mic off");return;}
+        if(esp_timer_get_time()>retry_until){
+            audio_stream_inhibit();between_calls(LIVE_ERROR,reached?"Connection lost - mic off":"Could not reach the host - mic off");return;
+        }
+        deadline=esp_timer_get_time()+call_limit;
+    }
 }

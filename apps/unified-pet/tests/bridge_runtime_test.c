@@ -42,6 +42,7 @@ typedef void *SemaphoreHandle_t;
 typedef void *esp_websocket_client_handle_t;
 typedef struct {unsigned unused;} audio_session_t;
 typedef struct {bool upgraded,cancelled,finished;} bridge_transport_t;
+typedef enum {BR_TRANSPORT_NONE,BR_TRANSPORT_PROTOCOL,BR_TRANSPORT_POLICY,BR_TRANSPORT_EVENT_LOSS,BR_TRANSPORT_PEER_NORMAL,BR_TRANSPORT_UNSUPPORTED,BR_TRANSPORT_PAYLOAD_REJECTED} bridge_transport_terminal_t;
 typedef const char *esp_event_base_t;
 typedef struct {int data_len,payload_len,payload_offset,op_code;bool fin;const char *data_ptr;} esp_websocket_event_data_t;
 #define WEBSOCKET_EVENT_CONNECTED 1
@@ -55,12 +56,14 @@ static unsigned reads,writes,inhibits,sends,wait_ms,delay_calls,wire_bytes,playe
 static bool lock_ok=true,stop_on_take=false,expire_send=false,end_on_delay=false;
 static bool queue_on_delay=false;
 static bool cleanup_transport_ok=true,cleanup_final_on_delay,cleanup_mode;
+static bridge_transport_terminal_t cleanup_terminal;
 static unsigned codec_closes,deleted_queues,deleted_streams,deleted_groups,dispose_calls;
 static int64_t dispose_deadline;
 static char last_status[112];
 static int64_t now=1000000;
 static char wire[TEST_WIRE_CAP][7000];
-static char *received[4];
+typedef struct {char *text;int64_t received_at;bool after_local_control;} fixture_frame_t;
+static fixture_frame_t received[4];
 static unsigned received_n;
 static unsigned char played_bytes[32000];
 /* All A5 state is inert during the unchanged legacy main body. */
@@ -94,17 +97,17 @@ static void stream_check(StreamBufferHandle_t s){
     assert(s&&s->before==STREAM_CANARY&&s->after==STREAM_CANARY&&s->n<=BV_TEST_CAP);
 }
 static void *heap_caps_malloc(size_t n,unsigned flags){(void)flags;return malloc(n);}
-static int xQueueSend(QueueHandle_t q,const void *p,unsigned ms){(void)q;(void)ms;if(received_n==4)return 0;received[received_n++]=*(char*const*)p;return pdTRUE;}
+static int xQueueSend(QueueHandle_t q,const void *p,unsigned ms){(void)q;(void)ms;if(received_n==4)return 0;memcpy(&received[received_n++],p,sizeof(received[0]));return pdTRUE;}
 static unsigned uxQueueMessagesWaiting(QueueHandle_t q){(void)q;return received_n;}
 static int xQueueReceive(QueueHandle_t q,void *out,unsigned ms){
     (void)q;(void)ms;if(!received_n)return pdFALSE;
-    *(char**)out=received[0];memmove(received,received+1,--received_n*sizeof(*received));return pdTRUE;
+    memcpy(out,&received[0],sizeof(received[0]));memmove(received,received+1,--received_n*sizeof(*received));return pdTRUE;
 }
 static void vQueueDelete(QueueHandle_t q){assert(!model_lock_held&&!received_n);deleted_queues++;free(q);}
 static void vStreamBufferDelete(StreamBufferHandle_t s){assert(!model_lock_held);deleted_streams++;free(s);}
 static void vEventGroupDelete(EventGroupHandle_t e){assert(!model_lock_held);deleted_groups++;free(e);}
 typedef int live_state_t;
-enum {LIVE_ERROR=1,LIVE_OFF=2,LIVE_CLOSING=3};
+enum {LIVE_ERROR=1,LIVE_OFF=2,LIVE_CLOSING=3,LIVE_RECONNECTING=4};
 static void live_voice_bridge_status(live_state_t s,const char *text){(void)s;snprintf(last_status,sizeof(last_status),"%s",text);}
 static void *selected;
 static int xSemaphoreTake(SemaphoreHandle_t h,unsigned ms){
@@ -158,13 +161,18 @@ static esp_err_t audio_stream_read(audio_session_t *a,void *p,unsigned n){
 }
 static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){(void)a;assert(played+n<=sizeof(played_bytes));memcpy(played_bytes+played,p,n);writes++;played+=n;return ESP_OK;}
 static bool bridge_transport_upgraded(bridge_transport_t *t){return t&&t->upgraded&&!t->cancelled;}
+static bool bridge_transport_take_data(bridge_transport_t *t,bool *after,int64_t *at){(void)t;*after=false;*at=now;return true;}
+static int64_t bridge_transport_end_at(bridge_transport_t *t){(void)t;return 0;}
+static bool bridge_transport_admit_control(bridge_transport_t *t,int64_t deadline){(void)t;(void)deadline;return true;}
 static bool bridge_transport_finished(const bridge_transport_t *t){return t&&t->finished;}
 static bool bridge_transport_started(const bridge_transport_t *t){return t!=NULL;}
 static void bridge_transport_cancel(bridge_transport_t *t){if(t)t->cancelled=true;}
 /* Separate transport suite exercises actual SDK-task ownership. Here the
  * transport completion result is an injected boundary, never claimed a join. */
-static bool bridge_transport_dispose(bridge_transport_t *t,int64_t until){
-    (void)t;assert(!model_lock_held);dispose_calls++;dispose_deadline=until;return cleanup_transport_ok;
+static bool bridge_transport_dispose_result(bridge_transport_t *t,int64_t until,bridge_transport_terminal_t *out){
+    (void)t;assert(!model_lock_held);dispose_calls++;dispose_deadline=until;
+    if(cleanup_transport_ok)*out=cleanup_terminal;
+    return cleanup_transport_ok;
 }
 static void audio_stream_close(audio_session_t *a){assert(!model_lock_held);codec_closes++;free(a);}
 static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const char *s,size_t n,unsigned ms){
@@ -222,7 +230,7 @@ static bridge_transport_t transport;
 static unsigned char append[4800];static char json[7000];
 static char assembly[96000];
 static void reset(void){
-    for(unsigned i=0;i<received_n;i++)free(received[i]);
+    for(unsigned i=0;i<received_n;i++)free(received[i].text);
     received_n=0;memset(played_bytes,0,sizeof(played_bytes));
     memset(&context,0,sizeof(context));memset(&ev,0,sizeof(ev));memset(&mic,0,sizeof(mic));memset(&speaker,0,sizeof(speaker));memset(wire,0,sizeof(wire));
     mic.before=mic.after=speaker.before=speaker.after=STREAM_CANARY;
@@ -290,10 +298,10 @@ static void legacy_cases(void){
     const char valid[]="{\"type\":\"session.closed\"}";
     esp_websocket_event_data_t frame={.data_len=sizeof(valid)-1,.payload_len=sizeof(valid)-1,.op_code=1,.fin=true,.data_ptr=valid};
     ws_event(&context,NULL,WEBSOCKET_EVENT_DATA,&frame);
-    assert(!atomic_load(&context.failed)&&received_n==1&&!strcmp(received[0],valid));
+    assert(!atomic_load(&context.failed)&&received_n==1&&!strcmp(received[0].text,valid));
     ws_event(&context,NULL,WEBSOCKET_EVENT_DISCONNECTED,NULL);
     assert(!transport_lost(&context)); // queued DATA is consumed before clean EOF
-    free(received[0]);received_n=0;assert(transport_lost(&context));
+    free(received[0].text);received_n=0;assert(transport_lost(&context));
     atomic_store(&context.drain,true);assert(!transport_lost(&context));
     reset();atomic_store(&context.accepting,true);
     const char corrupt[]="{\"type\":\"session.closed\"}\0{\"type\":\"pet.turn.preview\"}";
@@ -798,7 +806,7 @@ static void a5_timed_output(unsigned mode){
     a5_no_unified();
 }
 static bridge_voice_t *cleanup_fixture(void){
-    cleanup_mode=true;cleanup_transport_ok=true;cleanup_final_on_delay=false;
+    cleanup_mode=true;cleanup_transport_ok=true;cleanup_final_on_delay=false;cleanup_terminal=BR_TRANSPORT_NONE;
     codec_closes=deleted_queues=deleted_streams=deleted_groups=dispose_calls=0;
     transport=(bridge_transport_t){.upgraded=true};
     bridge_voice_t *c=calloc(1,sizeof(*c));assert(c);
@@ -811,7 +819,7 @@ static bridge_voice_t *cleanup_fixture(void){
     c->append_json=calloc(1,7000);c->decoded=calloc(1,BV_APPEND);
     bridge_init(&c->model);c->model.phase=BR_CAPTURING;
     atomic_store(&c->active,true);atomic_store(&c->accepting,true);
-    for(unsigned i=0;i<2;i++){char *s=strdup("private queued frame");assert(xQueueSend(c->frames,&s,0));}
+    for(unsigned i=0;i<2;i++){bv_frame_t s={.text=strdup("private queued frame"),.received_at=now};assert(xQueueSend(c->frames,&s,0));}
     return c;
 }
 static void cleanup_case(const char *name){
@@ -823,7 +831,14 @@ static void cleanup_case(const char *name){
         c->model.send=BR_SEND_ACCEPTED;c->model.reply=BR_REPLY_RECEIVED;c->model.draining=true;
         atomic_store(&c->stop,true);
     }
-    if(!strcmp(name,"cleanup-audio-final")||!strcmp(name,"cleanup-timeout")||!strcmp(name,"cleanup-hard-cap")){
+    bool terminal=!strcmp(name,"cleanup-retained-terminal")||!strcmp(name,"cleanup-retained-muted");
+    if(terminal){
+        bv_frame_t p;while(xQueueReceive(c->frames,&p,0)==pdTRUE)free(p.text);
+        bridge_init(&c->model);bridge_command(&c->model,BR_CMD_CONVERSE,0);
+        atomic_store(&c->converse,true);atomic_store(&c->exit_reason,BV_EXIT_CALLBACK);
+        cleanup_terminal=BR_TRANSPORT_POLICY;
+    }
+    if(!strcmp(name,"cleanup-audio-final")||!strcmp(name,"cleanup-timeout")||!strcmp(name,"cleanup-hard-cap")||terminal){
         c->audio_tasks=BV_CAPTURE_DONE|BV_PLAY_DONE;
         c->events->bits=c->audio_tasks; /* bits set, actual signaling tails NOT finished */
         cleanup_final_on_delay=!strcmp(name,"cleanup-audio-final");
@@ -835,6 +850,12 @@ static void cleanup_case(const char *name){
     assert(dispose_calls==1&&dispose_deadline==hard&&sends==0);
     if(retained){
         assert(current==c&&atomic_load(&restart_required)&&!codec_closes&&!deleted_queues&&!deleted_groups);
+        if(terminal){
+            assert(!c->transport&&c->transport_terminal==BR_TRANSPORT_POLICY);
+            /* A real mute while inactive remains authoritative, even if the
+             * reaper observes it after this call's deadline. */
+            if(!strcmp(name,"cleanup-retained-muted")){now=c->work+1;bridge_voice_stop();assert(atomic_load(&c->muted));}
+        }
         assert(now<=hard); /* no fresh local budget beyond the original cap */
         /* Explicitly finish the synthetic workers/transport, then exercise the
          * SAME cleanup on retained storage. This is fixture settlement, not a
@@ -847,6 +868,7 @@ static void cleanup_case(const char *name){
     bridge_view_t view;assert(bridge_voice_snapshot(&view));
     if(!strcmp(name,"cleanup-unknown"))assert(view.send==BR_SEND_UNKNOWN&&strstr(last_status,"Unknown"));
     if(!strcmp(name,"cleanup-interrupted-tail"))assert(view.reply==BR_REPLY_STOPPED&&!strstr(last_status,"finished"));
+    if(terminal)assert(!strcmp(last_status,!strcmp(name,"cleanup-retained-muted")?"Mic off":"Host refused the voice connection."));
     if(!strcmp(name,"cleanup-reuse")){
         /* No boot/global reset between the real cleanup invocations. */
         c=cleanup_fixture();c->model.send=BR_SEND_ACCEPTED;c->model.reply=BR_REPLY_RECEIVED;
