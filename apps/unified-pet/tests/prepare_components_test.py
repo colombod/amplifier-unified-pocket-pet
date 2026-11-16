@@ -255,6 +255,26 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)
         self.assertFalse(self.dest.exists())
 
+    def test_fetch_accepts_complete_http_framing(self):
+        body = b"verified input"
+        url = "https://components-file.espressif.com/components/public/fixture.json"
+        cases = (
+            b"Content-Length: 14\r\n\r\n" + body,
+            b"Transfer-Encoding: chunked\r\n\r\nE\r\n" + body + b"\r\n0\r\n\r\n",
+            b"Connection: close\r\n\r\n" + body,
+        )
+        for framing in cases:
+            with self.subTest(framing=framing[:20]):
+                sock = mock.Mock()
+                sock.makefile.return_value = io.BytesIO(b"HTTP/1.1 200 OK\r\n" + framing)
+                response = http.client.HTTPResponse(sock)
+                response.begin()
+                response.geturl = lambda: url
+                opener = mock.Mock()
+                opener.open.return_value = response
+                with mock.patch.object(prep.urllib.request, "build_opener", return_value=opener):
+                    self.assertEqual(prep.fetch(url, 100), body)
+
     def test_optional_codecs_may_be_missing_at_import(self):
         original_import = builtins.__import__
         for codec in ("zlib", "lzma"):
@@ -278,6 +298,17 @@ class PrepareTest(unittest.TestCase):
         with (mock.patch.object(prep, "load_json", side_effect=RuntimeError("bug")),
               self.assertRaisesRegex(RuntimeError, "bug")):
             prep.registry_urls(self.metadata, "public/fixture", "1.0.0", self.hash)
+
+    def test_extract_does_not_mask_unexpected_hash_error(self):
+        expected = {"nested/file.txt": (len(self.body), prep.digest(self.body))}
+        folder = self.parent / "hash-bug"
+        folder.mkdir()
+        hasher = mock.Mock()
+        hasher.update.side_effect = RuntimeError("bug")
+        with (mock.patch.object(prep.hashlib, "sha256", return_value=hasher),
+              self.assertRaisesRegex(RuntimeError, "bug")):
+            prep.extract(self.zipped, expected, folder)
+        hasher.update.assert_called_once_with(self.body)
 
     def test_racing_destination_is_not_overwritten(self):
         real_publish = prep.publish
