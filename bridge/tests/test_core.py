@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import pet_bridge
-from pet_bridge.core import Binding, Bridge, BridgeError, CommandResult, ReplyResult
+from pet_bridge.core import Binding, Bridge, BridgeError, CommandResult, ReplyResult, RETENTION_S
 from pet_bridge.journal import Journal, JournalError
 from pet_bridge.reply import ReplyDecision
 
@@ -1627,6 +1627,68 @@ class PreDialSafetyTest(CoreCase):
                 self.assertFalse(self.bridge.pre_dial_safe(self.binding))
         with mock.patch.object(self.journal, "count", return_value=42):
             self.assertFalse(self.bridge.pre_dial_safe(self.binding))
+
+    def test_reconciliation_eligibility_requires_uncertainty_as_only_blocker(self):
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "safe")
+        epoch = self.bridge.status()["epoch"]
+        second = "00000000-0000-4000-8000-0000000000b3"
+        _plant_command(self, self.COMMAND, "UNCERTAIN", epoch, text_sha256=sha(UTTER))
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "uncertain")
+        _plant_command(self, second, "ATTEMPTED", epoch)
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "blocked")
+        self.journal.delete(f"cmd-{second}.json")
+        record = self.record(self.COMMAND)
+        for field, value in (
+            ("text_sha256", None),
+            ("text_sha256", "not-a-digest"),
+            ("tombstone", True),
+        ):
+            with self.subTest(field=field, value=value):
+                self.journal.put(f"cmd-{self.COMMAND}.json", {**record, field: value})
+                self.assertEqual(self.bridge.pre_dial_state(self.binding), "blocked")
+        for field in ("host_id", "client_id", "credential_ref", "session_id"):
+            with self.subTest(field=field):
+                foreign = {**record["binding"], field: {
+                    "host_id": "host-foreign", "client_id": "other-client",
+                    "credential_ref": CRED_2, "session_id": OTHER_SESSION,
+                }[field]}
+                self.journal.put(f"cmd-{self.COMMAND}.json", {**record, "binding": foreign})
+                self.assertEqual(self.bridge.pre_dial_state(self.binding), "blocked")
+        self.journal.put(f"cmd-{self.COMMAND}.json", {
+            **record, "binding": {
+                **record["binding"], "host_instance_id": "restart-2",
+                "binding_id": "00000000-0000-4000-8000-0000000000aa",
+            },
+        })
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "uncertain")
+
+    def test_retention_boundary_and_complete_page_are_checked_again_before_promotion(self):
+        _plant_command(
+            self, self.COMMAND, "UNCERTAIN", self.bridge.status()["epoch"],
+            text_sha256=sha(UTTER),
+        )
+        proof = page([user_row(self.COMMAND, text=UTTER)])
+        original = self.record(self.COMMAND)
+        incomplete = {**proof, "offset": 1, "total": 2}
+        self.assertEqual(
+            self.bridge.reconcile_pre_dial(self.binding, incomplete, session_id=SESSION), ()
+        )
+        self.assertEqual(
+            self.bridge.reconcile_pre_dial(
+                self.binding, {**proof, "sessionId": OTHER_SESSION}, session_id=SESSION
+            ), ()
+        )
+        self.assertEqual(self.record(self.COMMAND), original)
+        self.clock.advance(RETENTION_S - 0.25)
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "uncertain")
+        self.clock.advance(0.25)
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "blocked")
+        self.assertEqual(
+            self.bridge.reconcile_pre_dial(self.binding, proof, session_id=SESSION), ()
+        )
+        self.assertEqual(self.record(self.COMMAND), original)
+        self.clock.advance(1)
+        self.assertEqual(self.bridge.pre_dial_state(self.binding), "blocked")
 
 
 class CredentialRefTest(CoreCase):

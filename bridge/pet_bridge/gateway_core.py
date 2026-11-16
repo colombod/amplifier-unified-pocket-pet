@@ -327,6 +327,7 @@ class CoreRunner:
             "stop",
             "resume",
             "status",
+            "pre_dial_admission",
             "follow_host_restart",
         }
     )
@@ -741,7 +742,7 @@ class UnifiedOps:
                 raise
         return self._bridge.begin_turn()
 
-    def _reconcile(self) -> tuple[str, ...]:
+    def _reconcile(self, *, pre_dial: bool = False) -> tuple[str, ...]:
         """One read of the conversation; the ids of sends it proves were delivered."""
         attachment, reason = self._attachment()
         if reason is not None:
@@ -750,6 +751,14 @@ class UnifiedOps:
             window = companion.detail_window(
                 self._client(), attachment, self._session_id
             )
+            if pre_dial:
+                # The pre-dial boundary requires a complete, validated read, not
+                # merely the newest tail or a partial/inconsistent snapshot.
+                if window.coverage_complete is not True:
+                    return ()
+                return self._bridge.reconcile_pre_dial(
+                    self._binding, window.as_page(), session_id=self._session_id
+                )
             return self._bridge.reconcile_delivered(
                 window.as_page(), session_id=self._session_id
             )
@@ -848,6 +857,23 @@ class UnifiedOps:
         ):
             return False
         return self._bridge.pre_dial_safe(self._binding)
+
+    def pre_dial_admission(self) -> bool:
+        """One bounded positive-proof reconciliation, then the original gate again."""
+        if (
+            self._binding is None
+            or self._binding.session_id != self._session_id
+            or self._binding.credential_ref != self._credential_ref
+        ):
+            return False
+        state = self._bridge.pre_dial_state(self._binding)
+        if state == "safe":
+            return self.pre_dial_safe()
+        if state != "uncertain":
+            return False
+        promoted = self._reconcile(pre_dial=True)
+        safe = self.pre_dial_safe()
+        return bool(promoted) and safe
 
 
 class LoopClock(Protocol):

@@ -456,3 +456,6 @@ class FakeOps:
     def pre_dial_safe(self) -> bool:
         scripted = self._enter("pre_dial_safe", ())
         return True if scripted is None else scripted
+
+    def pre_dial_admission(self) -> bool:
+        return self.pre_dial_safe()

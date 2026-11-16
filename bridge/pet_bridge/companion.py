@@ -534,9 +534,11 @@ class _Page:
     source_offset: int
 
 
-def _decode_page(doc: dict[str, Any]) -> _Page:
+def _decode_page(doc: dict[str, Any], session_id: str) -> _Page:
     items = doc.get("items")
     before = doc.get("before")
+    if "sessionId" in doc and doc["sessionId"] != session_id:
+        raise _invalid()
     if type(items) is not list or not all(type(r) is dict for r in items):
         raise _invalid()
     if before is not None and type(before) is not str:
@@ -588,7 +590,7 @@ def detail_window(
     before: str | None = None
     while len(pages) < MAX_DETAIL_PAGES:
         route = _route(transport.route_detail, session_id, before=before)
-        page = _decode_page(_get(client, attachment, route, _DETAIL_STATUS))
+        page = _decode_page(_get(client, attachment, route, _DETAIL_STATUS), session_id)
         _check_page(
             page, pages[-1] if pages else None, pages[0].total if pages else None, ids
         )

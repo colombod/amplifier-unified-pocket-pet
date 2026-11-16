@@ -449,7 +449,7 @@ class ServeEventsTest(gf.OfflineAsyncCase):
         gw._runner = gc.CoreRunner()
         gw._runner.start()
         self.addAsyncCleanup(gw._runner.aclose)
-        gw._ops.pre_dial_safe = lambda: True
+        gw._ops.pre_dial_admission = lambda: True
         gw._closing = False
         for error, code in ((gsv.ProviderError("provider_redirect"), "provider_redirect"),
                             (gsv.ProviderError("provider_auth"), "provider_auth"),
@@ -576,6 +576,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
 
     async def test_gate_checks_frozen_session_ref_and_live_binding_locally(self):
         self.assertTrue(self.ops.pre_dial_safe())
+        self.assertTrue(self.ops.pre_dial_admission())
         for field, value in (
             ("_binding", None),
             ("_session_id", "other-session"),
@@ -584,7 +585,9 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         ):
             with self.subTest(field=field), mock.patch.object(self.ops, field, value):
                 self.assertFalse(self.ops.pre_dial_safe())
+                self.assertFalse(self.ops.pre_dial_admission())
         self.assertTrue(self.ops.pre_dial_safe())
+        self.assertTrue(self.ops.pre_dial_admission())
         self.assertEqual(self.client.calls, [])
         self.assertEqual(self.dials, 0)
 
@@ -598,6 +601,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         device.feed(gf.ASSISTANT_START)
         await self.quiesce()
         self.assertEqual(self.dials, 1)
+        self.assertEqual(self.client.named("detail"), [])
         device.feed({"type": "pet.turn.begin"})
         await self.quiesce()
         turn = device.of_type("pet.turn.began")[0]["turn_id"]
@@ -678,6 +682,21 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertEqual(self.journal.get(f"cmd-{turn}.json"), before)
         self.assertEqual(len(self.client.posts), 1)
         self.assertEqual(self.dials, 1)
+        self.client.echo_sent_text = True
+        prior_reads = len(self.client.named("detail"))
+        fourth = gf.FakeDeviceLink(self.clock)
+        self.devices.append(fourth)
+        fourth.feed(gf.ASSISTANT_START)
+        recovered = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertEqual(len(self.client.named("detail")) - prior_reads, 1)
+        self.assertEqual(self.dials, 2)
+        self.assertEqual(len(self.client.posts), 1)
+        fourth.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(recovered, 5)
+        await until(lambda: not self.gw.busy)
 
     async def test_conversation_loses_asking_and_uncertainty_before_disconnect(self):
         self.client.post_response = flow.Response(504, b"")
@@ -732,6 +751,32 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertEqual(self.dials, 1)
         self.assertEqual(len(self.client.posts), 1)
         self.assertEqual(self.journal.get(name), before)
+        self.client.echo_sent_text = True
+        real_connect = self.gw._deps.provider_connect
+        observed = []
+
+        async def checked_connect(*args, **kw):
+            observed.append(self.journal.get(name)["state"])
+            return await real_connect(*args, **kw)
+
+        self.gw._deps.provider_connect = checked_connect
+        third = gf.FakeDeviceLink(self.clock)
+        self.devices.append(third)
+        third.feed(gf.ASSISTANT_START)
+        recovered = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(observed, ["ACCEPTED"])
+        self.assertEqual((self.dials, len(self.client.posts)), (2, 1))
+        third.feed({"type": "pet.converse.begin"})
+        await self.quiesce()
+        self.assertEqual(
+            [f["state"] for f in third.of_type("pet.converse.state")], ["listening"]
+        )
+        self.assertEqual(len(self.client.posts), 1)
+        third.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(recovered, 5)
+        await until(lambda: not self.gw.busy)
 
     async def _cross_route_uncertainty_and_startup(self, first_tailnet, aged=False):
         self.gw._cfg = srv.make_cfg(
@@ -786,14 +831,14 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.devices.append(second)
         second.feed(gf.ASSISTANT_START)
         values = []
-        original_gate = self.ops.pre_dial_safe
+        original_gate = self.ops.pre_dial_admission
 
         def record_gate():
             value = original_gate()
             values.append(value)
             return value
 
-        with mock.patch.object(self.ops, "pre_dial_safe", record_gate):
+        with mock.patch.object(self.ops, "pre_dial_admission", record_gate):
             retry = asyncio.create_task(self.gw.handle(other_route))
             await self.quiesce()
             if not retry.done():  # baseline without the fence needs a synthetic stop
@@ -859,8 +904,8 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         restarted._device_factory = lambda *_: third
         third.feed(gf.ASSISTANT_START)
         values = []
-        original_gate = held.ops.pre_dial_safe
-        with mock.patch.object(held.ops, "pre_dial_safe", record_gate):
+        original_gate = held.ops.pre_dial_admission
+        with mock.patch.object(held.ops, "pre_dial_admission", record_gate):
             request = asyncio.create_task(restarted.handle(other_route))
             await asyncio.wait_for(request, 5)
         await until(lambda: not restarted.busy)
@@ -870,6 +915,32 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertEqual(third.of_type("session.started"), [])
         self.assertEqual(held.journal.get(name), after_startup)
         self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+        if not aged:
+            self.client.echo_sent_text = True
+            observed = []
+            real_connect = deps.provider_connect
+
+            async def checked_connect(*args, **kw):
+                observed.append(held.journal.get(name)["state"])
+                return await real_connect(*args, **kw)
+
+            deps.provider_connect = checked_connect
+            fourth = gf.FakeDeviceLink(self.clock)
+            restarted._device_factory = lambda *_: fourth
+            fourth.feed(gf.ASSISTANT_START)
+            values = []
+            with mock.patch.object(held.ops._bridge, "_clock", return_value=startup_wall):
+                with mock.patch.object(held.ops, "pre_dial_admission", record_gate):
+                    recovered = asyncio.create_task(restarted.handle(other_route))
+                    await until(lambda: bool(fourth.of_type("session.started")))
+                    self.assertEqual(values, [True])
+                    self.assertEqual(observed, ["ACCEPTED"])
+                    self.assertEqual((self.dials, len(self.client.posts)), (2, 1))
+                    fourth.feed({"type": "pet.stop"})
+                    await asyncio.wait_for(recovered, 5)
+                await until(lambda: not restarted.busy)
+            self.assertEqual(held.journal.get(name)["state"], "ACCEPTED")
+            self.assertEqual(len(attaches), 3)
 
     async def test_uncertainty_from_lan_refuses_tailnet_before_and_after_startup(self):
         await self._cross_route_uncertainty_and_startup(False)
@@ -904,14 +975,14 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
             transport=srv.transport_for(local=("100.64.12.34", 8941)),
         )
         values = []
-        original = held.ops.pre_dial_safe
+        original = held.ops.pre_dial_admission
 
         def record_gate():
             value = original()
             values.append(value)
             return value
 
-        with mock.patch.object(held.ops, "pre_dial_safe", record_gate):
+        with mock.patch.object(held.ops, "pre_dial_admission", record_gate):
             task = asyncio.create_task(held.gateway.handle(request))
             device.feed(gf.ASSISTANT_START)
             await until(lambda: bool(device.of_type("session.started")))
@@ -977,6 +1048,622 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
     async def test_exact_positive_proof_resolves_uncertain_before_reconnect(self):
         self.client.echo_sent_text = True
         await self._known_outcome_then_reconnect(flow.Response(504, b""), "ACCEPTED")
+
+    async def _create_uncertain(self):
+        # The first immediate read does not prove delivery; a later one does.
+        self.client.post_response = flow.Response(504, b"")
+        gate = self.hold_posts()
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        first = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        device.feed(gf.ASSISTANT_START)
+        await self.quiesce()
+        device.feed({"type": "pet.turn.begin"})
+        await self.quiesce()
+        turn = device.of_type("pet.turn.began")[0]["turn_id"]
+        self.providers[0].push(delta("e1", "hello world", 0, 500))
+        self.providers[0].push(delegation())
+        await self.quiesce()
+        device.feed(flow.golden_in(turn)["capture_stop"])
+        await self.quiesce()
+        await self.clock.advance(1.5)
+        device.feed(self.confirm_frame(turn))
+        await until(self.client.post_entered.is_set)
+        device.disconnect()
+        await asyncio.wait_for(first, 5)
+        self.assertTrue(self.gw.busy)
+        gate.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn)["state"], "UNCERTAIN")
+        self.assertEqual(self.dials, 1)
+        return turn
+
+    async def test_later_positive_proof_reconciles_before_replacement_dial(self):
+        turn = await self._create_uncertain()
+        prior_reads = len(self.client.named("detail"))
+        self.client.echo_sent_text = True
+        real_connect = self.gw._deps.provider_connect
+        observed = []
+
+        async def checked_connect(*args, **kw):
+            observed.append((self.record(turn)["state"], len(self.client.named("detail"))))
+            return await real_connect(*args, **kw)
+
+        self.gw._deps.provider_connect = checked_connect
+
+        second = gf.FakeDeviceLink(self.clock)
+        self.devices.append(second)
+        second.feed(gf.ASSISTANT_START)
+        retry = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(self.dials, 2)
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertEqual(len(self.client.named("detail")) - prior_reads, 1)
+        self.assertEqual(observed, [("ACCEPTED", prior_reads + 1)])
+        self.assertEqual(len(self.client.posts), 1)
+        second.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(retry, 5)
+        await until(lambda: not self.gw.busy)
+
+    async def test_complete_older_page_proof_is_promoted_before_dial(self):
+        turn = await self._create_uncertain()
+        rows = [flow.user_row(turn, text=self.client.last_text)]
+        rows.extend(flow.assistant_row(None, "older", id=f"hist-{i}") for i in range(129))
+        server = tc.DetailServer(rows, limit=60)
+        real_request = self.client.request
+
+        def request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                return server({"route": route})
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        real_connect = self.gw._deps.provider_connect
+        observed = []
+
+        async def checked_connect(*args, **kw):
+            observed.append((self.record(turn)["state"], len(server.requests)))
+            return await real_connect(*args, **kw)
+
+        self.gw._deps.provider_connect = checked_connect
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        self.assertEqual(observed, [("ACCEPTED", 3)])
+        self.assertEqual(len(server.requests), 3)
+        self.assertEqual(len(device.of_type("session.started")), 1)
+        self.assertEqual((self.dials, len(self.client.posts)), (2, 1))
+        device.feed({"type": "pet.stop"})
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+
+    async def test_native_decoy_on_other_page_never_promotes(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        proper = flow.user_row(turn, text=self.client.last_text, id="proof")
+        decoy = flow.user_row("other", id="decoy", nativeInputId=turn)
+        fillers = [flow.assistant_row(None, "history", id=f"hist-{i}") for i in range(120)]
+        real_request = self.client.request
+        for proof_first in (True, False):
+            with self.subTest(proof_first=proof_first):
+                rows = ([proper, *fillers, decoy] if proof_first
+                        else [decoy, *fillers, proper])
+                server = tc.DetailServer(rows, limit=60)
+
+                def request(origin, route, *, headers=None, body=b""):
+                    if route.name == "detail":
+                        return server({"route": route})
+                    return real_request(origin, route, headers=headers, body=body)
+
+                self.client.request = request
+                device = gf.FakeDeviceLink(self.clock)
+                self.devices.append(device)
+                device.feed(gf.ASSISTANT_START)
+                task = asyncio.create_task(self.gw.handle(srv.request_for()))
+                await self.quiesce()
+                await asyncio.wait_for(task, 5)
+                await until(lambda: not self.gw.busy)
+                self.assertEqual(len(server.requests), 3)
+                self.assertEqual(device.close_codes, [1008])
+                self.assertEqual(self.record(turn), before)
+                self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+        self.client.request = real_request
+
+    async def test_admission_bad_wall_clock_refuses_before_and_after_held_read(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        real_request = self.client.request
+        for bad in (float("nan"), float("inf"), True, None, "bad",
+                    before["updated_at"] - 1, before["updated_at"] + core.RETENTION_S):
+            with self.subTest(phase="before", value=repr(bad)):
+                old_reads = len(self.client.named("detail"))
+                device = gf.FakeDeviceLink(self.clock)
+                self.devices.append(device)
+                device.feed(gf.ASSISTANT_START)
+                with mock.patch.object(self.bridge, "_clock", return_value=bad):
+                    task = asyncio.create_task(self.gw.handle(srv.request_for()))
+                    await self.quiesce()
+                    await asyncio.wait_for(task, 5)
+                    await until(lambda: not self.gw.busy)
+                self.assertEqual(len(self.client.named("detail")), old_reads)
+                self.assertEqual(device.close_codes, [1008])
+                self.assertEqual(self.record(turn), before)
+                self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+
+        for bad in (float("nan"), True, before["updated_at"] - 1,
+                    before["updated_at"] + core.RETENTION_S):
+            with self.subTest(phase="after", value=repr(bad)):
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+
+                def request(origin, route, *, headers=None, body=b""):
+                    if route.name == "detail":
+                        entered.set()
+                        if not release.wait(10):
+                            raise AssertionError("detail hold timed out")
+                    return real_request(origin, route, headers=headers, body=body)
+
+                self.client.request = request
+                device = gf.FakeDeviceLink(self.clock)
+                self.devices.append(device)
+                device.feed(gf.ASSISTANT_START)
+                task = asyncio.create_task(self.gw.handle(srv.request_for()))
+                await until(entered.is_set)
+                with mock.patch.object(self.bridge, "_clock", return_value=bad):
+                    release.set()
+                    await asyncio.wait_for(task, 5)
+                    await until(lambda: not self.gw.busy)
+                self.assertEqual(device.close_codes, [1008])
+                self.assertEqual(self.record(turn), before)
+                self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+                self.client.request = real_request
+
+    async def test_no_proof_bad_digest_foreign_ambiguous_and_read_errors_refuse(self):
+        turn = await self._create_uncertain()
+        original = self.record(turn)
+        proper = flow.user_row(turn, text=self.client.last_text)
+        cases = {
+            "absent": [flow.user_row("other", text=self.client.last_text)],
+            "wrong_text": [flow.user_row(turn, text="wrong")],
+            "truncated": [{**proper, "textDetail": {"truncated": True}}],
+            "foreign": [{**proper, "sessionId": "different-session"}],
+            "native_decoy": [proper, flow.user_row("other", id="decoy", nativeInputId=turn)],
+            "ambiguous": [{**proper, "nativeInputAmbiguous": True}],
+            "duplicate": [proper, {**proper, "id": "other-row"}],
+            "read_error": None,
+        }
+        real_request = self.client.request
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                def request(origin, route, *, headers=None, body=b""):
+                    if route.name == "detail":
+                        if rows is None:
+                            raise OSError(gf.KEY_CANARY)
+                        return flow.json_response(flow.page(rows))
+                    return real_request(origin, route, headers=headers, body=body)
+
+                self.client.request = request
+                device = gf.FakeDeviceLink(self.clock)
+                self.devices.append(device)
+                device.feed(gf.ASSISTANT_START)
+                task = asyncio.create_task(self.gw.handle(srv.request_for()))
+                await self.quiesce()
+                await asyncio.wait_for(task, 5)
+                await until(lambda: not self.gw.busy)
+                self.assertEqual(device.close_codes, [1008])
+                self.assertEqual(self.record(turn), original)
+                self.assertEqual(self.dials, 1)
+                self.assertEqual(len(self.client.posts), 1)
+                self.assertNotIn(gf.KEY_CANARY, repr(device.frames))
+        self.client.request = real_request
+
+    async def test_incomplete_history_with_visible_proof_stays_uncertain(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        self.client.history_rows = [
+            flow.assistant_row(None, "older", id=f"history-{i}") for i in range(639)
+        ]
+        old_reads = len(self.client.named("detail"))
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(len(self.client.named("detail")) - old_reads, 4)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_foreign_envelope_cannot_promote_exact_matching_input(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        real_request = self.client.request
+
+        def request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                row = flow.user_row(turn, text=self.client.last_text)
+                return flow.json_response({**flow.page([row]), "sessionId": "foreign-session"})
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_expiry_during_detail_read_keeps_uncertainty_and_never_dials(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        real_request = self.client.request
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("detail hold timed out")
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await until(entered.is_set)
+        with mock.patch.object(
+            self.bridge, "_clock", return_value=before["updated_at"] + core.RETENTION_S
+        ):
+            release.set()
+            await asyncio.wait_for(task, 5)
+            await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_later_page_failure_does_not_promote_visible_newest_proof(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        self.client.history_rows = [
+            flow.assistant_row(None, "older", id=f"history-{i}") for i in range(70)
+        ]
+        real_request = self.client.request
+        calls = 0
+
+        def request(origin, route, *, headers=None, body=b""):
+            nonlocal calls
+            if route.name == "detail":
+                calls += 1
+                if calls == 2:
+                    return flow.Response(503, b"")
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(calls, 2)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_new_blocker_during_detail_read_prevents_promotion_and_dial(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        real_request = self.client.request
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("detail hold timed out")
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await until(entered.is_set)
+        other = "00000000-0000-4000-8000-0000000000b3"
+        self.journal.put(f"cmd-{other}.json", {**before, "state": "ATTEMPTED"})
+        release.set()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_reselected_binding_during_detail_read_prevents_promotion(self):
+        turn = await self._create_uncertain()
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        real_request = self.client.request
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("detail hold timed out")
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await until(entered.is_set)
+        new_binding = self.bridge.select_session(
+            host_id=self.binding.host_id,
+            host_instance_id=self.binding.host_instance_id,
+            session_id=self.binding.session_id,
+            client_id=self.binding.client_id,
+            credential_ref=self.binding.credential_ref,
+        )
+        self.assertNotEqual(new_binding.binding_id, self.binding.binding_id)
+        release.set()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual((self.dials, len(self.client.posts)), (1, 1))
+
+    async def test_unreconcilable_tombstone_never_reads_or_dials(self):
+        turn = await self._create_uncertain()
+        record = self.record(turn)
+        tomb = {key: record[key] for key in (
+            "state", "binding", "epoch", "created_at", "updated_at", "reason"
+        )}
+        tomb.update(command_id=turn, event_ids=[], tombstone=True)
+        self.journal.put(f"cmd-{turn}.json", tomb)
+        before = self.record(turn)
+        self.client.echo_sent_text = True
+        old_reads = len(self.client.named("detail"))
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(len(self.client.named("detail")), old_reads)
+        self.assertEqual(self.record(turn), before)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_other_hard_blocker_prevents_detail_read_even_with_uncertainty(self):
+        turn = await self._create_uncertain()
+        record = self.record(turn)
+        second = "00000000-0000-4000-8000-0000000000b3"
+        self.journal.put(f"cmd-{second}.json", {**record, "state": "ATTEMPTED"})
+        old_reads = len(self.client.named("detail"))
+        self.client.echo_sent_text = True
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(len(self.client.named("detail")), old_reads)
+        self.assertEqual(self.record(turn), record)
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_partial_multi_command_proof_does_not_bypass_remaining_uncertainty(self):
+        turn = await self._create_uncertain()
+        first = self.record(turn)
+        other = "00000000-0000-4000-8000-0000000000b3"
+        self.journal.put(f"cmd-{other}.json", {**first, "event_ids": ["other-event"]})
+        self.client.echo_sent_text = True
+        prior_reads = len(self.client.named("detail"))
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await self.quiesce()
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(len(self.client.named("detail")) - prior_reads, 1)
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertEqual(self.record(other)["state"], "UNCERTAIN")
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_failed_proof_persistence_faults_and_refuses_dial(self):
+        turn = await self._create_uncertain()
+        self.client.echo_sent_text = True
+        actual_put = self.journal.put
+
+        def put(name, record):
+            if name == f"cmd-{turn}.json" and record.get("state") == "ACCEPTED":
+                raise flow.core.JournalError("journal_io_error")
+            return actual_put(name, record)
+
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        with mock.patch.object(self.journal, "put", side_effect=put):
+            task = asyncio.create_task(self.gw.handle(srv.request_for()))
+            await self.quiesce()
+            await asyncio.wait_for(task, 5)
+            await until(lambda: not self.gw.busy)
+        self.assertTrue(self.bridge.status()["faulted"])
+        self.assertEqual(self.record(turn)["state"], "UNCERTAIN")
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_unknown_persistence_after_partial_promotion_faults_and_refuses(self):
+        turn = await self._create_uncertain()
+        first = self.record(turn)
+        other = "00000000-0000-4000-8000-0000000000b3"
+        self.journal.put(f"cmd-{other}.json", {**first, "event_ids": ["other-event"]})
+        real_request = self.client.request
+
+        def request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                return flow.json_response(flow.page([
+                    flow.user_row(turn, text=self.client.last_text),
+                    flow.user_row(other, text=self.client.last_text),
+                ]))
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = request
+        actual_put = self.journal.put
+        writes = []
+
+        def put(name, record):
+            if name.startswith("cmd-") and record.get("state") == "ACCEPTED":
+                writes.append(name)
+                actual_put(name, record)
+                if len(writes) == 2:
+                    raise flow.core.JournalError("journal_persist_unknown")
+                return
+            return actual_put(name, record)
+
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        with mock.patch.object(self.journal, "put", side_effect=put):
+            task = asyncio.create_task(self.gw.handle(srv.request_for()))
+            await self.quiesce()
+            await asyncio.wait_for(task, 5)
+            await until(lambda: not self.gw.busy)
+        self.assertEqual(len(writes), 2)
+        self.assertTrue(self.bridge.status()["faulted"])
+        self.assertEqual(device.close_codes, [1008])
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def _cancel_during_held_detail(self, how):
+        turn = await self._create_uncertain()
+        self.client.echo_sent_text = True
+        real_request = self.client.request
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def held_request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("detail hold timed out")
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = held_request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await until(entered.is_set)
+        self.assertEqual((await self.gw.handle(srv.request_for())).status, 409)
+        shutdown = None
+        if how == "stop":
+            device.feed({"type": "pet.stop"})
+        elif how == "cancel":
+            task.cancel()
+        elif how == "disconnect":
+            device.disconnect()
+        else:
+            shutdown = asyncio.create_task(self.gw.shutdown())
+        await until(lambda: task.done() or (shutdown is not None and self.gw.closing))
+        self.assertTrue(self.gw.busy)
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(self.record(turn)["state"], "UNCERTAIN")
+        release.set()
+        if how == "cancel":
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        else:
+            await asyncio.wait_for(task, 5)
+        if shutdown is not None:
+            await asyncio.wait_for(shutdown, 5)
+        await until(lambda: not self.gw.busy)
+        # The synchronous read may still commit exact proof after Stop; it must
+        # never restart the cancelled dial or resend the original input.
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
+
+    async def test_stop_while_detail_read_held_never_dials_late(self):
+        await self._cancel_during_held_detail("stop")
+
+    async def test_http_cancel_while_detail_read_held_never_dials_late(self):
+        await self._cancel_during_held_detail("cancel")
+
+    async def test_shutdown_while_detail_read_held_never_dials_late(self):
+        await self._cancel_during_held_detail("shutdown")
+
+    async def test_disconnect_while_detail_read_held_never_dials_late(self):
+        await self._cancel_during_held_detail("disconnect")
+
+    async def test_start_deadline_while_detail_held_never_dials_late(self):
+        turn = await self._create_uncertain()
+        self.client.echo_sent_text = True
+        real_request = self.client.request
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def held_request(origin, route, *, headers=None, body=b""):
+            if route.name == "detail":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("detail hold timed out")
+            return real_request(origin, route, headers=headers, body=body)
+
+        self.client.request = held_request
+        device = gf.FakeDeviceLink(self.clock)
+        self.devices.append(device)
+        device.feed(gf.ASSISTANT_START)
+        task = asyncio.create_task(self.gw.handle(srv.request_for()))
+        await until(entered.is_set)
+        old_hook, self.clock.settle_hook = self.clock.settle_hook, None
+        try:
+            await self.clock.advance(gs.START_DEADLINE_S)
+        finally:
+            self.clock.settle_hook = old_hook
+        await asyncio.wait_for(task, 5)
+        self.assertTrue(self.gw.busy)
+        self.assertEqual(self.dials, 1)
+        release.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.record(turn)["state"], "ACCEPTED")
+        self.assertEqual(self.dials, 1)
+        self.assertEqual(len(self.client.posts), 1)
 
     async def test_corrupt_journal_refuses_before_any_counted_provider_dial(self):
         self.journal.put("binding.json", {"binding": None, "epoch": True, "stopped": 0})

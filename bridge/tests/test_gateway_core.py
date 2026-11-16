@@ -4981,6 +4981,7 @@ class SourceHygieneTest(OfflineTestCase):
                     "stop",
                     "resume",
                     "status",
+                    "pre_dial_admission",
                     "follow_host_restart",
                 }
             ),

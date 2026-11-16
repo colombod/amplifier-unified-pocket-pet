@@ -332,8 +332,8 @@ class Bridge:
                 found.append((name, _validate_cmd(record)))
         return found
 
-    def pre_dial_safe(self, expected_binding: Binding | None) -> bool:
-        """Read-only provider admission under the core lock; uncertainty stays unresolved.
+    def pre_dial_state(self, expected_binding: Binding | None) -> str:
+        """Read-only admission classification: safe, reconcilable uncertainty, or blocked.
 
         This is not the turn gate: it does not clean up, suppress, reconcile, or
         resume anything. The journal's exclusive-owner and durable ATTEMPTED-before-
@@ -347,7 +347,7 @@ class Bridge:
                 or expected_binding is None
                 or self._binding != expected_binding
             ):
-                return False
+                return "blocked"
             try:
                 # Check the persisted binding without mutating the loaded state.
                 state = self._read(BINDING_NAME)
@@ -360,17 +360,46 @@ class Bridge:
                     or type(state["stopped"]) is not bool
                     or state["stopped"] != self._stopped
                 ):
-                    return False
+                    return "blocked"
                 names = self._journal.names("cmd-")
+                uncertain = False
                 for name in names:
                     record = self._read(name)
                     if record is None:
-                        return False
-                    if _validate_cmd(record)["state"] in {"PREPARED", "ATTEMPTED", "UNCERTAIN"}:
-                        return False
-                return self._count() == len(names) + 1
+                        return "blocked"
+                    state_name = _validate_cmd(record)["state"]
+                    if state_name in {"PREPARED", "ATTEMPTED"}:
+                        return "blocked"
+                    if state_name == "UNCERTAIN":
+                        binding = _valid_binding_dict(record["binding"])
+                        digest = record.get("text_sha256")
+                        updated = record["updated_at"]
+                        if (
+                            "tombstone" in record
+                            or not _finite(updated)
+                            or not 0 <= self._wall() - updated < RETENTION_S
+                            or not isinstance(digest, str)
+                            or _SHA_RE.fullmatch(digest) is None
+                            or binding is None
+                            or (
+                                binding.host_id, binding.client_id, binding.credential_ref,
+                                binding.session_id,
+                            ) != (
+                                expected_binding.host_id, expected_binding.client_id,
+                                expected_binding.credential_ref, expected_binding.session_id,
+                            )
+                        ):
+                            return "blocked"
+                        uncertain = True
+                if self._count() != len(names) + 1:
+                    return "blocked"
+                return "uncertain" if uncertain else "safe"
             except Exception:  # noqa: BLE001 - any unreadable state is unsafe, never logged
-                return False
+                return "blocked"
+
+    def pre_dial_safe(self, expected_binding: Binding | None) -> bool:
+        """The unchanged, non-mutating final gate used immediately before a dial."""
+        return self.pre_dial_state(expected_binding) == "safe"
 
     def _transition(
         self, name: str, record: dict[str, Any], state: str, **extra: Any
@@ -968,6 +997,44 @@ class Bridge:
                     break
                 promoted.append(command_id)
         return tuple(promoted)
+
+    def reconcile_pre_dial(
+        self, expected_binding: Binding | None, page: Any, *, session_id: str
+    ) -> tuple[str, ...]:
+        """Recheck eligibility before applying existing positive delivery proof."""
+        with self._lock:
+            if (
+                expected_binding is None
+                or expected_binding.session_id != session_id
+                or self.pre_dial_state(expected_binding) != "uncertain"
+                or not isinstance(page, dict)
+                or not isinstance(page.get("items"), list)
+                or type(page.get("offset")) is not int
+                or page["offset"] != 0
+                or type(page.get("total")) is not int
+                or page["total"] != len(page["items"])
+                or ("sessionId" in page and page["sessionId"] != session_id)
+                or any(
+                    not isinstance(row, dict)
+                    or ("sessionId" in row and row["sessionId"] != session_id)
+                    for row in page["items"]
+                )
+            ):
+                return ()
+            # Conflicting native IDs elsewhere in the snapshot cannot be treated
+            # as an unambiguous command identity, even if one row matches.
+            for name, record in self._commands():
+                if record["state"] != "UNCERTAIN":
+                    continue
+                command_id = name[len("cmd-") : -len(".json")]
+                rows = [
+                    row for row in page["items"]
+                    if row.get("role") == "user"
+                    and (row.get("inputId") == command_id or row.get("nativeInputId") == command_id)
+                ]
+                if len(rows) > 1:
+                    return ()
+            return self.reconcile_delivered(page, session_id=session_id)
 
     # -- reply ---------------------------------------------------------------------
     @staticmethod

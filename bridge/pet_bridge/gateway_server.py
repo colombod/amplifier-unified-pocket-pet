@@ -1051,11 +1051,11 @@ class _Gateway:
     async def _connect(self) -> Any:
         # Custody owns the single slot until the prior runner has settled. Recheck
         # its durable send state immediately before any paid provider connection.
-        # This job reads locally only; it does not reconcile or resolve a command.
+        # This explicitly named job may reconcile an exact positively proven input.
         safe = False
         try:
             safe = await self._runner.run(
-                "status", self._ops.pre_dial_safe, urgent=False, retain=False
+                "pre_dial_admission", self._ops.pre_dial_admission, urgent=False, retain=False
             )
         except Exception:  # noqa: BLE001 - failure is a fixed local policy refusal
             pass
