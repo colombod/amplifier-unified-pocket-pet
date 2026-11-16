@@ -12,8 +12,10 @@ prototype uses a dedicated Unified chat as its front door. Spoken requests reach
 that chat through the gateway, and the pet speaks the correlated response. Its
 actual capabilities are bounded by that Unified account's permissions.
 Microphone audio is sent to OpenAI during a call; recognized requests can be sent
-to the Unified chat. The provider's spoken rendering is not guaranteed verbatim:
-check the Unified conversation for consequential details.
+to the Unified chat. The returned answer text is sent to OpenAI for spoken
+rendering, including any private workspace information the front door includes.
+The provider's spoken rendering is not guaranteed verbatim: check the Unified
+conversation for consequential details.
 
 ## What to get
 
@@ -68,50 +70,152 @@ by the front door. Unified 0.98.6 was inspected for the prototype; no minimum
 supported version has been established. A second account's permissions and setup
 have not yet been tested.
 
-1. Create a workspace and a chat called **Pocket assistant** with `app_control`
-   available, and pin the chat. Its instructions should say that messages arrive
-   from speech, replies should be short, targets must not be guessed, and the chat
-   should use supported Unified actions for workspaces, chats and attention.
-   Before sending to another chat, answering a question, creating a workspace or
-   starting work, it should state the exact action and target and wait for a clear
-   spoken yes. A spoken yes does not bypass any on-screen host approval. Report
-   accepted, finished, refused and unknown outcomes honestly; do not retry an
-   unknown effect. Confirm the instructions are saved in the chat's workspace.
-   These instructions depend on model compliance: the gateway does not enforce
-   the spoken yes. For consequential actions, verify the target and use the
-   applicable host approvals or act directly in Unified.
-2. On the gateway host, choose an absolute private directory outside Git. Keep
-   the same `XDG_CONFIG_HOME` for pairing, attach, list and bind. Run these
-   commands from `bridge/` using a Python environment with `aiohttp` installed;
-   replace the example directory and server origin with your own values:
+1. In Unified, create a **new dedicated workspace** and a chat called **Pocket
+   assistant** in it, with `app_control` available, and pin the chat. In its first
+   message, ask it to save the block below unchanged as `AGENTS.md` at that
+   workspace root. Approve the write through the normal host interface if asked;
+   do not replace an existing file or reuse another project's instructions.
+   Check that the chat reports the file saved, and use the normal file view to
+   verify its contents. On the tested host, workspace-root `AGENTS.md` is loaded
+   as instructions for chats in that workspace, including subsequent turns; it
+   applies to every chat there, not only the front door. On another Unified
+   version verify that mechanism rather than assuming the file will be loaded.
+   In a later turn, ask the chat to summarize its instructions and identify the available
+   `app_control` actions; if it cannot, stop and resolve configuration before
+   pairing. That conversation is a configuration check, not proof that the model
+   will always obey.
+
+   ```text
+   You are the user's Pocket assistant front door for authorized Amplifier Unified
+   work. Messages can be transcribed speech; reply briefly and clearly for speech.
+   Use available supported app_control actions to discover workspaces, conversations,
+   status and waiting questions. Inspect action schemas before use and follow
+   pagination. Do not invent endpoints, targets, permissions or results. If a
+   target or instruction is ambiguous, ask a short clarifying question.
+
+   Before sending to another conversation, answering a waiting question, creating
+   a workspace or chat, or starting work, say the exact action and target and wait
+   for a clear yes. If the action changes, ask again. A spoken yes is advisory and
+   never substitutes for Unified's own approval, access or ownership requirements.
+   Never impersonate human approval or bypass a refusal or Stop. Read-only discovery
+   does not need that confirmation.
+
+   For attention use supported get_state /attention/items and relevant session
+   pointers. question actions are scoped to the calling chat; do not answer
+   another chat's question directly. Read back the exact question, target and
+   proposed answer. Ask for confirmation that repeats the answer in the next
+   user message, such as "Yes, send my answer: no"; if unclear or changed,
+   reconfirm. With that genuine user input, use coordination.send to relay the
+   owning chat, question ID, confirmed revision and prompt, exact answer and
+   actual source-message ID. The owner must re-read its question; if the
+   confirmed snapshot changed, stop and reconfirm rather than answer the new
+   version. Otherwise the owner uses its own question.answer with that revision,
+   the actual user's sourceMessageId and the delivered sourceRequestId. The host
+   captures sourceInputIds; coordination.send has no sourceMessageId argument.
+   If the host does not provide and accept genuine human provenance, stop;
+   never invent it.
+   Permission approvals are user-only and cannot be relayed as question answers.
+
+   Distinguish accepted from completed, rejected and unknown; report what is
+   actually observed. Workspace creation, chat creation and starting work are
+   separate outcomes. For new work use workspace.prepare/create and then
+   session.handoff.start in the actual workspace; check its receipt and later
+   target output separately. Inspect an uncertain result rather than repeating
+   a send or mutation. Do not include credentials or private configuration in replies.
+   ```
+
+   These instructions depend on model compliance: **the gateway does not enforce
+   the spoken yes**. For consequential actions, verify the target and use the
+   applicable host approvals or act directly in Unified. The cross-chat question
+   and new-work actions above reflect a source review of Unified 0.98.6, not a
+   live cross-chat voice qualification. In particular, recognized speech reaching
+   this chat has not been proven to provide the human provenance needed to answer
+   a different chat's question. Use the host's normal interface if it does not.
+2. On the gateway host, choose a **new** absolute private directory outside Git,
+   under an existing owner-controlled private parent. Do not use symlinks in
+   the path or change permissions on someone else's existing directory. Keep the same
+   `XDG_CONFIG_HOME` for pairing, attach, list and bind. In a local shell, change
+   to this package's `bridge/` directory and use the Python environment from
+   [service setup](../bridge/deploy/README.md). Use a new POSIX-compatible shell
+   on Linux for these steps; `umask` and exported variables stay in this shell
+   until you exit it. Replace the example paths and server origin with your own
+   values. Stop at any failed command:
 
    ```sh
    umask 077
+   export PET_PYTHON="/absolute/private/path/venv/bin/python"
    export XDG_CONFIG_HOME="/absolute/private/directory"
-   mkdir -p "$XDG_CONFIG_HOME"
-   chmod 700 "$XDG_CONFIG_HOME"
-   python3 -B -m pet_bridge pair-start --origin https://YOUR-UNIFIED-HOST:PORT --name pocket-assistant
+   mkdir -m 700 "$XDG_CONFIG_HOME"
+   ```
+
+   If `mkdir` failed, stop: do not continue with or change an existing directory.
+   Once it succeeded, run:
+
+   ```sh
+   "$PET_PYTHON" -B -m pet_bridge pair-start --origin https://YOUR-UNIFIED-HOST:PORT --name pocket-assistant
    ```
 
    The Unified origin must pass hostname and system CA verification in the
-   gateway's HTTPS child. A parent-shell `SSL_CERT_FILE` override is not a
-   supported workaround; ask the maintainer for a verified host-trust setup.
-   Approve the matching pairing code in your signed-in Unified browser, then run
-   `python3 -B -m pet_bridge pair-poll`. If pending, wait the requested interval
-   and poll again. Stop if pairing fails; proceed only when it says approved.
-   If a pairing start has an unknown result, inspect and use the CLI's
-   `pair-abandon` recovery rather than blindly starting again. Abandon is local;
-   the server request may persist until expiry.
+   gateway's HTTPS child. The child has a deliberately stripped environment:
+   a parent-shell or systemd `SSL_CERT_FILE` override is **not passed to it**.
+   The child's Python/OpenSSL default trust store must trust the Unified server's
+   certificate chain and the origin hostname must match. Ask the maintainer for a
+   verified host-trust setup; never disable verification.
+   Open the printed address in your signed-in Unified browser, compare the code
+   on both screens, and approve only the matching request. Then run
+   `"$PET_PYTHON" -B -m pet_bridge pair-poll` once. **A zero exit status alone is not
+   approval:** if it prints `Not approved yet` or `Too early`, wait at least the
+   displayed number of seconds and run the poll again. Proceed only when it
+   prints `Approved. Credential reference:`; retain that reference privately for
+   the config. A denied, revoked, expired or invalid request is not approval.
+   Stop on an error or lost response, preserve the local state and inspect the
+   outcome before deciding on recovery; do not assume approval or blindly start
+   a new request.
+   If a pairing start has an unknown result, stop and inspect it before recovery.
+   `pair-abandon` forgets the local proof only; it does **not** cancel any server
+   request, which may persist until expiry. Do not abandon or restart blindly.
 
-   Then run `python3 -B -m pet_bridge attach` and
-   `python3 -B -m pet_bridge list`; stop on error. Finally use
-   `python3 -B -m pet_bridge bind FULL-FRONT-DOOR-CHAT-ID` with the exact ID.
-   `list` shows short IDs; `bind` requires the full ID. The exact teammate UI
-   procedure for obtaining it is still to be verified. Binding sends no chat
-   message. The resulting state root is
-   `$XDG_CONFIG_HOME/amplifier-unified-pet-bridge`; retain the credential
-   reference printed by `pair-poll`. Use `python3 -B -m pet_bridge --help` for
-   the supported CLI.
+   Next run `"$PET_PYTHON" -B -m pet_bridge attach`; proceed only on `Attached.`.
+   Run `"$PET_PYTHON" -B -m pet_bridge list` and proceed only if it says `complete`.
+   This is the restricted active-or-pinned companion view, not an all-work list.
+   The bridge view does not show the workspace, so a matching title alone is
+   insufficient. In the **Pocket assistant** chat you created, ask:
+
+   > Use `app_control` operation `get_state` with args
+   > `{"path":"/selectedSessionId"}` and show me only the exact `value` returned
+   > for this conversation. Do not select another chat or send any message.
+
+   On the inspected host this caller-scoped read returned the calling chat's full
+   ID; it does not enumerate other chats. It is an app tool call, not a terminal
+   command. Check that the reply is the tool's actual value, not a guessed ID.
+   The chat response and tool history contain this sensitive metadata. Copy it
+   only to your own private configuration and terminal; shell history, process
+   listings, scrollback or screen recording can expose it. Do not publish it.
+   Verify the intended workspace and title in Unified, then compare the last
+   eight characters of this exact full ID with the corresponding title in
+   `list`. If it is absent, pin the target and recheck. If the value is missing,
+   identity uncertain, or the list incomplete, stop rather than guessing.
+   The metadata read was verified on the inspected host for its calling chat;
+   the teammate's model-mediated copy step remains untested.
+
+   Replace `FULL-CHAT-ID` with the exact value and run:
+
+   ```sh
+   "$PET_PYTHON" -B -m pet_bridge bind FULL-CHAT-ID
+   ```
+
+   Proceed only on `Bound to session` with the expected short ID and title.
+   Binding re-fetches the listing, requires the exact full ID in a complete list,
+   and sends no chat message; it does not prove idleness. The resulting state
+   root is `$XDG_CONFIG_HOME/amplifier-unified-pet-bridge`. Use
+   `"$PET_PYTHON" -B -m pet_bridge --help` for the supported CLI. Exact-ID binding
+   and incomplete-list refusal are tested with synthetic companion responses, not
+   yet on a second teammate's host.
+   If the shell closes after a confirmed step, start a new private shell in
+   `bridge/`, restore `PET_PYTHON` and `XDG_CONFIG_HOME` to the **same** paths
+   and continue from the last confirmed checkpoint. Do not rerun `mkdir`,
+   `pair-start` or token generation simply to resume. If a checkpoint is unknown,
+   preserve the state and investigate it before any new action.
 3. Configure the gateway with the same state root, credential reference and full
    bound chat ID. Keep the restricted Unified credential and OpenAI provider key
    on the host. Create a **separate** random 32-byte pet token, encoded as
@@ -119,27 +223,59 @@ have not yet been tested.
    over its ASCII text in `pet_token_sha256`. The raw token is needed privately
    for phone setup; it is not the OpenAI key or the Unified credential. Never put
    tokens in Git, chat, command arguments or a service unit. For a new device,
-   the following creates an owner-only token file **once** and prints only its
-   hash for the config. Use the same private directory from step 2:
+   the following Linux command creates an owner-only token file **once** in the
+   same private directory from step 2, and prints only its hash for the config:
 
    ```sh
-   python3 - <<'PY'
-   import hashlib, os, secrets
-   from pathlib import Path
-   token = secrets.token_urlsafe(32)
-   path = Path(os.environ["XDG_CONFIG_HOME"]) / "pet-token.txt"
-   fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-   with os.fdopen(fd, "w", encoding="ascii") as out:
-       out.write(token + "\n")
-       out.flush()
-       os.fsync(out.fileno())
-   print("Token stored privately; SHA-256:", hashlib.sha256(token.encode("ascii")).hexdigest())
+   "$PET_PYTHON" -B - <<'PY'
+   import hashlib, os, secrets, stat, sys
+   root = os.environ.get("XDG_CONFIG_HOME", "")
+   try:
+       parts = root.split("/")
+       if not os.path.isabs(root) or any(part in (".", "..") for part in parts):
+           raise ValueError("private absolute directory required")
+       flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+       dfd = os.open("/", flags)
+       try:
+           for part in filter(None, parts):
+               nextfd = os.open(part, flags, dir_fd=dfd)
+               os.close(dfd)
+               dfd = nextfd
+           info = os.fstat(dfd)
+           if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+               raise ValueError("owner-only directory required")
+           token = secrets.token_urlsafe(32).encode("ascii")
+           fd = os.open("pet-token.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                        os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+           with os.fdopen(fd, "wb") as out:
+               out.write(token + b"\n")
+               out.flush()
+               os.fsync(out.fileno())
+           os.fsync(dfd)
+       finally:
+           os.close(dfd)
+   except (OSError, ValueError):
+       print("Token creation did not complete. Preserve the file and inspect privately.",
+             file=sys.stderr)
+       sys.exit(1)
+   print("Token stored privately; SHA-256 of ASCII token, without newline:",
+         hashlib.sha256(token).hexdigest())
    PY
    ```
 
-   Transfer the 43-character token privately from that file to your own phone.
-   If the command fails or the file already exists, inspect the existing file
-   privately before deciding what to do; do not overwrite an uncertain result.
+   Proceed only on success and copy the printed digest into the private config;
+   do not hash the trailing newline. For phone setup, on a trusted local host
+   open the file in a private, non-recording viewer that makes no backups or
+   cloud copies. With the phone in hand, type the 43 token characters (not the
+   newline) into its masked setup field, taking care with each character. The
+   field has no reveal control, so visual comparison after entry is unavailable.
+   Do not paste the token into a shell, chat, command argument, shared clipboard or recorded
+   terminal. Protect both screens from observers and close the viewer afterwards.
+   If no such private transfer is available, stop and arrange one; this guide
+   does not establish a secure remote transfer. If the command fails or the
+   file already exists, it may be partial or its durability uncertain. Preserve
+   it and inspect privately before deciding what to do; never overwrite it or
+   generate a replacement blindly.
 4. The gateway config requires its private state and credential paths, chat ID
    and label, LAN IPv4 and port, literal HTTP Host value, TLS certificate and key,
    pet token hash, and exactly one provider-key source. Use an owner-only 0600
@@ -181,7 +317,17 @@ match the certificate, the actual firmware bundle must trust its chain, and the
 pet needs working DNS/network time synchronization for a valid clock. The FQDN
 must be lowercase, dotted and at most 63 characters; the gateway accepts ports
 1024–65535. A private or self-signed CA is not automatically trusted. Do not
-disable TLS verification to work around a missing certificate.
+disable TLS verification to work around a missing certificate. A host-side TLS
+test or unauthenticated `401` does not prove the firmware trusts this chain or
+that a voice conversation works.
+
+The gateway-to-OpenAI connection is a **third** TLS connection: it uses the
+gateway process's Python/OpenSSL default trust configuration, distinct from both
+the device bundle and the isolated Unified HTTPS child. Systemd may use a
+different environment from a shell; OpenSSL CA overrides can affect this parent
+process even though aiohttp proxy environment handling is disabled. Verify the
+intended service trust configuration without printing credentials or weakening
+TLS. These trust procedures are not yet qualified on a teammate's host.
 
 ## 3. Configure from a phone
 
@@ -194,13 +340,22 @@ been demonstrated on a factory-fresh teammate device:
 2. Under **Pocket Unified bridge**, enable the bridge and enter the gateway LAN
    IPv4, its TLS port, the certificate FQDN and the raw pet token. Save the bridge
    settings first and wait for the save acknowledgement. A successful save does not
-   prove the gateway is reachable.
+   prove the gateway is reachable. If the acknowledgement is lost, reconnect to
+   the setup page and inspect the nonsecret address settings. A saved-token flag
+   means only that **some** token is present, not which one. Preserve the retained
+   original token; do not generate a new one. A deliberate save of the same
+   known token and same settings can establish a fresh acknowledgement once the
+   page is reachable; if the prior outcome or settings remain unclear, stop and
+   seek maintainer help instead of repeatedly retrying.
 3. Choose the 2.4 GHz Wi-Fi network and enter its password. In bridge mode the
    OpenAI key is not needed on the pet. Wait for the connection and save result,
    then select Done. If the phone disconnects before acknowledgement, reconnect
    to the setup network and inspect the result before retrying.
 4. Confirm Wi-Fi and bridge status on the pet. The optional historical Tailscale
-   test fields do not, by themselves, enable off-home voice.
+   test fields do not, by themselves, enable off-home voice. Do not run the
+   diagnostic Tailscale tunnel in this prototype: source review identified a
+   shutdown race, and its task-done signal does not prove safe teardown. A repair
+   and verification are in progress.
 
 The setup page is HTTP inside the WPA2 setup network and uses a per-boot mutation
 control; it is not HTTPS provisioning. The pet token is stored in device NVS.

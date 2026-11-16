@@ -46,10 +46,15 @@ assert.equal(node('bridge-ip').value,'10.0.0.3');
 assert.equal(node('bridge-token').value,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
 assert.match(node('bridge-notice').textContent,/newer edit.*not saved/i);
 for(const m of ['error','lost']){
+ assert.equal(status.bridge_token_saved,true); // an earlier, possibly different token exists
  mode=m;await vm.runInContext("$('bridge-setup').onsubmit({preventDefault(){}})",context);
+ assert.equal(posts.at(-1).token,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+ const posted=posts.length;
  assert.equal(node('bridge-token').value,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
  assert.match(node('bridge-notice').textContent,/refused|not confirmed/i);
  await vm.runInContext('poll()',context);
+ assert.equal(posts.length,posted); // saved=true cannot acknowledge this replacement
+ assert.equal(node('bridge-token').value,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
  assert.equal(node('done').classList.hidden,true);
 }
 mode='ok';
