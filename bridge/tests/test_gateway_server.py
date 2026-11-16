@@ -25,12 +25,14 @@ import json
 import os
 import pickle
 import shutil
+import socket
 import ssl
 import tempfile
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import MethodType, SimpleNamespace
 from typing import Any, ClassVar
 from unittest import mock
 
@@ -84,6 +86,7 @@ OTHER_TOKEN = base64.urlsafe_b64encode(bytes(range(1, 33))).rstrip(b"=").decode(
 HOST_HEADER = "10.1.2.3:8941"
 PEER = ("10.9.8.7", 51234)
 CANARY = "HEADERCANARY-Zq7"
+_REAL_CREATE_SERVER = asyncio.BaseEventLoop.create_server
 
 
 def token_hash(token: str) -> str:
@@ -640,10 +643,10 @@ class VerifyBearerTest(ServerOfflineCase):
 # =================================================================================
 # check_handshake / reject_response
 # =================================================================================
-def transport_for(peer: Any = PEER) -> Any:
+def transport_for(peer: Any = PEER, local: Any = None) -> Any:
     transport = mock.Mock()
     transport.get_extra_info.side_effect = lambda name, default=None: (
-        peer if name == "peername" else default
+        peer if name == "peername" else local if name == "sockname" else default
     )
     return transport
 
@@ -728,6 +731,72 @@ class HandshakeTest(ServerOfflineCase):
             self.code(headers=[("Host", HOST_HEADER)]), (421, "misdirected")
         )  # duplicate Host
         self.assertIsNone(self.check(host=HOST_HEADER))
+
+    def test_two_listener_hosts_are_exact_and_tied_to_the_local_socket(self):
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        registry = self.registry
+        lan = transport_for(local=("10.1.2.3", 8941))
+        tail = transport_for(local=("100.64.12.34", 8941))
+        tail_host = "gateway.example.test:8941"
+        for transport, host in ((lan, HOST_HEADER), (tail, tail_host)):
+            with self.subTest(host=host):
+                self.assertIsNone(gsv.check_handshake(
+                    request_for(transport=transport, host=host), cfg, registry))
+                self.assertEqual(gsv.check_handshake(
+                    request_for(transport=transport, host=host,
+                                bearer="Bearer " + OTHER_TOKEN), cfg, registry).status, 401)
+                self.assertEqual(gsv.check_handshake(
+                    request_for(transport=transport, host=host,
+                                headers=[("Host", host)]), cfg, registry).status, 421)
+        for transport, host in ((lan, tail_host), (tail, HOST_HEADER),
+                                (tail, "100.64.12.34:8941"),
+                                (tail, "gateway.example.test"),
+                                (tail, "gateway.example.test:8942"),
+                                (tail, "Gateway.example.test:8941"),
+                                (tail, "gateway.example.test.:8941"),
+                                (tail, "100.64.12.34"),
+                                (tail, "100.64.12.34:8942"),
+                                (transport_for(local=None), HOST_HEADER),
+                                (transport_for(local=("10.1.2.3", 8942)), HOST_HEADER),
+                                (transport_for(local=("10.1.2.4", 8941)), HOST_HEADER)):
+            with self.subTest(host=host, local=transport.get_extra_info("sockname")):
+                self.assertEqual(gsv.check_handshake(
+                    request_for(transport=transport, host=host), cfg, registry).status, 421)
+
+    def test_two_routes_share_the_same_per_peer_rate_limit(self):
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        lan = transport_for(local=("10.1.2.3", 8941))
+        tail = transport_for(local=("100.64.12.34", 8941))
+        for _ in range(5):
+            response = gsv.check_handshake(
+                request_for(transport=lan, bearer="Bearer " + OTHER_TOKEN), cfg, self.registry)
+            self.assertEqual(response.status, 401)
+        response = gsv.check_handshake(request_for(
+            transport=tail, host="gateway.example.test:8941"), cfg, self.registry)
+        self.assertEqual(response.status, 429)
+
+    def test_real_asyncio_ssl_transport_exposes_the_underlying_local_sockname(self):
+        # Exercise CPython's actual SSL transport delegation without any socket or TLS I/O.
+        import asyncio.sslproto
+
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34",
+                       tailnet_fqdn="gateway.example.test")
+        loop = mock.Mock()
+        wrapped = transport_for(local=("100.64.12.34", 8941))
+        protocol = asyncio.sslproto.SSLProtocol(
+            loop, mock.Mock(), ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+            waiter=None, server_side=True)
+        protocol._transport = wrapped
+        ssl_transport = asyncio.sslproto._SSLProtocolTransport(loop, protocol)
+        request = request_for(transport=ssl_transport, host="gateway.example.test:8941")
+        try:
+            self.assertIsNone(gsv.check_handshake(request, cfg, self.registry))
+            self.assertEqual(gsv.check_handshake(
+                request_for(transport=ssl_transport, host=HOST_HEADER),
+                cfg, self.registry).status, 421)
+        finally:
+            ssl_transport._closed = True  # no fixture-owned network transport to close
+            protocol._app_transport._closed = True
 
     def test_t_srv_hs_structure_origin_protocol_and_duplicates_are_bad_requests(self):
         cases = {
@@ -1681,6 +1750,343 @@ class ConnectProviderTest(OfflineAsyncCase):
 # =================================================================================
 # _start_site (real aiohttp objects, no listener) / signals / null logger
 # =================================================================================
+class SiteHandoffTest(OfflineAsyncCase):
+    async def test_selector_failure_after_listen_closes_both_without_gc(self):
+        loop = asyncio.get_running_loop()
+        cfg = make_cfg(Path("/synthetic"), tailnet_bind_host="100.64.12.34",
+                       tailnet_fqdn="gateway.example.test")
+
+        class FakeSocket:
+            def __init__(self, family: Any, kind: Any, proto: Any = 0) -> None:
+                self.family, self.type, self.proto = family, kind, proto
+                self.address: Any = None
+                self.listening = self.closed = False
+
+            def setsockopt(self, *_args: Any) -> None: pass
+            def setblocking(self, _value: Any) -> None: pass
+            def bind(self, address: Any) -> None: self.address = address
+            def listen(self, _backlog: Any) -> None: self.listening = True
+            def getsockname(self) -> Any: return self.address
+            def close(self) -> None:
+                self.closed = True
+                self.listening = False
+
+        async def handler(_request: Any) -> Any:
+            raise AssertionError("backend must not be admitted")
+
+        for fail_host in (cfg.bind_host, cfg.tailnet_bind_host):
+            with self.subTest(fail_host=fail_host):
+                sockets: list[Any] = []
+                live: dict[Any, Any] = {}
+                injected: list[Any] = []
+
+                def allocate(*args: Any) -> Any:
+                    sock = FakeSocket(*args)
+                    sockets.append(sock)
+                    return sock
+
+                async def resolve(host: str, port: int, **_kw: Any) -> Any:
+                    return [(socket.AF_INET, socket.SOCK_STREAM,
+                             socket.IPPROTO_TCP, "", (host, port))]
+
+                def start_serving(_factory: Any, sock: Any, _ctx: Any,
+                                  server: Any, *_args: Any) -> None:
+                    self.assertTrue(sock.listening)
+                    live[sock] = server
+                    if sock.address[0] == fail_host:
+                        injected.append(sock.address)
+                        raise OSError(CANARY)
+
+                def stop_serving(sock: Any) -> None:
+                    live.pop(sock, None)
+                    sock.close()
+
+                fake_socket_module = SimpleNamespace(**{**vars(socket), "socket": allocate})
+                with (
+                    mock.patch.object(asyncio.base_events, "socket", fake_socket_module),
+                    mock.patch.object(gsv, "socket", fake_socket_module),
+                    mock.patch.object(loop, "_create_server_getaddrinfo", new=resolve),
+                    mock.patch.object(loop, "_start_serving", new=start_serving),
+                    mock.patch.object(loop, "_stop_serving", new=stop_serving),
+                    mock.patch.object(loop, "create_server",
+                                      new=MethodType(_REAL_CREATE_SERVER, loop)),
+                ):
+                    try:
+                        with self.assertRaises(OSError):
+                            await gsv._start_site(
+                                handler, cfg, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER))
+                        self.assertEqual(injected, [(fail_host, cfg.port)])
+                        self.assertFalse(live)  # before emergency fixture cleanup
+                        self.assertEqual(len(sockets), 1 if fail_host == cfg.bind_host else 2)
+                        self.assertTrue(all(sock.closed for sock in sockets))
+                    finally:
+                        for server in tuple(live.values()):
+                            server.close()
+                        for sock in sockets:
+                            sock.close()
+
+    async def test_bound_socket_owned_through_setup_and_server_handoff_failures(self):
+        loop = asyncio.get_running_loop()
+        cfg = make_cfg(Path("/synthetic"))
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        for fail in ("setsockopt", "bind", "create_server", "start_serving", None):
+            with self.subTest(fail=fail):
+                events: list[Any] = []
+                created: list[Any] = []
+
+                class Sock:
+                    def setsockopt(self, level: Any, option: Any, value: Any) -> None:
+                        events.append(("setsockopt", level, option, value))
+                        if fail == "setsockopt":
+                            raise OSError(CANARY)
+
+                    def bind(self, address: Any) -> None:
+                        events.append(("bind", address))
+                        if fail == "bind":
+                            raise OSError(CANARY)
+
+                    def close(self) -> None:
+                        events.append("socket.close")
+
+                class Server:
+                    async def start_serving(self) -> None:
+                        events.append("server.start")
+                        if fail == "start_serving":
+                            raise OSError(CANARY)
+
+                    def close(self) -> None:
+                        events.append("server.close")
+
+                def allocate(family: Any, kind: Any) -> Any:
+                    events.append(("socket", family, kind))
+                    sock = Sock()
+                    created.append(sock)
+                    return sock
+
+                async def create_server(factory: Any, **kw: Any) -> Any:
+                    self.assertIsInstance(factory, web.Server)
+                    self.assertEqual(kw, {"sock": created[0], "ssl": ctx,
+                                          "backlog": 128, "start_serving": False})
+                    events.append("create_server")
+                    if fail == "create_server":
+                        raise OSError(CANARY)
+                    return Server()
+
+                async def handler(_request: Any) -> Any:
+                    raise AssertionError("never called")
+
+                fake_module = SimpleNamespace(**{**vars(socket), "socket": allocate})
+                with (mock.patch.object(gsv, "socket", fake_module),
+                      mock.patch.object(loop, "create_server", new=create_server)):
+                    if fail is None:
+                        closer = await gsv._start_site(handler, cfg, ctx)
+                        await closer()
+                    else:
+                        with self.assertRaises(OSError):
+                            await gsv._start_site(handler, cfg, ctx)
+                self.assertEqual(events[0], ("socket", socket.AF_INET, socket.SOCK_STREAM))
+                self.assertEqual(events[1], ("setsockopt", socket.SOL_SOCKET,
+                                             socket.SO_REUSEADDR, 1))
+                self.assertIn("socket.close", events)
+                if fail not in ("setsockopt", "bind"):
+                    self.assertIn(("bind", ("10.1.2.3", 8941)), events)
+                    self.assertIn("create_server", events)
+                if fail in ("start_serving", None):
+                    self.assertLess(events.index("server.close"), events.index("socket.close"))
+
+    async def test_repeated_cancel_during_delayed_server_handoff_closes_late_result(self):
+        loop = asyncio.get_running_loop()
+        cfg = make_cfg(Path("/synthetic"))
+        entered, release = asyncio.Event(), asyncio.Event()
+        events: list[str] = []
+
+        class Sock:
+            def setsockopt(self, *_args: Any) -> None: pass
+            def bind(self, _address: Any) -> None: pass
+            def close(self) -> None: events.append("socket.close")
+
+        class Server:
+            async def start_serving(self) -> None:
+                events.append("server.start")
+
+            def close(self) -> None:
+                events.append("server.close")
+
+        async def create_server(_factory: Any, **_kw: Any) -> Any:
+            entered.set()
+            await release.wait()
+            return Server()
+
+        async def handler(_request: Any) -> Any:
+            raise AssertionError("never called")
+
+        fake_module = SimpleNamespace(**{**vars(socket), "socket": lambda *_args: Sock()})
+        with (mock.patch.object(gsv, "socket", fake_module),
+              mock.patch.object(loop, "create_server", new=create_server)):
+            owner = asyncio.create_task(
+                gsv._start_site(handler, cfg, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)))
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                owner.cancel()
+                await asyncio.sleep(0)
+                owner.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(owner.done())
+                self.assertEqual(events, [])
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(owner, 5)
+                self.assertEqual(events, ["server.start", "server.close", "socket.close"])
+            finally:
+                release.set()
+                if not owner.done():
+                    owner.cancel()
+                await asyncio.gather(owner, return_exceptions=True)
+
+    async def test_second_bind_or_nonblocking_failure_closes_every_fake_socket(self):
+        loop = asyncio.get_running_loop()
+        cfg = make_cfg(Path("/synthetic"), tailnet_bind_host="100.64.12.34",
+                       tailnet_fqdn="gateway.example.test")
+        for failure in ("bind", "setblocking"):
+            with self.subTest(failure=failure):
+                sockets: list[Any] = []
+                live: dict[Any, Any] = {}
+
+                class Sock:
+                    def __init__(self, family: Any, kind: Any, proto: Any = 0) -> None:
+                        self.family, self.type, self.proto = family, kind, proto
+                        self.address: Any = None
+                        self.closed = self.listening = False
+                        sockets.append(self)
+
+                    def setsockopt(self, *_args: Any) -> None: pass
+                    def bind(self, address: Any) -> None:
+                        self.address = address
+                        if address[0] == cfg.tailnet_bind_host and failure == "bind":
+                            raise OSError(CANARY)
+                    def setblocking(self, _value: Any) -> None:
+                        if self.address[0] == cfg.tailnet_bind_host and failure == "setblocking":
+                            raise OSError(CANARY)
+                    def listen(self, _backlog: Any) -> None: self.listening = True
+                    def getsockname(self) -> Any: return self.address
+                    def close(self) -> None:
+                        self.closed = True
+                        self.listening = False
+
+                def start_serving(_factory: Any, sock: Any, _ctx: Any,
+                                  server: Any, *_args: Any) -> None:
+                    live[sock] = server
+
+                def stop_serving(sock: Any) -> None:
+                    live.pop(sock, None)
+                    sock.close()
+
+                async def handler(_request: Any) -> Any:
+                    raise AssertionError("backend must not be admitted")
+
+                fake_module = SimpleNamespace(**{**vars(socket), "socket": Sock})
+                with (
+                    mock.patch.object(asyncio.base_events, "socket", fake_module),
+                    mock.patch.object(gsv, "socket", fake_module),
+                    mock.patch.object(loop, "_start_serving", new=start_serving),
+                    mock.patch.object(loop, "_stop_serving", new=stop_serving),
+                    mock.patch.object(loop, "create_server",
+                                      new=MethodType(_REAL_CREATE_SERVER, loop)),
+                ):
+                    try:
+                        with self.assertRaises(OSError):
+                            await gsv._start_site(
+                                handler, cfg, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER))
+                        self.assertEqual(len(sockets), 2)
+                        self.assertFalse(live)  # before emergency fixture cleanup
+                        self.assertTrue(all(sock.closed and not sock.listening for sock in sockets))
+                    finally:
+                        for server in tuple(live.values()):
+                            server.close()
+                        for sock in sockets:
+                            sock.close()
+
+    async def test_cancel_after_listen_closes_each_owned_fake_socket(self):
+        loop = asyncio.get_running_loop()
+        cfg = make_cfg(Path("/synthetic"), tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+
+        class FakeSocket:
+            def __init__(self, family: Any, kind: Any, proto: Any = 0) -> None:
+                self.family, self.type, self.proto = family, kind, proto
+                self.address: Any = None
+                self.listening = self.closed = False
+
+            def setsockopt(self, *_args: Any) -> None: pass
+            def setblocking(self, _value: Any) -> None: pass
+            def bind(self, address: Any) -> None: self.address = address
+            def listen(self, _backlog: Any) -> None: self.listening = True
+            def getsockname(self) -> Any: return self.address
+
+            def close(self) -> None:
+                self.closed = True
+                self.listening = False
+
+        async def handler(_request: Any) -> Any:
+            raise AssertionError("backend must not be admitted")
+
+        for cancel_host in (cfg.bind_host, cfg.tailnet_bind_host):
+            with self.subTest(cancel_host=cancel_host):
+                sockets: list[Any] = []
+                live: dict[Any, Any] = {}
+                injected: list[Any] = []
+
+                def allocate(*args: Any) -> Any:
+                    sock = FakeSocket(*args)
+                    sockets.append(sock)
+                    return sock
+
+                async def resolve(host: str, port: int, **_kw: Any) -> Any:
+                    return [(socket.AF_INET, socket.SOCK_STREAM,
+                             socket.IPPROTO_TCP, "", (host, port))]
+
+                def start_serving(_factory: Any, sock: Any, _ctx: Any,
+                                  server: Any, *_args: Any) -> None:
+                    self.assertTrue(sock.listening)
+                    live[sock] = server
+                    if sock.address[0] == cancel_host:
+                        injected.append(sock.address)
+                        loop.call_soon(owner.cancel)
+
+                def stop_serving(sock: Any) -> None:
+                    live.pop(sock, None)
+                    sock.close()
+
+                fake_socket_module = SimpleNamespace(**{**vars(socket), "socket": allocate})
+                with (
+                    mock.patch.object(asyncio.base_events, "socket", fake_socket_module),
+                    mock.patch.object(gsv, "socket", fake_socket_module),
+                    mock.patch.object(loop, "_create_server_getaddrinfo", new=resolve),
+                    mock.patch.object(loop, "_start_serving", new=start_serving),
+                    mock.patch.object(loop, "_stop_serving", new=stop_serving),
+                    mock.patch.object(loop, "create_server",
+                                      new=MethodType(_REAL_CREATE_SERVER, loop)),
+                ):
+                    owner = asyncio.create_task(gsv._start_site(
+                        handler, cfg, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)))
+                    try:
+                        with self.assertRaises(asyncio.CancelledError):
+                            await owner
+                        self.assertEqual(injected, [(cancel_host, cfg.port)])
+                        self.assertFalse(live)  # before emergency fixture cleanup
+                        self.assertTrue(sockets)
+                        self.assertTrue(all(sock.closed for sock in sockets))
+                    finally:
+                        if not owner.done():
+                            owner.cancel()
+                        await asyncio.gather(owner, return_exceptions=True)
+                        if not owner.cancelled() and owner.exception() is None:
+                            await owner.result()()
+                        for server in tuple(live.values()):
+                            server.close()
+                        for sock in sockets:
+                            sock.close()
+
+
 class StartSiteTest(OfflineAsyncCase):
     def setUp(self) -> None:
         super().setUp()
@@ -1720,14 +2126,18 @@ class StartSiteTest(OfflineAsyncCase):
             ) -> None:
                 self.args = (runner, host, port)
                 self.kwargs = kwargs
+                self.stopped = False
                 sites.append(self)
 
             async def start(self) -> None:
                 if Site.fail is not None:
                     raise Site.fail
 
+            async def stop(self) -> None:
+                self.stopped = True
+
         self.Site = Site
-        patcher = mock.patch.object(web, "TCPSite", Site)
+        patcher = mock.patch.object(gsv, "_OwnedSite", Site)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1761,6 +2171,126 @@ class StartSiteTest(OfflineAsyncCase):
         with self.assertRaises(OSError):
             await gsv._start_site(handler, self.cfg, self.ssl_ctx)
         self.assertIsNone(self.runners[0].server)
+
+    async def test_two_sites_share_one_runner_tls_and_are_gated_until_ready_and_closed(self):
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        called: list[Any] = []
+        during: list[int] = []
+        original_start = self.Site.start
+
+        async def handler(request: Any) -> Any:
+            called.append(request)
+            return web.Response(status=204)
+
+        async def observe_start(site: Any) -> None:
+            await original_start(site)
+            response = await site.args[0].server.request_handler(request_for())
+            during.append(response.status)
+
+        with mock.patch.object(self.Site, "start", observe_start):
+            closer = await gsv._start_site(handler, cfg, self.ssl_ctx)
+        self.assertEqual(during, [503, 503])
+        self.assertEqual(called, [])
+        self.assertEqual(len(self.runners), 1)
+        self.assertEqual([s.args[1:] for s in self.sites],
+                         [("10.1.2.3", 8941), ("100.64.12.34", 8941)])
+        self.assertTrue(all(s.args[0] is self.runners[0] for s in self.sites))
+        self.assertTrue(all(s.kwargs == {"ssl_context": self.ssl_ctx,
+                                       "reuse_address": True, "reuse_port": False}
+                            for s in self.sites))
+        gated = self.runners[0].server.request_handler
+        self.assertEqual((await gated(request_for())).status, 204)
+        await closer()
+        await closer()  # cleanup and the gate are idempotent
+        self.assertEqual((await gated(request_for())).status, 503)
+        self.assertEqual(len(called), 1)
+        self.assertTrue(all(s.stopped for s in self.sites))
+        self.assertEqual(self.runners[0].sites, set())
+        self.assertIsNone(self.runners[0].server)
+
+    async def test_second_site_failure_or_cancellation_cleans_both_without_admitting(self):
+        for failure in (OSError(CANARY), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                self.sites.clear()
+                self.runners.clear()
+                cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+                calls: list[Any] = []
+
+                async def handler(request: Any) -> Any:
+                    calls.append(request)
+                    return web.Response(status=204)
+
+                async def start(site: Any) -> None:
+                    self.assertEqual(
+                        (await site.args[0].server.request_handler(request_for())).status, 503)
+                    if site.args[1] == "100.64.12.34":
+                        raise failure
+
+                with mock.patch.object(self.Site, "start", start):
+                    with self.assertRaises(type(failure)):
+                        await gsv._start_site(handler, cfg, self.ssl_ctx)
+                self.assertEqual(calls, [])
+                self.assertEqual(len(self.sites), 2)
+                self.assertTrue(all(site.stopped for site in self.sites))
+                self.assertEqual(self.runners[0].sites, set())
+                self.assertIsNone(self.runners[0].server)
+
+    async def test_repeated_cancellation_waits_for_all_site_cleanup(self):
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        gate, entered = asyncio.Event(), asyncio.Event()
+        original_stop = self.Site.stop
+
+        async def handler(_request: Any) -> Any:
+            raise AssertionError("must not reach the backend")
+
+        async def slow_stop(site: Any) -> None:
+            entered.set()
+            await gate.wait()
+            await original_stop(site)
+
+        with mock.patch.object(self.Site, "stop", slow_stop):
+            closer = await gsv._start_site(handler, cfg, self.ssl_ctx)
+            gated = self.runners[0].server.request_handler
+            closing = asyncio.create_task(closer())
+            await entered.wait()
+            self.assertEqual((await gated(request_for())).status, 503)
+            closing.cancel()
+            await asyncio.sleep(0)
+            closing.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(closing.done())
+            gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await closing
+        self.assertTrue(all(site.stopped for site in self.sites))
+        self.assertEqual(self.runners[0].sites, set())
+        self.assertIsNone(self.runners[0].server)
+
+    async def test_a_cleanup_error_is_not_misreported_as_success(self):
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        original_stop = self.Site.stop
+
+        async def handler(_request: Any) -> Any:
+            raise AssertionError("must not reach the backend")
+
+        closer = await gsv._start_site(handler, cfg, self.ssl_ctx)
+        gated = self.runners[0].server.request_handler
+
+        async def fail_first(site: Any) -> None:
+            if site is self.sites[0]:
+                raise OSError(CANARY)
+            await original_stop(site)
+
+        try:
+            with mock.patch.object(self.Site, "stop", fail_first):
+                with self.assertRaises(OSError):
+                    await closer()
+            self.assertEqual((await gated(request_for())).status, 503)
+            self.assertFalse(self.sites[0].stopped)
+            self.assertTrue(self.sites[1].stopped)  # the second was still closed
+        finally:
+            await closer()  # fixture recovery, not the original outcome
+        self.assertTrue(all(site.stopped for site in self.sites))
 
     async def test_null_logger_absorbs_everything(self):
         logger = gsv._NullLogger()
@@ -1899,10 +2429,10 @@ class GatewayCase(OfflineAsyncCase):
             "preview_revision": 1,
         }
 
-    async def to_blocked_confirm(self) -> asyncio.Task[Any]:
+    async def to_blocked_confirm(self, request: Any = None) -> asyncio.Task[Any]:
         """Start a request and drive its session to a CONFIRM blocked on the worker."""
         self.release = self.h.ops.hold("confirm")
-        task = asyncio.create_task(self.gw.handle(self.request()))
+        task = asyncio.create_task(self.gw.handle(self.request() if request is None else request))
         await self.h.feed(ASSISTANT_START)
         await self.h.feed({"type": "pet.turn.begin"})
         await self.h.push(delegation())
@@ -1915,6 +2445,89 @@ class GatewayCase(OfflineAsyncCase):
 
 
 class GatewayOrderTest(GatewayCase):
+    async def test_provider_failures_keep_classification_and_shared_slot_on_both_routes(self):
+        cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34",
+                       tailnet_fqdn="gateway.example.test")
+        for local, host, other_local, other_host in (
+            (("10.1.2.3", 8941), HOST_HEADER,
+             ("100.64.12.34", 8941), "gateway.example.test:8941"),
+            (("100.64.12.34", 8941), "gateway.example.test:8941",
+             ("10.1.2.3", 8941), HOST_HEADER),
+        ):
+            for failure, expected_close in (
+                ("provider_auth", 1008), ("provider_protocol", 1002),
+                ("provider_connect", 1011),
+            ):
+                with self.subTest(host=host, failure=failure):
+                    h = Harness()
+                    h.runner.start()
+                    self.addAsyncCleanup(h.aclose)
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    calls: list[str] = []
+
+                    async def failing_provider(_key: Any, *, timeout: float) -> Any:
+                        self.assertEqual(timeout, gs.START_DEADLINE_S)
+                        calls.append(failure)
+                        entered.set()
+                        await release.wait()
+                        raise gsv.ProviderError(failure)
+
+                    gw = gsv._Gateway(
+                        cfg, gsv.Secret(KEY_CANARY),
+                        gsv.AuthRegistry(clock=lambda: h.clock.now()), h.runner, h.ops,
+                        gsv.ServeDeps(provider_connect=failing_provider,
+                                      clock=lambda: h.clock),
+                        ws_factory=FakeServerWS,
+                        device_factory=lambda _ws, _transport: h.device,
+                    )
+                    request = self.request(host=host, transport=transport_for(local=local))
+                    other = self.request(host=other_host,
+                                         transport=transport_for(local=other_local))
+                    task = asyncio.create_task(gw.handle(request))
+                    try:
+                        await h.quiesce()
+                        await h.feed(ASSISTANT_START)
+                        await asyncio.wait_for(entered.wait(), 5)
+                        self.assertEqual((await gw.handle(other)).status, 409)
+                        self.assertEqual(gw.sessions_started, 1)
+                        release.set()
+                        self.assertTrue((await asyncio.wait_for(task, 5)).prepared)
+                        await until(lambda: not gw.busy)
+                        self.assertEqual(h.device.close_codes, [expected_close])
+                        self.assertEqual(h.device.frames, [])
+                        self.assertEqual(calls, [failure])
+                        self.assertEqual(h.ops.count("resume"), 0)
+                        self.assertEqual(h.ops.count("confirm"), 0)
+                        self.assertIsNone(gw.last_outcome.send_outcome)
+                    finally:
+                        release.set()
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_lan_and_tailnet_share_one_session_slot_and_bound_ops(self):
+        self.gw._cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        lan = self.request(transport=transport_for(local=("10.1.2.3", 8941)))
+        tail = self.request(host="gateway.example.test:8941",
+                            transport=transport_for(local=("100.64.12.34", 8941)))
+        self.assertIs(self.gw._ops, self.h.ops)
+        self.assertEqual(self.gw._settings.short8, SHORT8)
+        task = asyncio.create_task(self.gw.handle(lan))
+        await self.h.quiesce()
+        self.assertEqual((await self.gw.handle(tail)).status, 409)
+        self.assertEqual(self.gw.sessions_started, 1)
+        await self.h.feed({"type": "session.close"})
+        await asyncio.wait_for(task, 5)
+        await until(lambda: not self.gw.busy)
+        self.devices.append(FakeDeviceLink(self.h.clock))
+        self.devices[0].disconnect()
+        result = await asyncio.wait_for(self.gw.handle(tail), 5)
+        self.assertTrue(result.prepared)
+        self.assertEqual(self.gw.sessions_started, 2)
+        self.assertEqual(self.transports, [lan.transport, tail.transport])
+        self.assertIs(self.gw._ops, self.h.ops)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
     async def test_t_srv_order_01_rejections_never_prepare_connect_or_take_the_slot(
         self,
     ):
@@ -2049,6 +2662,74 @@ class GatewayOrderTest(GatewayCase):
 
 
 class GatewayCustodyTest(GatewayCase):
+    async def test_provider_protocol_failure_preserves_inflight_send_across_routes(self):
+        self.gw._cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34",
+                                tailnet_fqdn="gateway.example.test")
+        lan = self.request(transport=transport_for(local=("10.1.2.3", 8941)))
+        tail = self.request(host="gateway.example.test:8941",
+                            transport=transport_for(local=("100.64.12.34", 8941)))
+        task = await self.to_blocked_confirm(tail)
+        try:
+            await self.h.push("{invalid provider frame")
+            self.assertTrue((await asyncio.wait_for(task, 5)).prepared)
+            self.assertEqual(self.h.device.close_codes, [1002])
+            self.assertTrue(self.gw.busy)
+            self.assertEqual((await self.gw.handle(lan)).status, 409)
+            self.assertEqual(self.h.ops.count("confirm"), 1)
+            self.assertIsNone(self.gw.last_outcome)
+            self.release.set()
+            await until(lambda: not self.gw.busy)
+            self.assertEqual(self.gw.last_outcome.send_outcome, "accepted")
+            self.assertEqual(self.gw.last_outcome.source, "result")
+            self.assertEqual(self.h.ops.count("confirm"), 1)
+        finally:
+            self.release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_uncertain_tailnet_send_keeps_lan_busy_and_is_never_replayed(self):
+        self.gw._cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34",
+                                tailnet_fqdn="gateway.example.test")
+        lan = self.request(transport=transport_for(local=("10.1.2.3", 8941)))
+        tail = self.request(host="gateway.example.test:8941",
+                            transport=transport_for(local=("100.64.12.34", 8941)))
+        self.h.ops.results["confirm"] = core.BridgeError("journal_error")
+        task = await self.to_blocked_confirm(tail)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await self.h.quiesce()
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(lan)).status, 409)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.release.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.gw.last_outcome.send_outcome, "uncertain")
+        self.assertEqual(self.gw.last_outcome.source, "exception")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.devices.append(FakeDeviceLink(self.h.clock))
+        self.devices[0].disconnect()
+        self.assertTrue((await asyncio.wait_for(self.gw.handle(lan), 5)).prepared)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_two_routes_keep_one_slot_until_cancelled_send_is_reconciled(self):
+        self.gw._cfg = make_cfg(self.base, tailnet_bind_host="100.64.12.34", tailnet_fqdn="gateway.example.test")
+        lan = self.request(transport=transport_for(local=("10.1.2.3", 8941)))
+        tail = self.request(host="gateway.example.test:8941",
+                            transport=transport_for(local=("100.64.12.34", 8941)))
+        task = await self.to_blocked_confirm(lan)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await self.h.quiesce()
+        self.assertTrue(self.gw.busy)
+        self.assertEqual((await self.gw.handle(tail)).status, 409)
+        self.release.set()
+        await until(lambda: not self.gw.busy)
+        self.assertEqual(self.gw.last_outcome.send_outcome, "accepted")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
     async def test_t_srv_lock_waitidle_a_cancelled_request_keeps_the_slot_until_reconciled(
         self,
     ):
@@ -2935,6 +3616,66 @@ class ServeStartupTest(OfflineAsyncCase):
         self.assertEqual(runner_threads(), [])  # joined
         self.fx.stores_reopen()  # journal/store closed after the runner
 
+    async def test_both_synthetic_listeners_reach_the_same_frozen_session(self):
+        path = self.fx.build(cfg={"tailnet_bind_host": "100.64.12.34", "tailnet_fqdn": "gateway.example.test"})
+        sites: list[Any] = []
+        gateways: list[Any] = []
+        devices: list[FakeDeviceLink] = []
+
+        class Site:
+            def __init__(self, runner: Any, host: str, port: int, **_kw: Any):
+                self.runner, self.host, self.port = runner, host, port
+                self.stopped = False
+                sites.append(self)
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                self.stopped = True
+
+        async def start(handler: Any, cfg: Any, ctx: Any) -> Any:
+            gw = handler.__self__
+            gateways.append(gw)
+            gw._ws_factory = FakeServerWS
+
+            def device(_ws: Any, _transport: Any) -> FakeDeviceLink:
+                link = FakeDeviceLink(self.clock)
+                devices.append(link)
+                return link
+
+            gw._device_factory = device
+            return await gsv._start_site(handler, cfg, ctx)
+
+        async def exercise() -> None:
+            self.assertEqual([site.host for site in sites], ["10.1.2.3", "100.64.12.34"])
+            self.assertIs(sites[0].runner, sites[1].runner)
+            gw = gateways[0]
+            handler = sites[0].runner.server.request_handler
+            lan = request_for(transport=transport_for(local=("10.1.2.3", 8941)))
+            tail = request_for(host="gateway.example.test:8941",
+                               transport=transport_for(local=("100.64.12.34", 8941)))
+            for request, other in ((lan, tail), (tail, lan)):
+                task = asyncio.create_task(handler(request))
+                await until(lambda: gw._active is not None)
+                self.assertIs(gw._active._ops, gw._ops)
+                self.assertEqual(gw._active._ops._binding.session_id, SESSION_ID)
+                self.assertEqual((await handler(other)).status, 409)
+                devices[-1].disconnect()
+                self.assertTrue((await asyncio.wait_for(task, 5)).prepared)
+                await until(lambda: not gw.busy)
+            self.assertEqual(gw.sessions_started, 2)
+
+        deps = self.spies.deps(self.clock)
+        deps.start_site = start
+        deps.wait_for_shutdown = exercise
+        with mock.patch.object(gsv, "_OwnedSite", Site):
+            self.assertEqual(await gsv._serve(path, {}, self.out, self.err, deps), 0)
+        self.assertTrue(all(site.stopped for site in sites))
+        self.assertEqual(self.spies.provider_calls, 0)
+        self.assertEqual(runner_threads(), [])
+        self.fx.stores_reopen()
+
     async def test_t_srv_startup_freezes_exactly_the_six_binding_fields(self):
         path = self.fx.build()
         self.assertEqual(await self.serve(path), 0)
@@ -2995,6 +3736,65 @@ class ServeStartupTest(OfflineAsyncCase):
         self.assertEqual(self.spies.closer_calls, 0)  # there was nothing to close
         self.assertEqual(self.spies.events, ["site"])
         self.assertNothingDialled(attach_attempts=1)
+
+    async def test_second_real_site_or_cancellation_failure_releases_all_ownership(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                self.base = Path(os.path.realpath(tempfile.mkdtemp(prefix="pet-gw-u3-")))
+                self.addCleanup(shutil.rmtree, self.base, True)
+                self.fx = StateFixture(self.base)
+                self.spies, self.out, self.err = Spies(), io.StringIO(), io.StringIO()
+                path = self.fx.build(cfg={"tailnet_bind_host": "100.64.12.34", "tailnet_fqdn": "gateway.example.test"})
+                sites: list[Any] = []
+                gateways: list[Any] = []
+                waiting = asyncio.Event()
+                release_start = asyncio.Event()
+
+                class Site:
+                    def __init__(self, runner: Any, host: str, port: int, **_kw: Any):
+                        self.runner, self.host, self.port = runner, host, port
+                        self.stopped = False
+                        sites.append(self)
+
+                    async def start(self) -> None:
+                        if self.host == "100.64.12.34":
+                            waiting.set()
+                            if cancelled:
+                                await release_start.wait()
+                                return
+                            raise OSError(CANARY)
+
+                    async def stop(self) -> None:
+                        self.stopped = True
+
+                async def start(handler: Any, cfg: Any, ctx: Any) -> Any:
+                    gateways.append(handler.__self__)
+                    return await gsv._start_site(handler, cfg, ctx)
+
+                deps = self.spies.deps(self.clock)
+                deps.start_site = start
+                with mock.patch.object(gsv, "_OwnedSite", Site):
+                    task = asyncio.create_task(gsv._serve(path, {}, self.out, self.err, deps))
+                    if cancelled:
+                        await asyncio.wait_for(waiting.wait(), 5)
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done())  # startup retains its handle
+                        release_start.set()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                        self.assertEqual(self.out.getvalue(), "")
+                        self.assertEqual(self.err.getvalue(), "")
+                        self.assertEqual(runner_threads(), [])
+                        self.fx.stores_reopen()
+                    else:
+                        self.assertFailed(await task, "listen_failed")
+                self.assertEqual(len(sites), 2)
+                self.assertTrue(all(site.stopped for site in sites))
+                self.assertEqual(gateways[0].sessions_started, 0)
+                self.assertEqual(self.spies.provider_calls, 0)
+                self.assertEqual(self.spies.client_calls, 1)  # startup attach only
+                self.assertNotIn(CANARY, self.out.getvalue() + self.err.getvalue())
 
     async def test_t_srv_runner_exit_cleanup_an_exception_while_serving_still_cleans_up(
         self,
@@ -3312,7 +4112,7 @@ class SourceHygieneTest(ServerOfflineCase):
     def tree(self) -> ast.Module:
         return ast.parse(SERVER_PY.read_text(encoding="utf-8"))
 
-    def test_t_srv_privacy_no_logging_no_env_reads_no_raw_socket_and_prints_only_in_serve(
+    def test_t_srv_privacy_no_logging_no_env_reads_and_prints_only_in_serve(
         self,
     ):
         tree = self.tree()
@@ -3324,9 +4124,9 @@ class SourceHygieneTest(ServerOfflineCase):
                 roots.add(node.module.split(".")[0])
         self.assertFalse(
             roots
-            & {"logging", "traceback", "warnings", "socket", "subprocess", "threading"}
+            & {"logging", "traceback", "warnings", "subprocess", "threading"}
         )
-        self.assertTrue({"aiohttp", "asyncio", "ssl"} <= roots)
+        self.assertTrue({"aiohttp", "asyncio", "ssl", "socket"} <= roots)
         names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
             n.id for n in ast.walk(tree) if isinstance(n, ast.Name)
         }
@@ -3343,6 +4143,23 @@ class SourceHygieneTest(ServerOfflineCase):
                         printers.add(fn.name)
         # the two metadata lines of startup/shutdown and the fixed ``error: <code>`` line
         self.assertEqual(printers, {"_serve", "_startup"})
+
+    def test_socket_creation_is_limited_to_the_owned_ipv4_stream_listener(self):
+        tree = self.tree()
+        owned = next(node for node in tree.body
+                     if isinstance(node, ast.ClassDef) and node.name == "_OwnedSite")
+        all_socket_refs = [node for node in ast.walk(tree) if isinstance(node, ast.Name)
+                           and node.id == "socket"]
+        owned_refs = [node for node in ast.walk(owned) if isinstance(node, ast.Name)
+                      and node.id == "socket"]
+        self.assertEqual({id(node) for node in all_socket_refs},
+                         {id(node) for node in owned_refs})
+        socket_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "socket"]
+        self.assertEqual([ast.unparse(node) for node in socket_calls],
+                         ["socket.socket(socket.AF_INET, socket.SOCK_STREAM)"])
 
     def test_t_srv_privacy_no_exception_text_is_formatted_into_output(self):
         source = SERVER_PY.read_text(encoding="utf-8")

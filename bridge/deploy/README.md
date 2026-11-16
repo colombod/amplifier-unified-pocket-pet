@@ -61,6 +61,54 @@ app does not stop the gateway, but Unified must be running/reachable to do work.
 User `network-online.target` is only ordering, not a guarantee that Wi-Fi,
 Tailscale or Unified is ready.
 
+## Optional LAN and Tailnet listeners
+
+The default config still serves only its existing `bind_host`/`host_header`.
+For a matched gateway and device package that supports native Tailnet voice, one
+gateway can also bind a second explicitly chosen local IPv4 address. Add these
+two optional fields to the **same** private JSON document, without changing the LAN
+settings:
+
+```text
+"tailnet_bind_host": "100.64.12.34",
+"tailnet_fqdn": "gateway.example.test"
+```
+
+Replace the example with this host's actual Tailscale IPv4, in `100.64.0.0/10`;
+the two range endpoints, malformed and duplicate addresses are rejected. This is
+an exact local bind on the existing `port`, not a wildcard or a second process.
+Replace the example FQDN with the same canonical lowercase dotted certificate
+FQDN configured on the device (at most 63 characters). Both fields must be
+present together. The additional listener accepts exactly
+`Host: <tailnet_fqdn>:<port>`;
+the LAN listener still accepts exactly the pre-existing `host_header`. The
+native Tailnet transport uses the FQDN and port in Host while dialing the chosen
+CGNAT IP; the LAN transport uses its configured legacy Host. Each request must
+also pass the existing bearer and TLS checks, and both routes share one rate
+registry, journal and single active call. The device still verifies the server
+certificate against its separately configured FQDN; use a matching trusted
+certificate on both paths. Do not disable TLS verification.
+
+CGNAT range validation does **not** prove the address is a Tailscale interface
+or restrict who can reach it. Choose the intended local Tailscale address
+yourself and configure appropriate host firewall and Tailnet ACLs. Binding an
+unavailable or already occupied address causes the **whole** gateway startup to
+fail with `listen_failed`: no partial LAN-only service is retained. Wait for the
+selected interfaces to be ready before starting it; network ordering does not
+guarantee Tailscale readiness, and the gateway does not automatically rebind a
+changed address. Failure to bind can occur after the existing same-host
+attachment refresh, so do not assume no prior startup state change. Cleanup
+failure or forced process interruption is not proof all sockets were released;
+verify the old process has exited before starting another owner. A stalled
+listener startup or cleanup can delay cancellation while ownership is retained.
+Listener cleanup does not prove every accepted transport has closed: an
+incomplete TLS handshake can remain outside aiohttp's tracked connections.
+The production gateway's release path is the sole owner of listener cleanup;
+it does not call the returned closer concurrently. To restore LAN-only operation
+after a deliberate stop, remove both optional fields and start
+the same service with its original configuration. The feature is offline-tested;
+it does not establish deployed, off-home or device voice success.
+
 The equivalent foreground CLI, **shown for reference, not a second process**:
 
 ```sh

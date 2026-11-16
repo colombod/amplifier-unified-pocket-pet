@@ -1399,6 +1399,19 @@ def config_code(case: OfflineTestCase, doc: Any) -> str:
 
 
 class ConfigAcceptTest(OfflineTestCase):
+    def test_tailnet_listener_is_optional_and_explicit(self):
+        legacy = gs.parse_config(good_config())
+        self.assertIsNone(legacy.tailnet_bind_host)
+        self.assertIsNone(legacy.tailnet_fqdn)
+        for address in ("100.64.0.1", "100.127.255.254"):
+            with self.subTest(address=address):
+                cfg = gs.parse_config(good_config(
+                    tailnet_bind_host=address, tailnet_fqdn="gateway.example.test"))
+                self.assertEqual(cfg.tailnet_bind_host, address)
+                self.assertEqual(cfg.tailnet_fqdn, "gateway.example.test")
+                self.assertEqual((cfg.bind_host, cfg.host_header),
+                                 ("192.168.1.10", "192.168.1.10:8443"))
+
     def test_explicit_existing_auth_root_is_optional_private_and_not_in_repr(self):
         cfg = gs.parse_config(good_config(auth_root="/private/existing/auth"))
         self.assertEqual(cfg.auth_root, "/private/existing/auth")
@@ -1503,6 +1516,37 @@ class ConfigAcceptTest(OfflineTestCase):
 
 
 class ConfigRejectTest(OfflineTestCase):
+    def test_tailnet_listener_rejects_non_cgnat_noncanonical_and_duplicate_addresses(self):
+        for value in (None, "", 5, True, [], "0.0.0.0", "127.0.0.1",
+                      "10.0.0.1", "192.168.1.10", "100.63.255.255",
+                      "100.128.0.0", "100.64.0.0", "100.127.255.255",
+                      "100.064.0.1", "100.64.0.1 ", "100.64.0.1:8443",
+                      "100.64.0.1/10", "example.test", "::1"):
+            with self.subTest(value=value):
+                self.assertEqual(config_code(self, good_config(
+                    tailnet_bind_host=value, tailnet_fqdn="gateway.example.test")),
+                                 "config_invalid")
+        self.assertEqual(config_code(self, good_config(
+            bind_host="100.64.0.1", tailnet_bind_host="100.64.0.1",
+            tailnet_fqdn="gateway.example.test")), "config_invalid")
+
+    def test_tailnet_address_and_device_fqdn_must_be_valid_and_supplied_together(self):
+        for missing in (dict(tailnet_bind_host="100.64.0.1"),
+                        dict(tailnet_fqdn="gateway.example.test")):
+            self.assertEqual(config_code(self, good_config(**missing)), "config_invalid")
+        for name in (None, 1, True, "", "localhost", "1.2.3.4", ".example.test",
+                     "host..test", "-host.test", "host-.test", "host.-test",
+                     "host.test.", "Host.test", "*.example.test",
+                     "gateway.example.test:8443", "https://gateway.example.test",
+                     "gateway.example.test ", "é.example", "a" * 64 + ".test"):
+            with self.subTest(name=name):
+                self.assertEqual(config_code(self, good_config(
+                    tailnet_bind_host="100.64.0.1", tailnet_fqdn=name)), "config_invalid")
+        for name in ("a.b", "1host.test", "a-b.c", "a" * 61 + ".b"):
+            with self.subTest(name=name):
+                self.assertEqual(gs.parse_config(good_config(
+                    tailnet_bind_host="100.64.0.1", tailnet_fqdn=name)).tailnet_fqdn, name)
+
     def test_t_state_cfg_non_dict_documents_are_config_invalid(self):
         for doc in (None, [], "x", 1, good_config().items()):
             with self.subTest(doc=type(doc).__name__):

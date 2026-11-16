@@ -782,6 +782,7 @@ _ALLOWED_NETWORKS = tuple(
     ipaddress.IPv4Network(net)
     for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
 )
+_TAILNET_NETWORK = ipaddress.IPv4Network("100.64.0.0/10")
 _CONFIG_REQUIRED = frozenset(
     {
         "version",
@@ -798,7 +799,10 @@ _CONFIG_REQUIRED = frozenset(
     }
 )
 _CONFIG_OPTIONAL = frozenset(
-    {"model", "voice", "provider_key_file", "provider_key_env", "auth_root"}
+    {
+        "model", "voice", "provider_key_file", "provider_key_env", "auth_root",
+        "tailnet_bind_host", "tailnet_fqdn",
+    }
 )
 _PATH_MAX = 4096
 
@@ -825,6 +829,8 @@ class GatewayConfig:
     # Existing shared private credentials may live outside state_root/journal.
     # This selects their location, never rebinds/copies/re-pairs or grants access.
     auth_root: str | None = field(default=None, repr=False)
+    tailnet_bind_host: str | None = None
+    tailnet_fqdn: str | None = None
 
 
 def _private_ipv4(value: Any) -> bool:
@@ -845,6 +851,33 @@ def _host_header_ok(value: Any) -> bool:
     if not _private_ipv4(ip):
         return False
     return not sep or (_PORT_RE.fullmatch(port) is not None and int(port) <= 65535)
+
+
+def _tailnet_fqdn_ok(value: Any) -> bool:
+    """The device's lowercase dotted certificate hostname, never an IP or URL."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 63:
+        return False
+    labels = value.split(".")
+    return (
+        len(labels) >= 2
+        and any("a" <= char <= "z" for char in value)
+        and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+                is not None for label in labels)
+    )
+
+
+def _tailnet_binding_ok(doc: dict[str, Any]) -> bool:
+    if "tailnet_bind_host" not in doc or "tailnet_fqdn" not in doc:
+        return "tailnet_bind_host" not in doc and "tailnet_fqdn" not in doc
+    address = doc["tailnet_bind_host"]
+    if not _private_ipv4(address) or not _tailnet_fqdn_ok(doc["tailnet_fqdn"]):
+        return False
+    ip = ipaddress.IPv4Address(address)
+    return (
+        ip in _TAILNET_NETWORK
+        and ip not in (_TAILNET_NETWORK.network_address, _TAILNET_NETWORK.broadcast_address)
+        and address != doc["bind_host"]
+    )
 
 
 def _abs_path(value: Any) -> bool:
@@ -890,6 +923,7 @@ def _config_defects(doc: dict[str, Any]) -> bool:
         _private_ipv4(doc["bind_host"]),
         type(doc["port"]) is int and 1024 <= doc["port"] <= 65535,
         _host_header_ok(doc["host_header"]),
+        _tailnet_binding_ok(doc),
         _abs_path(doc["tls_cert_file"]) and _abs_path(doc["tls_key_file"]),
         _tokens_ok(doc["pet_token_sha256"]),
         _matches(_MODEL_RE, doc.get("model", DEFAULT_MODEL)),
@@ -939,6 +973,8 @@ def parse_config(doc: Any) -> GatewayConfig:
         provider_key_file=doc.get("provider_key_file"),
         provider_key_env=doc.get("provider_key_env"),
         auth_root=doc.get("auth_root"),
+        tailnet_bind_host=doc.get("tailnet_bind_host"),
+        tailnet_fqdn=doc.get("tailnet_fqdn"),
     )
 
 

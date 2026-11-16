@@ -315,7 +315,9 @@ have not yet been tested.
    one of `provider_key_file` and `provider_key_env`, never both. See
    `GatewayConfig` in `bridge/pet_bridge/gateway_state.py` and
    [service setup](../bridge/deploy/README.md). A complete clean-server config
-   and installation walkthrough still needs maintainer validation.
+   and installation walkthrough still needs maintainer validation. An optional
+   source-level dual LAN/Tailnet listener is described in the service setup;
+   it requires a matched device implementation and is not yet physically verified.
 
 For the pet-to-gateway connection, the device dials the configured LAN IPv4 but
 verifies the TLS certificate against a separately configured FQDN. The FQDN must

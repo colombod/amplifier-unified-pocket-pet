@@ -9,7 +9,7 @@ before it touches the provider or the WebSocket upgrade::
 
     1 method != GET                      405 method_not_allowed
     2 raw path != /v1/pet/live           404 not_found     (no 3xx, no normalisation)
-    3 Host != the configured literal     421 misdirected   (exact string, exactly one header)
+    3 Host != this listener's literal   421 misdirected   (exact string, exactly one header)
     4 Origin / Sec-WebSocket-Protocol present, or a duplicated Authorization / Upgrade /
       Connection / Sec-WebSocket-Key / Sec-WebSocket-Version      400 bad_request
     5 no peer address                    400 bad_request;  per-IP failure limit  429 rate_limited
@@ -40,6 +40,7 @@ import hmac
 import os
 import re
 import signal
+import socket
 import ssl
 import stat
 import time
@@ -380,7 +381,15 @@ def check_handshake(
     if request.raw_path != gs.ROUTE:
         return Rejection(404, "not_found")
     headers = request.headers
-    if headers.getall("Host", []) != [cfg.host_header]:
+    expected_host = cfg.host_header
+    if cfg.tailnet_bind_host is not None:
+        conn = request.transport
+        local = conn.get_extra_info("sockname") if conn is not None else None
+        if local == (cfg.tailnet_bind_host, cfg.port):
+            expected_host = f"{cfg.tailnet_fqdn}:{cfg.port}"
+        elif local != (cfg.bind_host, cfg.port):
+            return Rejection(421, "misdirected")
+    if headers.getall("Host", []) != [expected_host]:
         return Rejection(421, "misdirected")
     if (
         "Origin" in headers
@@ -687,36 +696,143 @@ def _new_ws() -> web.WebSocketResponse:
     )
 
 
+async def _settle_owned(awaitable: Awaitable[T]) -> T:
+    """Keep custody of startup/cleanup through repeated caller cancellation.
+
+    Let the owned operation finish before cleanup or returning cancellation to
+    the caller. Never leave an unobserved task behind.
+    """
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                cancelled = True
+        except BaseException:
+            break
+    if cancelled:
+        with contextlib.suppress(BaseException):
+            task.result()
+        raise asyncio.CancelledError
+    return task.result()
+
+
+class _OwnedSite:
+    """One IPv4 TLS listener, owning its socket before bind and server before listen."""
+
+    def __init__(
+        self,
+        runner: web.ServerRunner,
+        host: str,
+        port: int,
+        *,
+        ssl_context: ssl.SSLContext,
+        reuse_address: bool,
+        reuse_port: bool,
+    ) -> None:
+        if reuse_port:
+            raise ValueError("reuse_port is not supported")
+        self._runner = runner
+        self._host = host
+        self._port = port
+        self._ssl_context = ssl_context
+        self._reuse_address = reuse_address
+        self._socket: socket.socket | None = None
+        self._server: asyncio.AbstractServer | None = None
+
+    async def start(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket = sock
+        if self._reuse_address:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self._host, self._port))
+        server = self._runner.server
+        if server is None:
+            raise RuntimeError("runner is not set up")
+        # Keep the bound raw socket even if create_server fails before returning.
+        # Never begin listening until the returned server has an owner.
+        self._server = await asyncio.get_running_loop().create_server(
+            server, sock=sock, ssl=self._ssl_context, backlog=128, start_serving=False
+        )
+        await self._server.start_serving()
+
+    async def stop(self) -> None:
+        try:
+            if self._server is not None:
+                self._server.close()
+        finally:
+            if self._socket is not None:
+                self._socket.close()
+
+
 async def _start_site(
     handler: Callable[[web.BaseRequest], Awaitable[web.StreamResponse]],
     cfg: gs.GatewayConfig,
     ssl_ctx: ssl.SSLContext,
 ) -> Callable[[], Awaitable[None]]:
-    """Listen on the configured private address; return an async closer.
+    """Listen on the configured private addresses; return an async closer.
 
     A low-level ``web.Server`` (no router, no middleware, no access log, a null logger); the
-    shutdown timeout is set on the runner.  A failure after the runner exists cleans it up.
+    shutdown timeout is set on the runner. One runner owns both sites. Requests are refused
+    until every requested site starts. A failed start or cancellation runs cleanup;
+    if cleanup itself fails, no successful release is claimed.
     """
+    ready = False
+
+    async def gated(request: web.BaseRequest) -> web.StreamResponse:
+        if not ready:
+            return reject_response(Rejection(503, "core_binding_required"))
+        return await handler(request)
+
     options: dict[str, Any] = {"access_log": None, "logger": _NullLogger()}
-    server = web.Server(handler, **options)
+    server = web.Server(gated, **options)
     runner = web.ServerRunner(server, shutdown_timeout=_RUNNER_SHUTDOWN_S)
-    await runner.setup()
+    sites: list[_OwnedSite] = []
+
+    async def cleanup() -> None:
+        failure: Exception | None = None
+        for site in sites:
+            try:
+                await site.stop()
+            except Exception as err:  # noqa: BLE001 - still close the other sites
+                if failure is None:
+                    failure = err
+        try:
+            await runner.cleanup()
+        except Exception as err:  # noqa: BLE001 - keep the earliest cleanup failure
+            if failure is None:
+                failure = err
+        if failure is not None:
+            raise failure
+
     try:
-        site = web.TCPSite(
-            runner,
-            cfg.bind_host,
-            cfg.port,
-            ssl_context=ssl_ctx,
-            reuse_address=True,
-            reuse_port=False,
+        await _settle_owned(runner.setup())
+        addresses = (cfg.bind_host,) if cfg.tailnet_bind_host is None else (
+            cfg.bind_host, cfg.tailnet_bind_host
         )
-        await site.start()
+        for address in addresses:
+            site = _OwnedSite(
+                runner,
+                address,
+                cfg.port,
+                ssl_context=ssl_ctx,
+                reuse_address=True,
+                reuse_port=False,
+            )
+            sites.append(site)
+            await _settle_owned(site.start())
+        ready = True
     except BaseException:
-        await runner.cleanup()
+        await _settle_owned(cleanup())
         raise
 
     async def closer() -> None:
-        await runner.cleanup()
+        # _release is the only production closer owner; calls are not concurrent.
+        nonlocal ready
+        ready = False
+        await _settle_owned(cleanup())
 
     return closer
 
@@ -1299,10 +1415,10 @@ async def _startup(
         held.closer = None
     if held.closer is None:
         raise StartupError("listen_failed")
-    print(
-        f"gateway: listening on {cfg.bind_host}:{cfg.port} for session ...{cfg.session_id_short}",
-        file=stdout,
-    )
+    addresses = f"{cfg.bind_host}:{cfg.port}"
+    if cfg.tailnet_bind_host is not None:
+        addresses += f", {cfg.tailnet_bind_host}:{cfg.port}"
+    print(f"gateway: listening on {addresses} for session ...{cfg.session_id_short}", file=stdout)
     await deps.wait_for_shutdown()
 
 

@@ -682,17 +682,17 @@ REVIEWED_SURFACE = {
     # gateway_core (U2): asyncio only.  threading is a non-capability stdlib root here;
     # the worker thread is the CoreRunner.  No socket/ssl/http/subprocess, no aiohttp.
     "gateway_core.py": {"import asyncio"},
-    # gateway_server (U3): the ONLY aiohttp importer. asyncio + ssl + aiohttp, web,
-    # and the reviewed WebSocket parser exception class only: no socket, http.client,
-    # subprocess, selectors, no dial/listen/executor
-    # CALL spelling (the scanner pins those too).  The device/provider sockets are
-    # created by aiohttp inside its own objects; this module never opens one itself.
+    # gateway_server: the only aiohttp importer and the only other socket importer.
+    # The reviewed aiohttp parser exception and one explicitly owned IPv4 listener
+    # are allowed. Additional same-name uses are checked structurally below.
     "gateway_server.py": {
         "import asyncio",
+        "import socket",
         "import ssl",
         "import aiohttp",
         "import aiohttp.web",
         "import aiohttp.http_websocket.WebSocketError",
+        "call create_server",
     },
 }
 CLASSIFIED_MODULES = frozenset(
@@ -715,6 +715,59 @@ CLASSIFIED_MODULES = frozenset(
         "wire.py",
     }
 )
+
+
+def gateway_listener_shape_ok(source: str) -> bool:
+    """Pin the deliberately reviewed socket/import/call shapes, not just their set."""
+    tree = ast.parse(source)
+    socket_imports = [
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "socket"
+    ]
+    if socket_imports != [None]:
+        return False
+    if any(isinstance(node, ast.ImportFrom) and node.module == "socket"
+           for node in ast.walk(tree)):
+        return False
+    owned = [node for node in tree.body
+             if isinstance(node, ast.ClassDef) and node.name == "_OwnedSite"]
+    if len(owned) != 1:
+        return False
+    starts = [node for node in owned[0].body
+              if isinstance(node, ast.AsyncFunctionDef) and node.name == "start"]
+    if len(starts) != 1:
+        return False
+    servers = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (
+            isinstance(node.func, ast.Attribute) and node.func.attr == "create_server"
+            or isinstance(node.func, ast.Name) and node.func.id == "create_server"
+        )
+    ]
+    if len(servers) != 1 or not any(node is servers[0] for node in ast.walk(starts[0])):
+        return False
+    if ast.unparse(servers[0]) != (
+        "asyncio.get_running_loop().create_server(server, sock=sock, "
+        "ssl=self._ssl_context, backlog=128, start_serving=False)"
+    ):
+        return False
+    socket_calls = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name) and node.func.value.id == "socket"
+    ]
+    if [ast.unparse(node) for node in socket_calls] != [
+        "socket.socket(socket.AF_INET, socket.SOCK_STREAM)"
+    ]:
+        return False
+    owned_names = {id(node) for node in ast.walk(owned[0])
+                   if isinstance(node, ast.Name) and node.id == "socket"}
+    return all(id(node) in owned_names for node in ast.walk(tree)
+               if isinstance(node, ast.Name) and node.id == "socket")
 
 
 class NetworkModuleBoundaryTest(OfflineTestCase):
@@ -873,13 +926,11 @@ class NetworkModuleBoundaryTest(OfflineTestCase):
             }, name)
 
     def test_the_gateway_server_surface_is_pinned_exactly(self):
-        # Reviewed imports include exactly the WebSocketError type from aiohttp's
-        # protocol module; any other aiohttp name, socket/http/subprocess import or dial/listen/executor call
-        # added to gateway_server changes the scanned surface and fails the pin above.
+        # Pin the reviewed WebSocketError import; also check the single listener
+        # creation call structurally in the separate confinement test.
         original = (self.package / "gateway_server.py").read_text(encoding="utf-8")
         self.assertEqual(scan_source(original), REVIEWED_SURFACE["gateway_server.py"])
         for extra in (
-            "import socket",
             "import subprocess",
             "import selectors",
             "import http.client",
@@ -888,7 +939,6 @@ class NetworkModuleBoundaryTest(OfflineTestCase):
             "from aiohttp.client import ClientSession",
             "from aiohttp import web, ClientSession",
             "import threading, multiprocessing",
-            "loop.create_server(f)",
             "asyncio.open_connection('h', 1)",
             "asyncio.start_server(f, 'h', 1)",
             "await asyncio.to_thread(f)",
@@ -904,11 +954,27 @@ class NetworkModuleBoundaryTest(OfflineTestCase):
                 found = scan_source(original + "\n" + extra + "\n")
                 self.assertNotEqual(found, REVIEWED_SURFACE["gateway_server.py"])
 
+    def test_gateway_listener_capability_is_confined_to_the_owned_site(self):
+        source = (self.package / "gateway_server.py").read_text(encoding="utf-8")
+        self.assertTrue(gateway_listener_shape_ok(source))
+        for extra in (
+            "async def extra():\n    await loop.create_server(f)\n",
+            "async def extra():\n    create_server = asyncio.get_running_loop().create_server\n"
+            "    await create_server(f)\n",
+            "import socket as other_socket\nother_socket.socket()\n",
+            "from socket import socket as other_socket\nother_socket()\n",
+            "import socket\n",
+        ):
+            with self.subTest(extra=extra):
+                self.assertFalse(gateway_listener_shape_ok(source + "\n" + extra))
+
     def test_no_shell_keyword_or_dynamic_call_anywhere_in_production(self):
         for path in sorted(self.package.glob("*.py")):
             found = scan_source(path.read_text(encoding="utf-8"))
             self.assertNotIn("shell keyword", found, path.name)
-            self.assertFalse({f for f in found if f.startswith("call ")}, path.name)
+            calls = {f for f in found if f.startswith("call ")}
+            self.assertEqual(calls, {"call create_server"} if path.name == "gateway_server.py"
+                             else set(), path.name)
 
 
 if __name__ == "__main__":  # pragma: no cover
