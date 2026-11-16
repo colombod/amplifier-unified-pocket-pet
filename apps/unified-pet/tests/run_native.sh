@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 # Mutant, compile-only, real-parent-only, or optimized Python modes do not
 # execute this complete maintained suite. Reject rather than report false PASS.
 if [ -n "${PET_CERT_TEST_MUTANT:-}" ] || [ "${PET_CERT_STITCH_ONLY:-0}" != 0 ] ||
-   [ "${BRIDGE_JOIN_REAL_PARENT:-0}" != 0 ] || [ -n "${PYTHONOPTIMIZE:-}" ]; then
+   [ "${BRIDGE_JOIN_REAL_PARENT:-0}" != 0 ] || [ -n "${PYTHONOPTIMIZE:-}" ] ||
+   [ "${VOICE_CASE:-all}" != all ] || [ -n "${VOICE_SOURCE:-}" ] ||
+   [ -n "${WG_RX_SOURCE:-}" ] || [ -n "${AUDIO_LIFECYCLE_MUTANT:-}" ]; then
   printf '%s\n' 'run_native requires full, non-mutant tests with Python assertions enabled' >&2
   exit 2
 fi
