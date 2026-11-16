@@ -150,15 +150,17 @@ cost; otherwise keep the existing path and record the finding.
   observed journey, command/result correlation, conditions, failures and limits.
   Source-only, built, installed and physically demonstrated are different states.
 - Preserve current settings, credentials, backups, source and uncertain attempts.
-  Reuse the established app-only backup/verification installation mechanism; no
+  Reuse the established app-only backup and verification sequence, but do not
+  rerun or repin a consumed installer: its retry and execution-custody failure
+  paths need repair, and direct device access is not established. No
   bootloader/table write, automatic rollback, old NVS restore or token regeneration.
 - Last demonstrated device boundary: build 11 completed two multi-exchange
   calls through the Unified front door. A later call through the installed,
   independent gateway yielded one user-heard answer with the exact input matched
   to the chat; it ended normally on quiet. Survival across Unified restart and
   automatic reconnect remain unverified. Any firmware update requires a concrete
-  candidate, the approved app-only backup/verification procedure and applicable
-  device authority. Do not replay prior one-shot operations.
+  candidate, a reviewed safe app-only installation path and applicable device
+  authority. Do not replay prior one-shot operations.
 
 ## Provenance
 
