@@ -64,8 +64,8 @@ Tailscale or Unified is ready.
 The equivalent foreground CLI, **shown for reference, not a second process**:
 
 ```sh
-cd /ABSOLUTE/REPOSITORY/bridge
-/ABSOLUTE/PYTHON -B -m pet_bridge serve --config /ABSOLUTE/private/gateway.json --event-log /ABSOLUTE/private/events.jsonl
+cd "/ABSOLUTE/REPOSITORY/bridge"
+"/ABSOLUTE/PYTHON" -B -m pet_bridge serve --config "/ABSOLUTE/private/gateway.json" --event-log "/ABSOLUTE/private/events.jsonl"
 ```
 
 Omit `--event-log` for the existing no-file-log behaviour. A supplied path must be

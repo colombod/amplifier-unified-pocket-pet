@@ -462,9 +462,13 @@ class PairingFlowTest(CliCase):
     def test_second_start_is_blocked_and_abandon_unblocks_it(self):
         self.client.script = [json_response(pair_ok())]
         self.assertEqual(self.run_cli("pair-start", "--origin", ORIGIN_URL)[0], 0)
+        attempt = self.cfg / "auth" / "attempt.json"
+        before = attempt.read_bytes()
         code, out, err = self.run_cli("pair-start", "--origin", ORIGIN_URL)
         self.assertEqual((code, out), (1, ""))
         self.assertIn("error: auth_attempt_exists", err)
+        self.assertIn("does not cancel the server request", err)
+        self.assertEqual(attempt.read_bytes(), before)
         self.assertEqual(len(self.client.calls), 1)
         code, out, _ = self.run_cli("pair-abandon")
         self.assertEqual(code, 0)
@@ -490,6 +494,15 @@ class PairingFlowTest(CliCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn(CRED_REF, out)
         self.assertNoSecrets(out, err)
+
+    def test_early_poll_rounds_wait_up_and_does_not_contact_server(self):
+        self.client.script = [json_response(pair_ok())]
+        self.assertEqual(self.run_cli("pair-start", "--origin", ORIGIN_URL)[0], 0)
+        self.clock.advance(4.2)
+        code, out, err = self.run_cli("pair-poll")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Too early. Try again in 1 seconds.", out)
+        self.assertEqual(len(self.client.calls), 1)
 
     def test_terminal_poll_results_exit_nonzero(self):
         for body, word in (
@@ -518,6 +531,8 @@ class PairingFlowTest(CliCase):
         code, out, err = self.run_cli("pair-start", "--origin", ORIGIN_URL)
         self.assertEqual(code, 1)
         self.assertIn("error: auth_start_unknown", err)
+        self.assertIn("does not cancel the server request", err)
+        self.assertNotIn("then pair-start", err)
         self.assertNotIn("Traceback", out + err)
         self.assertNoSecrets(out, err)
 

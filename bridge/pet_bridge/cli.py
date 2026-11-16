@@ -21,6 +21,7 @@ never argv, a response body, a token, a traceback or an exception message.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import stat
@@ -36,8 +37,14 @@ from .journal import Journal, JournalError
 
 DEFAULT_NAME = "pet-bridge"
 _HINTS = {
-    "auth_start_unknown": "A previous pairing start has an unknown result. Run pair-abandon, then pair-start.",
-    "auth_attempt_exists": "A pairing attempt already exists. Run pair-poll, or pair-abandon to discard it.",
+    "auth_start_unknown": (
+        "A previous pairing start has an unknown result. Stop and inspect it before recovery. "
+        "pair-abandon is local only and does not cancel the server request."
+    ),
+    "auth_attempt_exists": (
+        "A pairing attempt already exists. Preserve unresolved state and inspect it. "
+        "pair-abandon is local only and does not cancel the server request."
+    ),
     "auth_no_credential": "No paired device. Run pair-start, approve in the browser, then pair-poll.",
     "not_attached": "Run attach first.",
     "credential_required": "Several credentials exist. Choose one with --credential.",
@@ -229,7 +236,7 @@ class _Context:
 
     def pair_poll(self) -> int:
         result = auth.pair_poll(self.store, self.factory(), self.clock)
-        wait = int(result.retry_after or 0)
+        wait = math.ceil(result.retry_after or 0)
         if result.status == "approved":
             self.say(
                 f"Approved. Credential reference: {result.credential_ref}",
