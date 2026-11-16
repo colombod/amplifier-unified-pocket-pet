@@ -200,7 +200,10 @@ been demonstrated on a factory-fresh teammate device:
    then select Done. If the phone disconnects before acknowledgement, reconnect
    to the setup network and inspect the result before retrying.
 4. Confirm Wi-Fi and bridge status on the pet. The optional historical Tailscale
-   test fields do not, by themselves, enable off-home voice.
+   test fields do not, by themselves, enable off-home voice. Do not run the
+   diagnostic Tailscale tunnel in this prototype: source review identified a
+   shutdown race, and its task-done signal does not prove safe teardown. A repair
+   and verification are in progress.
 
 The setup page is HTTP inside the WPA2 setup network and uses a per-boot mutation
 control; it is not HTTPS provisioning. The pet token is stored in device NVS.
