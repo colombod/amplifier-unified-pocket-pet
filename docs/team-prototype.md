@@ -105,9 +105,15 @@ have not yet been tested.
    another chat's question directly. Read back the exact question, target and
    proposed answer. Ask for confirmation that repeats the answer in the next
    user message, such as "Yes, send my answer: no"; if unclear or changed,
-   reconfirm. With that genuine user input, use coordination.send to relay the
-   owning chat, question ID, confirmed revision and prompt, exact answer and
-   actual source-message ID. The owner must re-read its question; if the
+   reconfirm. Call coordination.context for this front-door chat and take the
+   current admitted humanInput.sourceMessageId and humanInput.sourceInputId.
+   If either is missing or is not the current answer-bearing confirmation, stop;
+   do not infer it from a prior message or peer text. With that genuine user
+   input, use coordination.send to relay the owning chat, question ID, confirmed
+   revision and prompt, exact answer and actual sourceMessageId. Inspect the
+   send receipt: its admitted sourceInputIds must include that sourceInputId.
+   If not, or if the outcome is uncertain, do not claim success or resend.
+   The owner must re-read its question; if the
    confirmed snapshot changed, stop and reconfirm rather than answer the new
    version. Otherwise the owner uses its own question.answer with that revision,
    the actual user's sourceMessageId and the delivered sourceRequestId. The host
