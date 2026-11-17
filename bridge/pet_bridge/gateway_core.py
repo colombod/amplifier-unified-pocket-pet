@@ -1473,6 +1473,7 @@ class PetSession:
         self._input_rate_offset: float | None = None
         self._input_catchup_until = -math.inf
         self._input_wait_t: float | None = None
+        self._input_wait_s = 0.0
         self._input_quiet_t = -math.inf
         self._provider_audio_until = -math.inf  # completion-derived input pacing
         self._dropped_in = 0
@@ -2299,10 +2300,15 @@ class PetSession:
             # one-turn six-second limit is for late input AFTER capture_stop,
             # not a reason to truncate/reject someone still speaking. Global
             # time, segment and character bounds still apply.
-            limit = ready
+            now = self._clock.now()
+            # Sample even during transcript quiet, so short stalls count toward
+            # this request's cumulative budget. Preserve the exact ready instant.
+            limit = min(ready, now + gs.CONVERSE_INPUT_CHECK_S)
             if self._input_wait_t is not None:
-                ready = self._clock.now() + gs.CONVERSE_INPUT_CHECK_S
-                limit = self._input_wait_t + gs.CONVERSE_INPUT_MAX_S
+                ready = now + gs.CONVERSE_INPUT_CHECK_S
+                limit = self._input_wait_t + gs.CONVERSE_INPUT_MAX_S - self._input_wait_s
+            elif self._input_wait_s + _EPS >= gs.CONVERSE_INPUT_MAX_S:
+                limit = now
         delay = min(ready, limit) - self._clock.now()
         if delay <= _EPS:
             self._post(("timer", "settle"))
@@ -3016,9 +3022,13 @@ class PetSession:
         self._input_offset = offset if self._input_offset is None else min(
             self._input_offset, offset
         )
-        if self._input_rate_offset is None or offset > self._input_rate_offset:
+        if self._input_rate_offset is None:
             self._input_rate_offset = offset
-        elif self._input_rate_offset - offset > gs.CONVERSE_INPUT_GAIN_S + _EPS:
+        elif (offset == self._input_offset
+              and self._input_rate_offset - offset > gs.CONVERSE_INPUT_GAIN_S + _EPS):
+            # A checkpoint of the running MINIMUM, never a running maximum.
+            # Coming back from a late frame to an already observed baseline is
+            # ordinary jitter; only cumulative *new* minima signal catch-up.
             self._input_catchup_until = now + gs.CONVERSE_INPUT_LAG_S
             self._input_rate_offset = offset
         if self._state == _SETTLING and not self._sealing and self._input_behind(now):
@@ -3035,6 +3045,7 @@ class PetSession:
             if self._input_wait_t is None:
                 self._input_wait_t = now
         elif self._input_wait_t is not None:
+            self._input_wait_s += now - self._input_wait_t
             self._input_quiet_t = now
             self._input_wait_t = None
 
@@ -3081,6 +3092,7 @@ class PetSession:
         self._last_delta = -math.inf
         self._sealing = False
         self._input_wait_t = None
+        self._input_wait_s = 0.0
         self._input_quiet_t = -math.inf
         self._speak_pending = False
         self._reply_text = None
@@ -3196,8 +3208,10 @@ class PetSession:
         self._refresh_converse_input()
         ready, _limit = self._settle_target()
         now = self._clock.now()
-        if (self._input_wait_t is not None
-                and now + _EPS >= self._input_wait_t + gs.CONVERSE_INPUT_MAX_S):
+        waiting = self._input_wait_s + (
+            0.0 if self._input_wait_t is None else now - self._input_wait_t
+        )
+        if waiting + _EPS >= gs.CONVERSE_INPUT_MAX_S:
             self._known_unsent()
             self._emit(gs.build_converse_notice("not_sent"))
             self._converse_end = "not_sent"

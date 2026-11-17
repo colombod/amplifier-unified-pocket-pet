@@ -119,11 +119,14 @@ AWAIT_START_S = 10.0
 SETTLE_AFTER_STOP_S = 1.2
 SETTLE_QUIET_S = 1.5
 SETTLE_MAX_S = 6.0
-# Arrival heuristic for the continuous device PCM timeline, not provider EOS.
-CONVERSE_INPUT_LAG_S = 0.25  # tolerate the 100 ms frame cadence and small jitter
-CONVERSE_INPUT_GAIN_S = 0.025  # accumulated faster-than-real-time arrival
+# Arrival heuristic, not provider EOS. Recorded rig traces (tests/rig_arrivals.json)
+# peak at 254 ms relative lag JUST BEFORE a frame on the working 160 ms RTT
+# link; 300 ms leaves 46 ms headroom. Ordinary best-offset improvement is <=18 ms;
+# require >25 ms of genuinely new minima, not recovery from an upward excursion.
+CONVERSE_INPUT_LAG_S = 0.3
+CONVERSE_INPUT_GAIN_S = 0.025
 CONVERSE_INPUT_CHECK_S = 0.1
-CONVERSE_INPUT_MAX_S = 6.0  # maximum uninterrupted wait for input to catch up/drain
+CONVERSE_INPUT_MAX_S = 6.0  # cumulative detected input wait per request, not per stall
 POLL_INTERVAL_S = 1.0
 POLL_MAX_S = 60.0
 ACK_WAIT_S = 10.0

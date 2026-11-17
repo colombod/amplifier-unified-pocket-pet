@@ -128,6 +128,83 @@ class ArrivalReplayTest(OfflineAsyncCase):
         super().tearDownClass()
 
 
+class AccumulatedInputWaitTest(OfflineAsyncCase):
+    async def asyncSetUp(self):
+        self.h = TraceHarness()
+        self.addAsyncCleanup(self.h.aclose)
+        await self.h.open()
+        await self.h.boot()
+        await self.h.feed('{"type":"pet.converse.begin"}')
+        await self.audio(5, 0.1)
+        await self.h.push(old.delta("prefix", "please check everything", 0, 100))
+        await self.h.push(old.delegation("flapping"))
+
+    async def audio(self, count, interval):
+        for _ in range(count):
+            await self.h.feed(old.audio_frame(2400))
+            await self.h.clock.advance(interval)
+
+    async def flap(self):
+        await self.h.clock.advance(0.6)  # genuine stall beyond the 300 ms tolerance
+        await self.audio(12, 0.05)  # 2x to restore the known timeline
+        await self.audio(6, 0.1)  # caught-up interval, shorter than transcript quiet
+
+    async def test_short_stalls_accumulate_and_fail_closed_at_six_seconds(self):
+        recovered = []
+        for _ in range(12):
+            await self.flap()
+            if self.h.task.done():
+                break
+            self.assertIsNone(self.h.session._input_wait_t, "flap did not recover")
+            recovered.append(self.h.session._input_wait_s)
+            self.assertEqual(self.h.ops.count("begin"), 0)
+        self.assertGreater(len(recovered), 2)  # multiple individually recovered waits
+        self.assertTrue(all(0 < b - a < 1.5 for a, b in zip(recovered, recovered[1:])))
+        self.assertTrue(self.h.task.done(), "flapping deferred the request without limit")
+        # Recorded sum + last open interval is exactly the budget, not a fresh
+        # six-second allowance for the final flap.
+        session = self.h.session
+        spent = session._input_wait_s
+        if session._input_wait_t is not None:
+            # Close's first entry time is the timer at which the budget expired.
+            spent += session._close_hard - 15 - session._input_wait_t
+        self.assertAlmostEqual(spent, 6.0, places=7)
+        self.assertEqual(session.outcome.conversation_end, "not_sent")
+        self.assertEqual(session.outcome.requests_submitted, 0)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
+    async def test_finite_flaps_can_recover_and_send_once(self):
+        for _ in range(3):
+            await self.flap()
+        self.assertGreater(self.h.session._input_wait_s, 0)
+        self.assertLess(self.h.session._input_wait_s, 6)
+        self.assertEqual(self.h.ops.count("begin"), 0)
+        await self.audio(20, 0.1)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertEqual(self.h.ops.staged, [("prefix", "please check everything")])
+
+    async def test_repeated_provider_pending_intervals_share_the_same_budget(self):
+        recovered = []
+        for _ in range(14):
+            gate = self.h.provider.send_block = asyncio.Event()
+            await self.audio(6, 0.1)
+            gate.set()
+            await self.h.quiesce()
+            if self.h.task.done():
+                break
+            await self.audio(5, 0.1)
+            if self.h.task.done():
+                break
+            recovered.append(self.h.session._input_wait_s)
+            self.assertIsNone(self.h.session._input_wait_t)
+            self.assertEqual(self.h.ops.count("begin"), 0)
+        self.assertGreater(len(recovered), 2)
+        self.assertTrue(all(b > a for a, b in zip(recovered, recovered[1:])))
+        self.assertTrue(self.h.task.done(), "provider backlog flaps reset the budget")
+        self.assertEqual(self.h.session.outcome.conversation_end, "not_sent")
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
+
 def _trace_test(name):
     async def test(self):
         for point in POINTS[name]:
