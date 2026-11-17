@@ -161,7 +161,15 @@ class Isolation(unittest.TestCase):
                                      f"root-main import: {p}: {include}")
         self.assertEqual((APP/"partitions.csv").read_bytes(),(ROOT/"partitions.csv").read_bytes())
         self.assertEqual((APP/"dependencies.lock").read_bytes(),(ROOT/"dependencies.lock").read_bytes())
-        self.assertEqual((APP/"sdkconfig.defaults").read_bytes(),(ROOT/"sdkconfig.defaults").read_bytes())
+        # The app keeps every root default byte for byte and may append ONLY the
+        # voice-transport TCP settings (tests/link_rig), nothing else.
+        root_defaults=(ROOT/"sdkconfig.defaults").read_bytes()
+        app_defaults=(APP/"sdkconfig.defaults").read_bytes()
+        self.assertTrue(app_defaults.startswith(root_defaults),"root sdkconfig defaults changed or removed")
+        added={line.split("=")[0] for line in app_defaults[len(root_defaults):].decode("utf-8").splitlines()
+               if not line.startswith("#") and line.strip()}
+        self.assertEqual(added,{"CONFIG_LWIP_TCP_SND_BUF_DEFAULT","CONFIG_LWIP_TCP_WND_DEFAULT",
+                                "CONFIG_LWIP_TCP_RECVMBOX_SIZE"})
         project=(APP/"CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn("project(unified_pet)",project)
         for dep in ("pet_tls","pet_touch_calibration","tailtiny","wireguard_lwip"):
