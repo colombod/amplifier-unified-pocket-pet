@@ -602,13 +602,20 @@ class ConversationTest(ConversationCase):
             await self.h.quiesce()
             await self.h.clock.advance(0.2)
             if phase == "listening":
-                await self.request()
+                await self.h.push(old.delta("e1", "request 1", 1000, 1500))
+                await self.h.push(old.delegation("dlg_1"))
+                # This test used to send only isolated 4 ms frames across long
+                # gaps. Supply the continuous device timeline while settling;
+                # a stalled input is deliberately no longer safe to submit.
+                for _ in range(15):
+                    await self.h.feed(old.audio_frame(2400))
+                    await self.h.clock.advance(0.1)
             elif phase == "asking":
                 await self.h.clock.advance(1)
         result = await self.stop()
-        self.assertEqual(result.audio_in_bytes, 600)
+        self.assertEqual(result.audio_in_bytes, 600 + 15 * 4800)
         self.assertEqual(result.audio_out_bytes, 3 * (len(AUDIO_CANARY) + 4800))
-        self.assertEqual(self.h.provider.types().count("session.input_audio.append"), 3)
+        self.assertEqual(self.h.provider.types().count("session.input_audio.append"), 18)
         audio = self.h.device.of_type("session.output_audio.delta")
         self.assertEqual(b"".join(base64.b64decode(f["delta"]) for f in audio),
                          (AUDIO_CANARY + bytes(4800)) * 3)
@@ -708,6 +715,53 @@ class DelayedInputTest(ConversationCase):
         self.assertAlmostEqual(self.h.ops.times("confirm")[0] - start, 1.5)
         await self.stop()
 
+    async def test_provider_drain_without_transcript_still_requires_fresh_quiet(self):
+        await self.prefix()
+        gate = self.h.provider.send_block = asyncio.Event()
+        await self.audio(16)
+        self.assertEqual(self.h.ops.count("begin"), 0)
+        gate.set()
+        await self.h.quiesce()
+        drained = self.h.clock.now()
+        await self.audio(14)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+        await self.audio(1)
+        self.assertAlmostEqual(self.h.ops.times("confirm")[0] - drained, 1.5)
+        await self.stop()
+
+    async def test_initial_catchup_cannot_rebaseline_into_a_prefix_send(self):
+        # There is no earlier on-time frame to anchor absolute delay.
+        await self.audio(2, 0.09)
+        await self.h.push(old.delta("prefix", "please check ", 0, 100))
+        await self.h.push(old.delegation("delayed"))
+        await self.audio(20, 0.09)  # modest >1x, not just a 2x burst
+        self.assertEqual(self.h.ops.count("begin"), 0)
+        await self.h.push(old.delta("tail", "everything", 100, 2000))
+        await self.audio(22)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertEqual("".join(t for _, t in self.h.ops.staged), "please check everything")
+        await self.stop()
+
+    async def test_small_arrival_jitter_does_not_add_settle_latency(self):
+        await self.prefix()
+        start = self.h.clock.now()
+        for _ in range(7):
+            await self.audio(1, 0.08)
+            await self.audio(1, 0.12)
+        await self.audio(1)
+        self.assertAlmostEqual(self.h.ops.times("confirm")[0] - start, 1.5)
+        await self.stop()
+
+    async def test_stop_while_input_is_behind_never_sends_or_resumes(self):
+        await self.prefix()
+        await self.h.clock.advance(1.6)
+        result = await self.stop()
+        self.assertEqual((result.requests_submitted, result.requests_refused), (0, 1))
+        await self.h.feed(old.audio_frame(2400))
+        await self.h.push(old.delta("tail", "never replay", 400, 1800))
+        await self.h.clock.advance(10)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
 
 class RealConversationFlowTest(flow.FlowCase):
     async def begin_conversation(self):
@@ -746,6 +800,28 @@ class RealConversationFlowTest(flow.FlowCase):
             command = json.loads(post["body"])["id"]
             self.assertEqual(self.record(command)["state"], "COMPLETE")
         self.assertEqual(len(set(json.loads(p["body"])["id"] for p in self.client.posts)), 2)
+
+    async def test_real_core_delayed_audio_posts_complete_text_exactly_once(self):
+        fs = await self.begin_conversation()
+
+        async def audio(frames, interval):
+            for _ in range(frames):
+                await fs.feed(old.audio_frame(2400))
+                await self.clock.advance(interval)
+
+        await audio(5, 0.1)
+        await fs.push(old.delta("prefix", "please check ", 0, 400))
+        await fs.push(old.delegation("delayed"))
+        await self.clock.advance(1.6)
+        await audio(32, 0.05)
+        self.assertEqual(self.client.posts, [])
+        await fs.push(old.delta("tail", "the second workspace", 400, 1800))
+        await audio(24, 0.1)
+        self.assertEqual([json.loads(p["body"])["args"]["text"] for p in self.client.posts],
+                         ["please check the second workspace"])
+        await fs.feed('{"type":"pet.stop"}')
+        await fs.finish()
+        self.assertEqual(len(self.client.posts), 1)
 
     async def test_real_terminal_unspoken_reply_still_closes_before_next_request(self):
         self.client.reply_text = "x" * 4001

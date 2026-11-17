@@ -119,6 +119,11 @@ AWAIT_START_S = 10.0
 SETTLE_AFTER_STOP_S = 1.2
 SETTLE_QUIET_S = 1.5
 SETTLE_MAX_S = 6.0
+# Arrival heuristic for the continuous device PCM timeline, not provider EOS.
+CONVERSE_INPUT_LAG_S = 0.25  # tolerate the 100 ms frame cadence and small jitter
+CONVERSE_INPUT_GAIN_S = 0.025  # accumulated faster-than-real-time arrival
+CONVERSE_INPUT_CHECK_S = 0.1
+CONVERSE_INPUT_MAX_S = 6.0  # maximum uninterrupted wait for input to catch up/drain
 POLL_INTERVAL_S = 1.0
 POLL_MAX_S = 60.0
 ACK_WAIT_S = 10.0
@@ -1073,6 +1078,10 @@ __all__ = [
     "CAPTURE_QUEUE_CAP",
     "CLOSE_DEADLINE_S",
     "CONVERSE_IDLE_S",
+    "CONVERSE_INPUT_CHECK_S",
+    "CONVERSE_INPUT_GAIN_S",
+    "CONVERSE_INPUT_LAG_S",
+    "CONVERSE_INPUT_MAX_S",
     "CONVERSE_LIMIT_S",
     "CONVERSE_NOTICES",
     "CONVERSE_RENDER_MAX_S",

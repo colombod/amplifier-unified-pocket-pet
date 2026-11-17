@@ -1467,6 +1467,12 @@ class PetSession:
         self._error_code: str | None = None
         self._close_origin: str | None = None
         self._audio_in = 0
+        self._input_bytes = 0
+        self._input_offset: float | None = None
+        self._input_rate_offset: float | None = None
+        self._input_catchup_until = -math.inf
+        self._input_wait_t: float | None = None
+        self._input_quiet_t = -math.inf
         self._provider_audio_until = -math.inf  # completion-derived input pacing
         self._dropped_in = 0
         self._close_confirmed = False
@@ -1761,6 +1767,8 @@ class PetSession:
             except gs.GatewayProtocolError as err:
                 self._post_external(("device_error", err.code))
                 continue
+            if self._converse and frame.kind == "audio":
+                self._note_converse_audio(frame.pcm_len)
             self._post_external(("device", frame))
 
     async def _connect(self) -> None:
@@ -1811,6 +1819,8 @@ class PetSession:
             size = int(tag.removeprefix("audio:"))
             self._provider_audio_until = self._clock.now() + size / gs.AUDIO_BYTES_PER_S
             self._arm_silence()
+            if self._converse and self._input_wait_t is not None:
+                self._arm_settle()  # recovery quiet starts after the actual drain
         elif tag is not None:
             # Commit the capture boundary synchronously AFTER send_text returned,
             # before yielding to the reader/dispatcher. Only this reply's FIRST
@@ -2273,9 +2283,15 @@ class PetSession:
         ready = max(
             self._stop_t + gs.SETTLE_AFTER_STOP_S, self._last_delta + gs.SETTLE_QUIET_S
         )
+        if self._converse:
+            ready = max(ready, self._input_quiet_t + gs.SETTLE_QUIET_S)
         return ready, self._stop_t + gs.SETTLE_MAX_S
 
     def _arm_settle(self) -> None:
+        if self._converse:
+            if self._state != _SETTLING or self._sealing:
+                return
+            self._refresh_converse_input()
         ready, limit = self._settle_target()
         if self._converse:
             # A delegation can arrive near the START of a long utterance. The
@@ -2283,6 +2299,9 @@ class PetSession:
             # not a reason to truncate/reject someone still speaking. Global
             # time, segment and character bounds still apply.
             limit = ready
+            if self._input_wait_t is not None:
+                ready = self._clock.now() + gs.CONVERSE_INPUT_CHECK_S
+                limit = self._input_wait_t + gs.CONVERSE_INPUT_MAX_S
         delay = min(ready, limit) - self._clock.now()
         if delay <= _EPS:
             self._post(("timer", "settle"))
@@ -2973,6 +2992,51 @@ class PetSession:
             self._fail("unstable_transcript")
 
     # -- running conversation (selected only by pet.converse.begin) --------------------
+    def _input_behind(self, now: float) -> bool:
+        return self._input_offset is not None and (
+            now - (self._input_offset + self._input_bytes / gs.AUDIO_BYTES_PER_S)
+            > gs.CONVERSE_INPUT_LAG_S + _EPS
+            or now + _EPS < self._input_catchup_until
+        )
+
+    def _note_converse_audio(self, size: int) -> None:
+        """Receive-time metadata only; never infer transcription completion.
+
+        Continuous PCM (including device-substituted silence) advances at 48000
+        B/s. The minimum arrival-minus-duration offset removes the arbitrary
+        first-frame origin. Falling offsets also detect catch-up when the first
+        frames themselves were delayed. Absolute initial delay, loss concealed by
+        a discontinuous device timeline, and provider transcription lag are NOT
+        measurable here; even a caught-up stream and empty outbox are not EOS.
+        """
+        now = self._clock.now()
+        self._input_bytes += size
+        offset = now - self._input_bytes / gs.AUDIO_BYTES_PER_S
+        self._input_offset = offset if self._input_offset is None else min(
+            self._input_offset, offset
+        )
+        if self._input_rate_offset is None or offset > self._input_rate_offset:
+            self._input_rate_offset = offset
+        elif self._input_rate_offset - offset > gs.CONVERSE_INPUT_GAIN_S + _EPS:
+            self._input_catchup_until = now + gs.CONVERSE_INPUT_LAG_S
+            self._input_rate_offset = offset
+        if self._state == _SETTLING and not self._sealing and self._input_behind(now):
+            if self._input_wait_t is None:
+                self._input_wait_t = now
+            self._arm_settle()
+
+    def _refresh_converse_input(self) -> None:
+        now = self._clock.now()
+        # A timer has priority over the external FIFO. Audio already received but
+        # not yet forwarded must not be mistaken for an empty provider outbox.
+        queued = any(e[0] == "device" and e[1].kind == "audio" for e in self._inbox)
+        if self._input_behind(now) or self._pout.pending_audio or queued:
+            if self._input_wait_t is None:
+                self._input_wait_t = now
+        elif self._input_wait_t is not None:
+            self._input_quiet_t = now
+            self._input_wait_t = None
+
     def _on_audio_sent(self, pcm: bytes) -> None:
         # Observe only completed paced device sends, not provider arrival time:
         # queued/backpressured speech must not admit a new request too early.
@@ -3015,6 +3079,8 @@ class PetSession:
         self._transcript_floor = self._transcript_end
         self._last_delta = -math.inf
         self._sealing = False
+        self._input_wait_t = None
+        self._input_quiet_t = -math.inf
         self._speak_pending = False
         self._reply_text = None
         self._poll_inflight = False
@@ -3126,9 +3192,18 @@ class PetSession:
     def _converse_settle(self) -> None:
         if self._state != _SETTLING or self._sealing:
             return
+        self._refresh_converse_input()
         ready, _limit = self._settle_target()
         now = self._clock.now()
-        if now + _EPS < ready:
+        if (self._input_wait_t is not None
+                and now + _EPS >= self._input_wait_t + gs.CONVERSE_INPUT_MAX_S):
+            self._known_unsent()
+            self._emit(gs.build_converse_notice("not_sent"))
+            self._converse_end = "not_sent"
+            # Close instead of admitting the rejected utterance's delayed tail
+            # as a new request. Nothing was submitted; never retry it.
+            self._begin_close()
+        elif self._input_wait_t is not None or now + _EPS < ready:
             self._arm_settle()
         elif now + _EPS >= ready and self._stager.text().strip():
             self._sealing = True  # freezes segmentation BEFORE async begin
