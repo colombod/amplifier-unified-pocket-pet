@@ -43,3 +43,14 @@ CONFIG_ML_ZERO_COPY_WG=n
 CONFIG_ML_DERP_VERIFY_CERT=y
 CONFIG_ML_MAX_PEERS=1
 CONFIG_ML_NVS_MAX_PEERS=16
+
+# Voice transport. Reply audio and backlogged microphone messages are about
+# 6.4 kB on the wire, larger than lwIP's default 5760-byte TCP send buffer and
+# receive window. Each one then waited for acknowledgements while holding the
+# transport I/O lock: a call could not carry both directions once the round trip
+# passed about 40 ms, and the microphone buffer overflowed (tests/link_rig).
+# Sixteen segments hold three such messages; the receive mailbox must exceed
+# that window in segments.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=23040
+CONFIG_LWIP_TCP_WND_DEFAULT=23040
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32

@@ -74,7 +74,7 @@ from pathlib import Path
 pins={
  "dependencies.lock":"ee9197346a7f843fc9b0e913280b9d15d8a3dec7497eb85239124433179ab2b1",
  "main/idf_component.yml":"3900352b0660ba70c8cf913aa911faf1666eb82c670243bdf13bfa086ed057b1",
- "sdkconfig.defaults":"815e978462822ba24279877a1ccf77cf6f7df4bd2a560694cb2d3d9e70f6e7a4",
+ "sdkconfig.defaults":"b2304dcd8a6b139208129966b9ecfb8a43dc2e1208a863e8ac14c4c63e97e5de",
 }
 for name,expected in pins.items():
     if hashlib.sha256(Path(name).read_bytes()).hexdigest()!=expected:
@@ -94,3 +94,20 @@ if [ "${PET_OFFLINE_CACHE:-0}" = 1 ]; then
     -D IDF_TARGET=esp32s3 reconfigure
 fi
 idf.py -B "$app/build" -D "SDKCONFIG=$app/sdkconfig" build
+# A generated sdkconfig left by an earlier build takes precedence over changed
+# sdkconfig.defaults. Never report an image that silently lacks a checked-in
+# setting: remove the stale sdkconfig (and build directory) and build again.
+python3 - <<'PY'
+from pathlib import Path
+have=set(Path("sdkconfig").read_text(encoding="utf-8").splitlines())
+missing=[]
+for line in Path("sdkconfig.defaults").read_text(encoding="utf-8").splitlines():
+    if not line.startswith("CONFIG_"):
+        continue
+    key,value=line.split("=",1)
+    applied=(not any(h.startswith(key+"=") for h in have)) if value=="n" else line in have
+    if not applied:
+        missing.append(line)
+if missing:
+    raise SystemExit("Stale sdkconfig, image does NOT contain: "+", ".join(missing))
+PY
