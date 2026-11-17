@@ -22,6 +22,10 @@ Use `sh scripts/build.sh` from any directory (offline cached Docker image only).
 Run `sh tests/run_native.sh <absolute-output>` inside the pinned SDK, and both
 local Node setup suites. Canonical TLS/HTTP/touch tests are repository
 `tests/run_shared.sh <absolute-output>` with `PET_TLS_HOST_LIB` pointing to the
-approved host mbedTLS cache. Run `python3 tests/isolation_test.py --baseline
+approved host mbedTLS cache. `sh tests/link_rig/run_link_rig.sh <fresh-absolute-output> sdkconfig all` runs the
+production voice owner and transport on the pinned lwIP/TLS/WebSocket stack
+over an impaired link (network-less container with a tap device); rerun it when
+`bridge_voice.c`, `bridge_transport.c` or TCP/TLS/WebSocket settings change.
+Run `python3 tests/isolation_test.py --baseline
 <private-baseline>` before completion. Builds are not physical qualification;
 microphone/repeatability work and authenticated Unified integration are separate.

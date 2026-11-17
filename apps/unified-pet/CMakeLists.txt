@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-set(PROJECT_VER "0.3.8-unified-foundation")
+set(PROJECT_VER "0.3.9-voice-link")
 get_filename_component(PET_REPO "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 list(APPEND EXTRA_COMPONENT_DIRS
     "${PET_REPO}/components/pet_tls"
