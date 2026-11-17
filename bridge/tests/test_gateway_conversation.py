@@ -641,6 +641,74 @@ class ConversationTest(ConversationCase):
         self.assertIn("reply_unavailable", self.notices())
 
 
+class DelayedInputTest(ConversationCase):
+    """Synthetic transport schedules through PetSession, not a model of settling."""
+
+    async def audio(self, frames, interval=0.1):
+        for _ in range(frames):
+            await self.h.feed(old.audio_frame(2400))  # 100 ms of 24 kHz PCM16
+            await self.h.clock.advance(interval)
+
+    async def prefix(self):
+        await self.audio(5)
+        await self.h.push(old.delta("prefix", "please check ", 0, 400))
+        await self.h.push(old.delegation("delayed"))
+
+    async def test_delayed_device_audio_catches_up_before_sealing_full_request(self):
+        await self.prefix()
+        await self.h.clock.advance(1.6)  # baseline already sends the prefix here
+        premature = self.h.ops.count("confirm")
+        for index in range(32):
+            await self.audio(1, 0.05)  # 2x real time, draining a 1.6 s device backlog
+            if index == 20:
+                await self.h.push(old.delta("tail", "the second workspace", 400, 1800))
+        self.assertEqual(premature, 0, "submitted prefix before delayed audio arrived")
+        self.assertEqual(self.h.ops.count("begin"), 0, "sealed during catch-up")
+        await self.audio(24)  # continuous, now on-time silence/speech timeline
+        self.assertEqual(self.h.ops.staged, [
+            ("prefix", "please check "), ("tail", "the second workspace")
+        ])
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        await self.stop()
+
+    async def test_pending_provider_audio_defers_seal_and_restarts_quiet_on_drain(self):
+        await self.prefix()
+        gate = self.h.provider.send_block = asyncio.Event()
+        await self.audio(16)  # 76800 bytes queued/in-flight, below the existing cap
+        self.assertGreater(self.h.session._pout.pending_audio, 0)
+        self.assertEqual(self.h.ops.count("begin"), 0)
+        gate.set()
+        await self.h.quiesce()
+        await self.h.push(old.delta("tail", "the second workspace", 400, 1800))
+        await self.audio(14)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+        await self.audio(1)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertEqual("".join(t for _, t in self.h.ops.staged),
+                         "please check the second workspace")
+        await self.stop()
+
+    async def test_stalled_device_input_fails_closed_without_submitting_prefix(self):
+        await self.prefix()
+        await self.h.clock.advance(8)
+        self.assertEqual(self.h.ops.count("begin"), 0)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+        result = await self.h.finish()
+        self.assertEqual(self.notices(), ["not_sent"])
+        self.assertEqual((result.requests_submitted, result.requests_refused), (0, 1))
+        self.assertTrue(result.close_confirmed)
+
+    async def test_on_time_continuous_audio_keeps_original_settle_latency(self):
+        await self.prefix()
+        start = self.h.clock.now()
+        await self.audio(14)
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+        await self.audio(1)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertAlmostEqual(self.h.ops.times("confirm")[0] - start, 1.5)
+        await self.stop()
+
+
 class RealConversationFlowTest(flow.FlowCase):
     async def begin_conversation(self):
         fs = self.new_session()
