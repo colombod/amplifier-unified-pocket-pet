@@ -99,9 +99,12 @@ interrupted." The probes separate two causes:
   held, and the microphone send waits for it. With both directions flowing the
   call fails from about 40 to 60 ms round trip.
 
-With 23040-byte buffers (`sdkconfig.defaults`) the same source passes all seven:
-sends complete in about a millisecond, lock waiting disappears, and isolated
-loss is repaired by fast retransmit instead of a timeout. A larger microphone
+With 23040-byte buffers (`sdkconfig.defaults`) the same source passes all seven.
+At a 60 ms round trip the longest send took under 10 ms with no lock waiting. At
+160 ms it took about 0.1 s, and with 0.5% loss anything from a millisecond to
+0.45 s across nine runs, against the 1 s send limit: slower links still queue,
+they no longer overflow. Six further loss seeds also passed (five of six failed before). Why
+loss recovers faster was not instrumented. A larger microphone
 capture buffer was not used: it leaves both causes in place and only postpones
 the overflow while throughput stays below real time.
 
