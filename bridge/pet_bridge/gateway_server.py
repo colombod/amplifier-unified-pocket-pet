@@ -1106,23 +1106,36 @@ class _Gateway:
             raise ProviderError("provider_policy") from None
         if self._closing:
             raise asyncio.CancelledError
-        self._event("provider_dial", outcome="attempt", code=None)
+        await self._event("provider_dial", outcome="attempt", code=None)
         try:
             link = await self._deps.provider_connect(self._key, timeout=gs.START_DEADLINE_S)
         except BaseException as err:
             code = err.code if isinstance(err, ProviderError) else "provider_connect"
-            self._event("provider_dial", outcome="failed", code=code)
+            await self._event("provider_dial", outcome="failed", code=code)
             raise
-        self._event("provider_dial", outcome="open", code=None)
+        # No new suspension after acquiring a link and before handing ownership
+        # to PetSession: cancellation there would strand the paid connection.
+        await self._event("provider_dial", outcome="open", code=None, wait=False)
         return link
 
-    def _event(self, event: str, **facts: Any) -> None:
-        if self._event_log is not None:
-            self._event_log.write(event, **facts)
+    async def _log(self, write: Callable[[], None], *, wait: bool = True) -> None:
+        # O_NONBLOCK does not bound regular-file writes. Runtime metadata I/O,
+        # including logging rejected connections during a call, belongs off the
+        # asyncio thread just like journal I/O. Admission is bounded/nonblocking;
+        # an unavailable runner may drop optional metadata, never block capture.
+        with contextlib.suppress(RunnerError):
+            ticket = self._runner.submit("event_log", write, retain=False)
+            if wait:
+                await ticket.wait()
 
-    def _reject(self, rejection: Rejection) -> web.Response:
-        self._event("device_connect", outcome="refused", code=rejection.code,
-                    status=rejection.status)
+    async def _event(self, event: str, *, wait: bool = True, **facts: Any) -> None:
+        sink = self._event_log
+        if sink is not None:
+            await self._log(lambda: sink.write(event, **facts), wait=wait)
+
+    async def _reject(self, rejection: Rejection) -> web.Response:
+        await self._event("device_connect", outcome="refused", code=rejection.code,
+                          status=rejection.status)
         return reject_response(rejection)
 
     async def _follow(self) -> None:
@@ -1132,7 +1145,7 @@ class _Gateway:
         )
         if changed is not None:
             old, new = changed
-            self._event("host_restart_follow", old_instance=old[:8], new_instance=new[:8])
+            await self._event("host_restart_follow", old_instance=old[:8], new_instance=new[:8])
 
     def _abandon_follow(self, task: asyncio.Task[Any]) -> None:
         """Cancelled HTTP waiter: the queued job, not that waiter, owns the slot."""
@@ -1152,12 +1165,12 @@ class _Gateway:
         try:
             rejection = check_handshake(request, self._cfg, self._registry)
             if rejection is not None:
-                return self._reject(rejection)
+                return await self._reject(rejection)
             ws = self._ws_factory()
             if not ws.can_prepare(request).ok:
-                return self._reject(Rejection(400, "bad_request"))
+                return await self._reject(Rejection(400, "bad_request"))
             if self._closing or self._busy:
-                return self._reject(Rejection(409, "busy"))
+                return await self._reject(Rejection(409, "busy"))
             self._busy = True
             run_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             owned = False
@@ -1169,11 +1182,13 @@ class _Gateway:
                     try:
                         await asyncio.shield(self._follow_task)
                     except (StartupError, core.BridgeError):
-                        return self._reject(Rejection(503, "core_binding_required"))
+                        return await self._reject(Rejection(503, "core_binding_required"))
                     if self._closing:
-                        return self._reject(Rejection(409, "busy"))
+                        return await self._reject(Rejection(409, "busy"))
                 await ws.prepare(request)
-                self._event("device_connect", outcome="accepted", code=None, status=101)
+                # Preserve the no-suspension upgrade-to-custody boundary.
+                await self._event("device_connect", outcome="accepted", code=None, status=101,
+                                  wait=False)
                 if self._closing:
                     # Shutdown began while the upgrade was pending and returned with nothing
                     # to settle: no device link, session, dial or core job may start now.
@@ -1213,7 +1228,7 @@ class _Gateway:
                 with contextlib.suppress(Exception):
                     await ws.close(code=1011)
                 return ws
-            return self._reject(Rejection(500, "internal_error"))
+            return await self._reject(Rejection(500, "internal_error"))
 
     @staticmethod
     async def _refuse_late_upgrade(ws: Any, request: web.BaseRequest) -> None:
@@ -1252,7 +1267,8 @@ class _Gateway:
         await self._runner.wait_idle()
         self._last = self._reconcile(session)
         if self._event_log is not None:
-            self._event_log.session_end(self._last.conversation or session.outcome)
+            outcome = self._last.conversation or session.outcome
+            await self._log(lambda: self._event_log.session_end(outcome))
         self._active = None
         self._busy = False
 
@@ -1679,7 +1695,9 @@ async def _serve(
             if isinstance(held.closer, _SiteHandle) and held.closer.failure.is_set():
                 failure = "listen_failed"
         finally:
-            if held.event_log is not None:
+            # Interrupted runner shutdown can leave a runtime log write alive.
+            # As with the journal/store, never close its fd under that worker.
+            if held.event_log is not None and (held.runner is None or held.runner.idle):
                 held.event_log.write("gateway_stop", code=failure)
                 held.event_log.close()
     if failure is not None:

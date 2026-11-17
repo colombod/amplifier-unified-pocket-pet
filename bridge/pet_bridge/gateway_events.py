@@ -34,10 +34,12 @@ _EVENT_FIELDS = {
 
 
 class EventLog:
-    """Owner-only JSONL, held by fd, used only from the gateway's event loop.
+    """Owner-only JSONL, held by fd; callers serialize access.
 
     Startup is fail-closed. Later I/O failure disables this sink with one fixed
     stderr warning, without disturbing custody of a possibly in-flight send.
+    Runtime writes run on CoreRunner, not the asyncio thread. Startup/shutdown
+    writes and close run only outside that worker's lifetime.
     """
 
     def __init__(self, path: Path, stderr: TextIO) -> None:

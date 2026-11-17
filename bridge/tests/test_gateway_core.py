@@ -5003,6 +5003,8 @@ class SourceHygieneTest(OfflineTestCase):
                     "status",
                     "pre_dial_admission",
                     "follow_host_restart",
+                    # Regular-file runtime logging must not stall the loop.
+                    "event_log",
                 }
             ),
         )

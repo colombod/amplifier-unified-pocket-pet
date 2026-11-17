@@ -329,6 +329,7 @@ class CoreRunner:
             "status",
             "pre_dial_admission",
             "follow_host_restart",
+            "event_log",
         }
     )
 

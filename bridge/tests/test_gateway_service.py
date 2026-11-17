@@ -2009,6 +2009,50 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertEqual(self.command_names(), [])
 
 
+class EventBackpressureTest(srv.GatewayCase):
+    async def test_blocked_rejection_log_cannot_stop_active_device_reads(self):
+        active = asyncio.create_task(self.gw.handle(self.request()))
+        await self.h.feed(gf.ASSISTANT_START)
+        await self.h.feed('{"type":"pet.converse.begin"}')
+        sink = ge.EventLog(self.base / "events", io.StringIO())
+        self.gw._event_log = sink
+        entered, release = threading.Event(), threading.Event()
+        real_write = os.write
+        fd = sink._fd
+
+        def blocked_write(target, data):
+            if target == fd:
+                entered.set()
+                release.wait()
+            return real_write(target, data)
+
+        # A watchdog releases a baseline event-loop stall without hanging the
+        # suite. The candidate must read audio BEFORE this release, not after.
+        watchdog = threading.Timer(2, release.set)
+        watchdog.start()
+        rejected = None
+        try:
+            with mock.patch.object(ge.os, "write", side_effect=blocked_write):
+                rejected = asyncio.create_task(self.gw.handle(self.request(path="/bad")))
+                await until(entered.is_set)
+                self.h.device.feed(audio_frame(2400))
+                await until(lambda: self.gw._active.outcome.audio_in_bytes == 4800)
+                self.assertFalse(release.is_set(),
+                                 "regular-file log I/O stalled active device reads")
+                self.assertFalse(rejected.done())
+                release.set()
+                self.assertEqual((await rejected).status, 404)
+        finally:
+            release.set()
+            watchdog.cancel()
+            if rejected is not None:
+                await rejected
+            await self.h.feed('{"type":"pet.stop"}')
+            await active
+            await self.gw.shutdown()
+            sink.close()
+
+
 class PreDialGatewayTest(srv.GatewayCase):
     async def test_gate_failure_values_or_exception_emit_policy_without_dial_or_details(self):
         for value in (False, None, 1, {}, RuntimeError(gf.KEY_CANARY)):
