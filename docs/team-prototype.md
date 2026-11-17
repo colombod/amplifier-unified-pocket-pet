@@ -105,6 +105,31 @@ never restore another board's NVS or credentials. Flash backups can contain
 secrets and must not be shared. The current fresh-board workflow is **not yet
 physically verified**; do not use another person's device-specific installer.
 
+A generated `apps/unified-pet/sdkconfig` left by an earlier build takes
+precedence over a changed `sdkconfig.defaults`. The build script now refuses an
+image whose generated configuration lacks a checked-in setting; remove the stale
+`sdkconfig` and `build/` directory and build again rather than bypassing it.
+
+### Linux USB access for a serial or firmware operation
+
+Only for an operation the device owner has authorized. First inspect the exact
+device node **without opening the port**: its owner, group and mode, and your
+effective group membership.
+
+```sh
+ls -l /dev/ttyACM0    # the actual node for this board; do not guess
+id -nG                # groups of the current login session
+```
+
+A node owned `root:dialout` with mode `0660` is common; root ownership alone is
+not a fault. Use approved least-privilege access: membership of the node's group
+(effective only in a new login session) or a narrowly matched udev rule. Never
+make the node world-writable and do not run the flashing tool as root to get
+past permissions. Opening serial or JTAG can reset the device, so it needs the
+same operation-specific authority as flashing. USB permissions, the source
+tree's write policy and a Wi-Fi voice failure are separate problems; fixing one
+says nothing about the others.
+
 ## 2. Prepare Unified and the gateway
 
 Use your own Unified account and a dedicated private state directory, outside Git.
@@ -500,6 +525,18 @@ node apps/unified-pet/tests/setup_unified_page_test.mjs
 PYTHONDONTWRITEBYTECODE=1 "$PET_PYTHON" -B apps/unified-pet/tests/ui_contract_test.py
 ```
 
+The link rig runs the production conversation owner and transport on the pinned
+lwIP, TLS and WebSocket stack over a slow, lossy or briefly absent link; see
+[apps/unified-pet/tests/link_rig/README.md](../apps/unified-pet/tests/link_rig/README.md)
+for what it does and does not prove. It needs Docker with a tap device inside a
+network-less container and the firmware's generated `sdkconfig`:
+
+```sh
+PET_DEV_IMAGE="YOUR-VERIFIED-LOCAL-IMAGE" PET_COMPONENT_CACHE="/absolute/cache" \
+  sh apps/unified-pet/tests/link_rig/run_link_rig.sh \
+  /absolute/fresh/output apps/unified-pet/sdkconfig all
+```
+
 The full bridge suite and these app setup/UI checks passed on the maintainer's
 host for the prepared prototype. For native firmware and shared TLS checks, run
 `apps/unified-pet/tests/run_native.sh` and `tests/run_shared.sh` inside the
@@ -541,6 +578,25 @@ acknowledgements by exact input identity and hash; it never re-sends to find out
 If the outcome is unknown, inspect the conversation and preserve the journal
 rather than repeating an action. A response arriving after the wait limit may
 not be spoken.
+
+On 16 November a call with build 11 gave one heard answer and then showed
+**Microphone stream interrupted**: the pet's two-second microphone buffer filled
+because its sends fell behind. The physical trigger is unknown. Offline, the same
+voice code on the same network stack does this whenever the round trip to the
+gateway passes about 60 ms during an answer; firmware `0.3.9-voice-link` raises
+the TCP buffers that caused it and is built and offline-tested, **not installed
+or physically verified**. A link that disappears for about half a second or more
+can still end a call; with the mic on the newer firmware then starts a new one,
+and microphone audio not yet sent is discarded, never sent later.
+
+The draft gateway no longer sends a request while the pet's audio is known to be
+arriving late, catching up, or still queued toward the provider: it waits for the
+stream to recover and for a fresh quiet period, so trailing words are not cut off
+the request. If the stream does not recover within six seconds in total, nothing
+is sent, the pet shows **Not sent** and the call ends; say it again in a new
+call. This is an arrival-time estimate. It cannot prove that the provider has
+finished transcribing, so check the Unified conversation for consequential
+requests. With audio arriving on time it adds no delay.
 
 In the current reconnect source, a confirmed certificate-verification failure
 or an evidenced but inconclusive TLS failure prevents automatic replacement.

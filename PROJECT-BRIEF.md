@@ -65,9 +65,17 @@ are not needed for this pet and must not trigger a room/runtime migration.
 ### Real gaps, not reasons to redesign everything
 
 1. Build 11 is installed and was used for two multi-exchange calls; its mic
-   catch-up fix held over the longest call, about seven minutes. This does not
-   qualify every transport, reconnection or resource-lifecycle failure. Never
-   free under a live callback or replay a prior uncertain send.
+   catch-up fix held over the longest call, about seven minutes. On 16 November
+   a later call gave one heard answer and then "Microphone stream interrupted":
+   its capture buffer overflowed. The physical trigger is unknown. Offline, the
+   production voice path on the pinned network stack reproduces that overflow
+   whenever the round trip to the host passes about 60 ms during an answer,
+   because lwIP's default TCP buffers were smaller than one audio message
+   ([link rig](apps/unified-pet/tests/link_rig/README.md)). Firmware
+   `0.3.9-voice-link` enlarges them; it is built and rig-tested, not installed.
+   A blackout that loses a TCP retransmission still ends the call and replaces
+   it while the mic is on. Never free under a live callback or replay a prior
+   uncertain send.
 2. Existing Tailscale evidence proves a bounded device TLS/HTTP exchange with
    retained identity, not voice. The current spike excludes audio, and the
    bridge validates RFC1918-only dial addresses. Its native socket path is not
