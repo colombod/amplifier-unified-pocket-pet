@@ -13,6 +13,7 @@
 #include "audio_test.h"
 #include "live_voice.h"
 #include "touch_calibration.h"
+#include "tailnet_spike.h"
 
 #define FRAME_BYTES (192*208*2)
 extern const uint8_t pet_pixels[] asm("_binary_tachikoma_rgb565_start");
@@ -21,6 +22,7 @@ static lv_obj_t *pet, *title, *subtitle, *setup_panel, *qr, *wifi_details, *setu
 static lv_obj_t *audio_panel,*audio_message,*tone_button,*record_button,*audio_back,*volume_label;
 static lv_obj_t *talk_button,*talk_label,*audio_open_button,*settings_panel,*settings_gear,*microphone_icon,*stop_icon;
 static lv_obj_t *wifi_badge,*settings_connection,*settings_key;
+static lv_obj_t *tailnet_button,*tailnet_status;
 static bool return_to_settings;
 static unsigned tick_count=0, wave_ticks=0;
 static _Atomic unsigned diag_ticks, diag_flush_start, diag_flush_return;
@@ -49,6 +51,11 @@ static void pet_clicked(lv_event_t *event){wave_ticks=24;}
 static void talk_clicked(lv_event_t *event){live_status_t s;live_voice_snapshot(&s);if(s.active)live_voice_stop();else live_voice_start();}
 static void settings_clicked(lv_event_t *event){lv_obj_clear_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);}
 static void settings_closed(lv_event_t *event){lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);}
+static void tailnet_clicked(lv_event_t *event) {
+    (void)event;tailnet_spike_status_t s;tailnet_spike_snapshot(&s);
+    if(s.active&&!s.restart_required)tailnet_spike_cancel();
+    else if(!s.restart_required)(void)tailnet_spike_start();
+}
 static void align_touch_clicked(lv_event_t *event){touch_calibration_begin();}
 static void audio_clicked(lv_event_t *event){lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(audio_panel,LV_OBJ_FLAG_HIDDEN);}
 static void audio_closed(lv_event_t *event){lv_obj_add_flag(audio_panel,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);}
@@ -69,16 +76,24 @@ static lv_obj_t *button(lv_obj_t *parent,const char *text,int x,int y,int width,
 }
 static void refresh(lv_timer_t *timer) {
     atomic_fetch_add(&diag_ticks,1);
+    audio_test_reap_finished();live_voice_reap_finished();
     audio_test_status_t a;audio_test_snapshot(&a);
     live_status_t voice;live_voice_snapshot(&voice);
+    tailnet_spike_status_t tn;tailnet_spike_snapshot(&tn);
+    bool tailnet_busy=tn.active||!tn.cleaned_up;
+    lv_label_set_text(lv_obj_get_child(tailnet_button,0),tn.active?"Cancel Tailscale":"Test Tailscale");
+    lv_label_set_text_fmt(tailnet_status,"%s%s  error %d\nJoin %d TCP %d TLS %d HTTP %d",
+        tailnet_spike_state_name(tn.state),tn.restart_required?" - restart required":"",tn.error,tn.joined,tn.tcp,tn.tls,tn.http_status);
+    if(tn.restart_required||voice.active||a.busy)lv_obj_add_state(tailnet_button,LV_STATE_DISABLED);
+    else lv_obj_remove_state(tailnet_button,LV_STATE_DISABLED);
     lv_label_set_text(talk_label,voice.active?"Stop listening":"Start voice");
     if(voice.active){lv_obj_add_flag(microphone_icon,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(stop_icon,LV_OBJ_FLAG_HIDDEN);lv_obj_add_state(settings_gear,LV_STATE_DISABLED);}
     else{lv_obj_clear_flag(microphone_icon,LV_OBJ_FLAG_HIDDEN);lv_obj_add_flag(stop_icon,LV_OBJ_FLAG_HIDDEN);lv_obj_remove_state(settings_gear,LV_STATE_DISABLED);}
-    if(a.busy && !voice.active)lv_obj_add_state(talk_button,LV_STATE_DISABLED);
+    if(tailnet_busy||(a.busy && !voice.active))lv_obj_add_state(talk_button,LV_STATE_DISABLED);
     else lv_obj_remove_state(talk_button,LV_STATE_DISABLED);
     lv_label_set_text(audio_message,a.message);
     lv_label_set_text_fmt(volume_label,"Volume %d%%",a.volume);
-    if(a.busy){lv_obj_add_state(tone_button,LV_STATE_DISABLED);lv_obj_add_state(record_button,LV_STATE_DISABLED);lv_obj_add_state(audio_back,LV_STATE_DISABLED);}
+    if(a.busy||tailnet_busy){lv_obj_add_state(tone_button,LV_STATE_DISABLED);lv_obj_add_state(record_button,LV_STATE_DISABLED);lv_obj_add_state(audio_back,LV_STATE_DISABLED);}
     else{lv_obj_remove_state(tone_button,LV_STATE_DISABLED);lv_obj_remove_state(record_button,LV_STATE_DISABLED);lv_obj_remove_state(audio_back,LV_STATE_DISABLED);}
     network_status_t s;network_snapshot(&s);
     const char *signal=s.rssi>=-55?"excellent":s.rssi>=-67?"good":s.rssi>=-75?"fair":"weak";
@@ -112,6 +127,7 @@ void app_main(void) {
     /* Never erase user settings as an automatic response to an NVS error. */
     ESP_ERROR_CHECK(nvs_flash_init());
     network_init();audio_tests_init();live_voice_init();
+    ESP_ERROR_CHECK(tailnet_spike_init());
     lv_display_t *display=bsp_display_start();assert(display);
     ESP_ERROR_CHECK(bsp_display_backlight_on());
     bsp_display_lock(0);
@@ -195,18 +211,19 @@ void app_main(void) {
     settings_panel=lv_obj_create(screen);lv_obj_set_size(settings_panel,368,448);lv_obj_center(settings_panel);
     lv_obj_set_style_bg_color(settings_panel,lv_color_hex(0x0f172a),0);lv_obj_set_style_border_width(settings_panel,0,0);
     lv_obj_set_style_pad_all(settings_panel,0,0);lv_obj_remove_flag(settings_panel,LV_OBJ_FLAG_SCROLLABLE);
-    label(settings_panel,"Settings",340,0,24,&lv_font_montserrat_22);
-    settings_connection=label(settings_panel,"",330,0,66,&lv_font_montserrat_16);
-    settings_key=label(settings_panel,"",330,0,114,&lv_font_montserrat_14);
-    footer=button(settings_panel,"Wi-Fi & OpenAI key",0,0,280,setup_clicked);lv_obj_align(footer,LV_ALIGN_TOP_MID,0,168);
-    audio_open_button=button(settings_panel,"Audio / volume",0,0,280,audio_clicked);lv_obj_align(audio_open_button,LV_ALIGN_TOP_MID,0,230);
-    lv_obj_t *alignment=button(settings_panel,"Touch alignment",0,0,280,align_touch_clicked);lv_obj_align(alignment,LV_ALIGN_TOP_MID,0,292);
-    label(settings_panel,version,340,0,345,&lv_font_montserrat_14);
+    label(settings_panel,"Settings",340,0,14,&lv_font_montserrat_22);
+    settings_connection=label(settings_panel,"",330,0,52,&lv_font_montserrat_16);
+    settings_key=label(settings_panel,"",330,0,100,&lv_font_montserrat_14);
+    footer=button(settings_panel,"Phone setup",0,0,280,setup_clicked);lv_obj_align(footer,LV_ALIGN_TOP_MID,0,140);lv_obj_set_height(footer,40);
+    audio_open_button=button(settings_panel,"Audio / volume",0,0,280,audio_clicked);lv_obj_align(audio_open_button,LV_ALIGN_TOP_MID,0,186);lv_obj_set_height(audio_open_button,40);
+    lv_obj_t *alignment=button(settings_panel,"Touch alignment",0,0,280,align_touch_clicked);lv_obj_align(alignment,LV_ALIGN_TOP_MID,0,232);lv_obj_set_height(alignment,40);
+    tailnet_button=button(settings_panel,"Test Tailscale",0,0,280,tailnet_clicked);lv_obj_align(tailnet_button,LV_ALIGN_TOP_MID,0,278);lv_obj_set_height(tailnet_button,40);
+    tailnet_status=label(settings_panel,"IDLE",340,0,326,&lv_font_montserrat_12);
     button(settings_panel,"Back to Tachikoma",0,-20,280,settings_closed);
     lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);
     touch_calibration_init(bsp_display_get_input_dev(),screen);
     lv_timer_create(refresh,120,NULL);refresh(NULL);
     bsp_display_unlock();
     xTaskCreate(display_diagnostics,"display_diag",3072,NULL,2,NULL);
-    ESP_LOGI("pet","Tachikoma UI ready; voice starts only on Talk. No Unified connector in this isolated test.");
+    ESP_LOGI("pet","UI ready; voice only on Talk; Tailscale test only on explicit Settings/USB command.");
 }

@@ -6,14 +6,43 @@ The animated Tachikoma, microphone, speaker and touch display provide a screen-o
 companion. [Original intent](docs/intent.md) and the [draft vision](docs/VISION.md)
 retain the distinction between the goal and a proven integration.
 
-## Milestone 1 — user-confirmed spoken conversation
+## Unified voice prototype
+
+The independent app in `apps/unified-pet` connects the pet to a host-side
+gateway in `bridge/`. The gateway sends spoken requests to a dedicated Unified
+front-door conversation, which can use the user's authorized Unified actions.
+The goal remains access to all authorized work, not just one fixed conversation.
+
+One pet running build 11 has been used for two real multi-exchange calls on a
+home LAN: five requests and replies in the first call and three in the second.
+The user reported hearing the replies. Specific cross-workspace voice actions
+have not been independently verified; creating a workspace and chat was
+exercised by text, not voice.
+
+This is an early prototype, **not yet a turnkey team release**. First-time
+installation on a fresh board, another person's setup, a waiting-question answer
+by voice, automatic reconnect and off-home voice over Tailscale remain to be
+demonstrated. The service template is source code, not proof of an installed
+service. See [the delivery brief](PROJECT-BRIEF.md) and
+[team prototype guide](docs/team-prototype.md).
+
+When the microphone is on, the pet listens and speaks in a running conversation;
+tap it again to mute. There is no transcript preview or Send tap. The user has
+chosen automatic reconnect while the mic is on: each reconnect may start another
+paid provider connection, but uncertain actions must never be replayed. The
+demonstrated build 11 does not yet implement that reconnect behavior.
+
+## Earlier milestone — standalone spoken conversation
 
 On 10 November 2026 the user confirmed they can talk with the assistant. Firmware
 **0.3.5-amoled-v2-live** is the milestone baseline. This is a standalone voice
 conversation: it has no persistent memory or Amplifier Unified access yet.
 [Decisions, achievements and device lessons](docs/milestone-1.md).
 
-## Current implementation — 10 November 2026
+## Historical standalone implementation — 10 November 2026
+
+The following table describes the older root app, **not** the current independent
+Unified app or its setup.
 
 | Capability | Actual evidence |
 | --- | --- |
@@ -31,7 +60,10 @@ factory recovery, pairing fixes, audio changes and validation boundaries.
 Historical Linux toolkit evidence remains in [development-toolkit.md](docs/development-toolkit.md);
 the Mac firmware workspace uses the Docker workflow below.
 
-## Use the device
+## Historical standalone device use
+
+These instructions are for the older standalone root app, not the Unified
+prototype. In bridge mode the OpenAI key belongs on the host, not the pet.
 
 1. Open the gear icon, choose **Wi-Fi & OpenAI key**, and scan the QR to join its password-protected `Tachikoma-…-Setup` network.
 2. If no page opens automatically, browse to `http://192.168.4.1` while still on that Wi-Fi.
@@ -47,9 +79,11 @@ available; an interrupted response is shown as uncertain until a confirmed save.
 The prototype uses standard NVS, without encrypted flash or secure boot. Do not
 share flash dumps. No API call or microphone capture starts on boot.
 
-## Build on the Mac
+## Build the historical root app on the Mac
 
 Requires Docker Desktop. No global ESP-IDF install is used.
+For the Unified app, see `apps/unified-pet/scripts/build.sh`; this root-app
+procedure produces a different firmware image.
 
 ```sh
 docker compose build
