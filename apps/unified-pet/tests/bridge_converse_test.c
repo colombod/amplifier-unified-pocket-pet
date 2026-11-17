@@ -565,6 +565,13 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
         if(!first_append_at)first_append_at=now;
         else if(now-last_append_at>max_append_gap)max_append_gap=now-last_append_at;
         last_append_at=now;
+        /* Optional record of when each microphone message was handed to the
+         * socket (microseconds of fixture time, PCM bytes): input for gateway
+         * timing checks. Reads nothing back; no effect on any case. */
+        if(getenv("CONVERSE_APPEND_TRACE")){
+            FILE *trace=fopen(getenv("CONVERSE_APPEND_TRACE"),"a");
+            if(trace){fprintf(trace,"%lld %zu\n",(long long)now,bytes);fclose(trace);}
+        }
         mic_sent+=bytes;appends++;call_appends++;call_mic_sent+=bytes;
         if(sent_n<2)appends_before_begin++;
     }else{
