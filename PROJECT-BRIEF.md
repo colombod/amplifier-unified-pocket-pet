@@ -72,9 +72,13 @@ are not needed for this pet and must not trigger a room/runtime migration.
    whenever the round trip to the host passes about 60 ms during an answer,
    because lwIP's default TCP buffers were smaller than one audio message
    ([link rig](apps/unified-pet/tests/link_rig/README.md)). Firmware
-   `0.3.9-voice-link` enlarges them; it is built and rig-tested, not installed.
-   A blackout that loses a TCP retransmission still ends the call and replaces
-   it while the mic is on. Never free under a live callback or replay a prior
+   `0.3.9-voice-link` enlarges them (rig-tested, not physically verified). A
+   physical test of it was reported to reconnect repeatedly while the user
+   spoke; the rig reproduces that with packet loss from the pet.
+   `0.3.10-send-wait` (built and rig-tested, not installed) lets a microphone
+   frame wait up to 1.8 s, which keeps the call through a 0.6 s blackout.
+   Sustained loss or a blackout of seconds still ends the call and replaces it
+   while the mic is on. Never free under a live callback or replay a prior
    uncertain send.
 2. Existing Tailscale evidence proves a bounded device TLS/HTTP exchange with
    retained identity, not voice. The current spike excludes audio, and the

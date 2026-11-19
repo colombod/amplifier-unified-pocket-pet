@@ -584,10 +584,20 @@ On 16 November a call with build 11 gave one heard answer and then showed
 because its sends fell behind. The physical trigger is unknown. Offline, the same
 voice code on the same network stack does this whenever the round trip to the
 gateway passes about 60 ms during an answer; firmware `0.3.9-voice-link` raises
-the TCP buffers that caused it and is built and offline-tested, **not installed
-or physically verified**. A link that disappears for about half a second or more
-can still end a call; with the mic on the newer firmware then starts a new one,
-and microphone audio not yet sent is discarded, never sent later.
+the TCP buffers that caused it and is built and offline-tested; that repair is
+**not physically verified**.
+
+On 19 November a physical test of `0.3.9-voice-link` was reported to show
+**Reconnecting...** then **Listening** repeatedly while the user spoke. Offline,
+2% packet loss from the pet does this: a microphone frame was given one second
+to leave, one lost packet can hold the connection for longer, and the network
+library then closes it. Firmware `0.3.10-send-wait` lets that frame wait for up
+to 1.8 s while the microphone buffer has room, which keeps the call through a
+0.6 s blackout. It is built and offline-tested, **not installed or physically
+verified**, and whether packet loss caused the reported reconnecting is not
+known. Sustained loss of a few percent, or a blackout of seconds, still ends a
+call; with the mic on the pet then starts a new one, and microphone audio not
+yet sent is discarded, never sent later.
 
 The draft gateway no longer sends a request while the pet's audio is known to be
 arriving late, catching up, or still queued toward the provider: it waits for the

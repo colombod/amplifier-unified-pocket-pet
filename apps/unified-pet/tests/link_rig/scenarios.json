@@ -55,7 +55,7 @@
     "expect": "survives"
   },
   "blackout-600ms": {
-    "about": "A 0.6 s total blackout while listening. lwIP's second retransmission comes about 3 s later, beyond the 1 s send limit: the call is replaced.",
+    "about": "A 0.6 s total blackout while listening. The lost packet is sent again 1.0 to 1.8 s after it first left; the microphone frame waits for it and the same call goes on.",
     "link": "delay:both:0:0:3;drop:both:11200:11800:0",
     "answers": [
       {
@@ -65,7 +65,7 @@
     ],
     "mic_off_ms": 18000,
     "accept_calls": 3,
-    "expect": "survives_or_reconnects"
+    "expect": "survives"
   },
   "blackout-2500ms": {
     "about": "A 2.5 s total blackout during an answer.",

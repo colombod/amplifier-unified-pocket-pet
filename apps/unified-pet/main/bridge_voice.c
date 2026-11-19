@@ -35,6 +35,8 @@
 #define BV_CLEANUP_US 15000000   /* never wait a whole conversation deadline for release proof */
 #define BV_BEGIN_US 30000000     /* connected, but the host never began the conversation */
 #define BV_LINGER_US 1500000     /* after our close, let the host close its side before the fence */
+#define BV_SEND_MS 1000          /* how long one frame may wait for the socket to take it */
+#define BV_SEND_ROOM_MS 200      /* a conversation's audio may wait longer, while the microphone buffer keeps this much room */
 #define BV_SEND_WAITING 4800      /* a further full 100 ms frame of microphone audio is already waiting */
 #define BV_SEND_CATCHUP 2         /* then the next frame may start early: at most this many times real time */
 /* Reconnecting while the mic is on (conversation mode only). After a call ends
@@ -326,7 +328,7 @@ static bool transport_lost(bridge_voice_t *c){
      * their already-queued messages before handling clean transport EOF. */
     return !atomic_load(&c->connected)&&!atomic_load(&c->drain)&&uxQueueMessagesWaiting(c->frames)==0;
 }
-static bool send_frame_timed(bridge_voice_t *c,const char *json,int64_t *send_started){
+static bool send_frame_timed(bridge_voice_t *c,const char *json,unsigned limit_ms,int64_t *send_started){
     bool closing=!strcmp(json,"{\"type\":\"pet.stop\"}")||!strcmp(json,"{\"type\":\"session.close\"}");
     size_t n=strlen(json);
     if(!atomic_load(&c->connected)||bridge_transport_finished(c->transport)||!bridge_transport_upgraded(c->transport))return false;
@@ -339,7 +341,7 @@ static bool send_frame_timed(bridge_voice_t *c,const char *json,int64_t *send_st
     int64_t started=esp_timer_get_time();
     admitted=admitted&&(closing||started<c->work);
     int64_t left=c->hard-started;
-    unsigned ms=left>0?(unsigned)(left/1000):0;if(ms>1000)ms=1000;
+    unsigned ms=left>0?(unsigned)(left/1000):0;if(ms>limit_ms)ms=limit_ms;
     give();
     if(!admitted||!ms)return false;
     /* No model lock spans blocking I/O. This stamp is the final local send
@@ -359,7 +361,7 @@ static bool send_frame_timed(bridge_voice_t *c,const char *json,int64_t *send_st
     return true;
 }
 static bool send_frame(bridge_voice_t *c,const char *json){
-    return send_frame_timed(c,json,NULL);
+    return send_frame_timed(c,json,BV_SEND_MS,NULL);
 }
 static bool send_action(bridge_voice_t *c,unsigned action){
     char json[256];if(!take())return false;
@@ -384,8 +386,19 @@ static bool append_audio(bridge_voice_t *c,size_t n,int64_t *next_audio){
     int e=mbedtls_base64_encode((unsigned char*)c->append_json+sizeof(prefix)-1,7000-sizeof(prefix)-3,&count,c->append_pcm,n);
     if(e)return false;
     memcpy(c->append_json+sizeof(prefix)-1+count,"\"}",3);
+    /* The SDK drops the connection when a send times out, and one lost packet
+     * can hold the socket for longer than BV_SEND_MS until TCP sends it again.
+     * Captured audio waits in the microphone buffer meanwhile, so a
+     * conversation's frame may wait for as long as that buffer has room: a
+     * stall the buffer can absorb no longer replaces the call. Nothing is sent
+     * twice; a longer stall still ends this call exactly as before. */
+    unsigned limit=BV_SEND_MS;
+    if(atomic_load(&c->converse)){
+        unsigned room_ms=(unsigned)((BV_MIC-xStreamBufferBytesAvailable(c->capture))/48);
+        if(room_ms>BV_SEND_MS+BV_SEND_ROOM_MS)limit=room_ms-BV_SEND_ROOM_MS;
+    }
     int64_t admitted_at=0;
-    if(!send_frame_timed(c,c->append_json,&admitted_at))return false;
+    if(!send_frame_timed(c,c->append_json,limit,&admitted_at))return false;
     pace_sent_audio(next_audio,admitted_at,n);
     /* The pacing above never sends faster than real time and forgives only 5 ms
      * of lateness per frame, so on a loop that is routinely later than that the
@@ -637,7 +650,7 @@ static void cleanup(bridge_voice_t *c,bool wait){
     if(!c->disposal_started&&c->transport&&bridge_transport_started(c->transport)){
         if(atomic_load(&c->connected)&&esp_timer_get_time()<c->hard){
             /* Close the pet only, never cancel or replay Unified input. */
-            bool stopped=send_frame_timed(c,"{\"type\":\"pet.stop\"}",&c->cleanup_stop_started_at);
+            bool stopped=send_frame_timed(c,"{\"type\":\"pet.stop\"}",BV_SEND_MS,&c->cleanup_stop_started_at);
             /* Record full local send completion, not peer receipt or cause.
              * Cancellation/finish while returning leaves completion unproven. */
             c->cleanup_stop_sent=stopped&&!bridge_transport_finished(c->transport)&&bridge_transport_upgraded(c->transport);

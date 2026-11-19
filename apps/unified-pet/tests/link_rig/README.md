@@ -78,8 +78,8 @@ second where the owner's send time went (transport lock, socket, or neither).
 | `talk-rtt160` | 160 ms round trip, one 5 s answer | same |
 | `listen-rtt160` | 160 ms round trip, microphone only | same |
 | `loss-0.5pct` | 10 ms round trip, 0.5% loss each way | same |
-| `blackout-600ms` | 0.6 s total blackout while listening | may be replaced by a new call; ends on the user's mic off; nothing twice or out of order |
-| `blackout-2500ms` | 2.5 s total blackout during an answer | same |
+| `blackout-600ms` | 0.6 s total blackout while listening | same |
+| `blackout-2500ms` | 2.5 s total blackout during an answer | may be replaced by a new call; ends on the user's mic off; nothing twice or out of order |
 
 ## What it found (17 November 2026)
 
@@ -108,7 +108,8 @@ loss recovers faster was not instrumented. A larger microphone
 capture buffer was not used: it leaves both causes in place and only postpones
 the overflow while throughput stays below real time.
 
-Measured limits that remain, on either configuration:
+Measured limits on either configuration, as of 17 November (the first two are
+revisited below):
 
 - A total blackout long enough to lose a TCP retransmission (about half a second
   or more) stalls lwIP for roughly four seconds, beyond the 1 s send limit and
@@ -119,6 +120,41 @@ Measured limits that remain, on either configuration:
   0.9 s of the 1 s send limit used. That margin is thin and was not widened.
 - Changing lwIP's initial retransmission time made no measurable difference and
   was not adopted.
+
+## Reconnecting while speaking (19 November 2026)
+
+A physical test of `0.3.9-voice-link` showed "Reconnecting..." then "Listening"
+repeatedly while the user spoke; the gateway recorded each call as lost without
+a stop from the pet. The rig reproduces that sequence with 2% packet loss from
+the pet (`delay:both:0:0:5;loss:up:0:0:20`, mic on for 100 s): five calls, each
+ended by a failed microphone send, none told to stop. Loss toward the pet only
+kept one call for the whole 100 s.
+
+The cause in the code path: the pinned WebSocket client closes the connection
+itself when a send times out, a microphone frame was given 1 s, and one lost
+packet holds the socket for 1.0 to 1.8 s until lwIP sends it again. A 0.6 s
+blackout survived or not depending on where in a frame it began (two of five
+start offsets survived).
+
+A conversation's microphone frame may now wait for as long as the 2 s capture
+buffer still has room, less 0.2 s: at most 1.8 s. Measured on the rig:
+
+- `blackout-600ms` at five start offsets 100 ms apart: one call each, longest
+  send 0.86 to 1.77 s, nothing failed. The maintained scenario is now required
+  to survive (five runs: 1.15 to 1.18 s).
+- 2% loss from the pet, or both ways, still replaces the call: four calls in
+  100 s instead of five, in one run each, which is not a measured improvement.
+  Two packets lost close together stall the socket for more than three seconds,
+  beyond what the capture buffer holds.
+- `blackout-2500ms` is still replaced, now after 1.8 s instead of 1 s.
+- Mic off during such a wait is silent at once (both audio gates and the
+  amplifier), but the connection is released only when the waiting frame
+  leaves or is given up: up to 1.8 s after it began, where it was 1 s. This
+  was checked in the native conversation cases `send-wait-off` and
+  `send-wait-off-lost`, not on the rig.
+
+Whether packet loss caused the physical reconnecting is **not known**; the
+gateway's record (lost, no stop) fits it and does not prove it.
 
 Whether the round trip to the gateway actually rose during the physical call of
 16 November is **not known**. The rig shows a cause that produces that failure

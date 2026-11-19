@@ -863,7 +863,7 @@ static int run_receive(const char *which){
         if(!before){
             /* The real send/admission helper runs with the existing mocked
              * send_text boundary. This is NOT a provider/owner execution. */
-            c->cleanup_stop_sent=send_frame_timed(c,stop,&c->cleanup_stop_started_at);
+            c->cleanup_stop_sent=send_frame_timed(c,stop,BV_SEND_MS,&c->cleanup_stop_started_at);
             assert(c->cleanup_stop_sent&&send_frame(c,close));
             assert(app_sends==2&&!strcmp(sent_app[0],stop)&&!strcmp(sent_app[1],close));
             assert(t->local_control_admitted);

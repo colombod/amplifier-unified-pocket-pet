@@ -788,7 +788,7 @@ static void a5_timed_failure(unsigned mode){
     production_capture_owner(&context,&next);
     assert(sends==1&&a5_wire_pcm==960&&next==0&&atomic_load(&context.failed));
     int64_t stamp=INT64_C(-7788);
-    assert(!send_frame_timed(&context,json,&stamp)&&stamp==INT64_C(-7788)&&sends==1);
+    assert(!send_frame_timed(&context,json,BV_SEND_MS,&stamp)&&stamp==INT64_C(-7788)&&sends==1);
     a5_no_readmit(&next);
 }
 static void a5_timed_output(unsigned mode){
@@ -799,7 +799,7 @@ static void a5_timed_output(unsigned mode){
     lock_ok=false;int64_t next=0;
     assert(!append_audio(&context,960,&next)&&sends==0&&next==0);
     lock_ok=true;int64_t stamp=INT64_C(-7788),admitted=now;
-    bool ok=send_frame_timed(&context,json,&stamp);
+    bool ok=send_frame_timed(&context,json,BV_SEND_MS,&stamp);
     assert(ok==(mode==0)&&sends==1&&a5_appends==1&&a5_wire_pcm==960);
     assert(stamp==(mode==0?admitted:INT64_C(-7788)));
     assert(next==0&&a5_finishes==0); /* timed transport alone must not pace */

@@ -411,7 +411,8 @@ static void deliver_fragment(bool finish);
 static void deliver_fragment_control(void);
 static int64_t dispose_delay_us;
 static unsigned dispose_delay_call;
-static unsigned new_calls,start_calls,cancels,dispose_calls,send_fail_at,audio_sends;
+static unsigned new_calls,start_calls,cancels,dispose_calls,send_fail_at,audio_sends,send_limit_high;
+static int64_t send_wait_at,send_wait_us; /* once, from this time: the socket takes no microphone frame for this long */
 static bool send_failed;
 static void (*handler)(void*,esp_event_base_t,int32_t,void*);
 static void *handler_arg;
@@ -521,7 +522,14 @@ static void later(int64_t us,ev_kind kind,const char *text){
     assert(script_n<1024);script[script_n++]=(event_t){.at=now+us,.kind=kind,.text=text,.call=call_no};
 }
 static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const char *s,size_t n,unsigned ticks){
-    assert(h==&transport&&!guard_held&&ticks&&ticks<=1000&&n==strlen(s));
+    bool audio=!strncmp(s,APPEND,sizeof(APPEND)-1);
+    /* Only a conversation's microphone frame may wait longer than 1 s, and
+     * never longer than the room its 2 s buffer still had, less 200 ms. */
+    assert(h==&transport&&!guard_held&&ticks&&ticks<=(audio?1800u:1000u)&&n==strlen(s));
+    if(audio){
+        assert(ticks==1000||(size_t)ticks*48+9600<=96000-mic_waiting+960);
+        if(ticks>send_limit_high)send_limit_high=ticks;
+    }
     assert(transport.started&&!transport.cancelled); /* nothing leaves after the fence */
     assert(!strstr(s,TOKEN));
     if(!strcmp(s,PET_LIVE_START)&&before_start_send_hook){
@@ -531,6 +539,18 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
     if(!ws_up)return -1;
     if(!strncmp(s,APPEND,sizeof(APPEND)-1)){
         assert(!send_failed); /* an uncertain append is never followed by another: no replay */
+        int64_t held=0;
+        if(send_wait_at&&now>=send_wait_at){
+            send_wait_at=0;held=send_wait_us;
+            if(held>(int64_t)ticks*1000){
+                /* As the pinned SDK does when a send times out: it closes the
+                 * connection itself and reports it lost. How much of the frame
+                 * left is unknown. */
+                yield_until(now+(int64_t)ticks*1000);send_failed=true;
+                if(handler&&ws_up){ws_up=false;handler(handler_arg,NULL,WEBSOCKET_EVENT_DISCONNECTED,NULL);}
+                return -1;
+            }
+        }
         if(send_fail_at&&++audio_sends==send_fail_at){send_failed=true;return (int)n-1;}
         unsigned char pcm[4800];size_t bytes=0;const char *b64=s+sizeof(APPEND)-1,*end=strchr(b64,'"');
         assert(end&&!strcmp(end,"\"}"));
@@ -574,6 +594,7 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
         }
         mic_sent+=bytes;appends++;call_appends++;call_mic_sent+=bytes;
         if(sent_n<2)appends_before_begin++;
+        if(held)yield_until(now+held); /* accepted, late: the frame above is delivered once */
     }else{
         /* Every connection speaks the same fixed sequence, and nothing else. */
         if(sent_n==0)assert(!strcmp(s,PET_LIVE_START));
@@ -862,7 +883,8 @@ static void fresh(void){
     fragment_starts_before=fragment_starts_after=fragment_finishes_after=fragment_controls_after=0;
     dispose_delay_us=0;dispose_delay_call=0;
     retry_prepare_delay_us=registration_delay_us=retry_start_delay_us=0;
-    new_calls=start_calls=cancels=dispose_calls=send_fail_at=audio_sends=0;send_failed=false;up_at_fence=false;
+    new_calls=start_calls=cancels=dispose_calls=send_fail_at=audio_sends=send_limit_high=0;send_failed=false;up_at_fence=false;
+    send_wait_at=send_wait_us=0;
     sent_n=appends=appends_before_begin=0;mic_sent=echo_bytes=zero_bytes=speech_bytes=0;send_latency_us=2000;
     mic_samples=wire_samples=0;mic_high=mic_waiting=0;mic_short_writes=0;frames_high=0;
     late_min_us=late_max_us=owner_stall_at=owner_stall_us=0;late_seed=20261115u;
@@ -1466,6 +1488,51 @@ static void recover(void){
     assert(mic_sent>(uint64_t)48000*11);                  /* ... and nothing was left behind */
     assert(played_audible==host_audible&&frames_high>=14&&frames_high<=20);
 }
+static void send_wait(void){
+    /* One lost packet: the socket takes no microphone frame for 1.4 s, until
+     * TCP sends it again. The audio waits in the microphone buffer and the
+     * SAME call goes on: delivered complete, once, in order, no faster than
+     * twice real time. With the 1 s limit this call was replaced. */
+    fresh();opened();host_audio(100);says(9000,10000);
+    send_wait_at=run_start+3000000;send_wait_us=1400000;
+    check(4300,backlog_seen);check(8000,backlog_gone);at(12000,EV_MIC_OFF,NULL);
+    call(false);late_report("send-wait");stopped_cleanly(2);
+    assert(new_calls==1&&!shown("Reconnecting...")&&!send_failed);
+    assert(send_limit_high>1700&&send_limit_high<=1800);  /* the room a nearly empty buffer leaves */
+    assert(mic_high>=60000&&mic_high<96000&&mic_short_writes==0);
+    assert(peak_second<=96000+4800&&mic_sent>(uint64_t)48000*11);
+    assert(played_audible==host_audible);
+}
+static unsigned off_appends;
+static void after_off(void){
+    /* 100 ms after the tap, the owner still inside its waiting send. */
+    assert(current&&atomic_load(&current->stop)&&!atomic_load(&current->capture_gate)&&!atomic_load(&current->play_gate));
+    assert(amp_latched_off&&!transport.cancelled);off_appends=appends;
+}
+static void send_wait_off(const char *name){
+    /* Mic off while a microphone frame waits for the socket, during an answer.
+     * Silence is immediate either way; what the longer wait can delay is only
+     * the release of the connection. No microphone frame is admitted after
+     * the tap, none is sent again, and no new call is made. */
+    bool lost=!strcmp(name,"send-wait-off-lost");
+    fresh();opened();host_audio(100);at(1900,EV_TEXT,G_STATE("answering"));says(2000,6000);
+    send_wait_at=run_start+3000000;send_wait_us=lost?2500000:1400000;
+    at(3300,EV_MIC_OFF,NULL);check(3400,after_off);
+    call(false);ended(LIVE_OFF,"Mic off");
+    printf("%s: idle_after_off_ms=%lld send_limit_ms=%u played_after_off=%llu appends=%u frames=%u\n",name,
+        (long long)((run_end-mic_off_at)/1000),send_limit_high,(unsigned long long)played_after_off,appends,sent_n);
+    assert(new_calls==1&&!shown("Reconnecting...")&&appends==off_appends&&played_after_off<=960);
+    assert(mic_short_writes==0&&send_limit_high>1700&&send_limit_high<=1800);
+    if(lost){
+        /* The send is given up 1.8 s after it began, 1.5 s after the tap; the
+         * connection is gone, so there is no stop to send. */
+        assert(send_failed&&sent_n==2&&run_end-mic_off_at<=1700000);
+    }else{
+        /* The frame leaves 1.1 s after the tap, then the ordinary stop. */
+        assert(!send_failed&&sent_n==4&&!strcmp(sent[2],PET_STOP)&&!strcmp(sent[3],SESSION_CLOSE));
+        assert(run_end-mic_off_at>=1100000&&run_end-mic_off_at<=1300000);
+    }
+}
 static void retained(void){
     /* Release proof missing: nothing is freed or reused, and nothing reconnects. */
     fresh();opened();host_audio(100);dispose_ok=false;at(1000,EV_MIC_OFF,NULL);
@@ -1578,6 +1645,9 @@ static void re_drop(const char *name){
     else if(!strcmp(name,"re-send")){send_fail_at=140;drop=2800;} /* one microphone frame not fully written */
     else if(!strcmp(name,"re-stall")){send_latency_us=900000;plans[1]=plan_again_fast;drop=0;} /* the link cannot carry the microphone */
     else if(!strcmp(name,"re-stall-long")){owner_stall_at=run_start+3000000;owner_stall_us=2600000;drop=5600;}
+    /* The socket takes nothing for longer than the microphone buffer can cover:
+     * the send is given up 1.8 s in, before that buffer overflows. */
+    else if(!strcmp(name,"re-send-wait-long")){send_wait_at=run_start+3000000;send_wait_us=2500000;drop=4800;}
     else{assert(!strcmp(name,"re-listening"));at(drop,EV_WS_DROP,NULL);}
     if(!strcmp(name,"re-close")){
         call(false);ended(LIVE_OFF,"Mic off (call ended)");
@@ -1613,6 +1683,7 @@ static void re_drop(const char *name){
     if(drop){check(drop+1000,waiting);check(drop+1900,still_quiet);}
     call(false);reconnect_report(name);stopped_cleanly(2);
     assert(new_calls==2&&opens==2&&closes==2&&tasks_created==4&&dispose_calls==2);
+    if(!strcmp(name,"re-send-wait-long"))assert(send_limit_high>1700&&mic_high>=80000&&mic_high<96000&&mic_short_writes==0);
     assert(shown(first)&&shown("Reconnecting...")&&inhibits>=2);
     if(drop&&strcmp(name,"re-send"))assert(call_at[2]-(run_start+drop*1000)>=2000000&&call_at[2]-(run_start+drop*1000)<=2200000);
     /* The lost call was never told to stop (its link was gone); the new one was. */
@@ -2767,12 +2838,14 @@ int main(int argc,char **argv){
     else if(!strcmp(name,"late-600"))late_call(name,8,20);
     else if(!strcmp(name,"late-600-heavy"))late_call(name,20,40);
     else if(!strcmp(name,"recover"))recover();
+    else if(!strcmp(name,"send-wait"))send_wait();
+    else if(!strcmp(name,"send-wait-off")||!strcmp(name,"send-wait-off-lost"))send_wait_off(name);
     else if(!strcmp(name,"sequence"))sequence();
     else if(!strcmp(name,"audio-open")||!strcmp(name,"mic-read")||!strcmp(name,"speaker-write")||
             !strcmp(name,"setup-token")||!strcmp(name,"setup-start"))failures(name);
     else if(!strcmp(name,"re-listening")||!strcmp(name,"re-asking")||!strcmp(name,"re-answering")||!strcmp(name,"re-close")||
             !strcmp(name,"re-error")||!strcmp(name,"re-flood")||!strcmp(name,"re-send")||!strcmp(name,"re-stall")||
-            !strcmp(name,"re-stall-long"))re_drop(name);
+            !strcmp(name,"re-stall-long")||!strcmp(name,"re-send-wait-long"))re_drop(name);
     else if(!strcmp(name,"re-first")||!strcmp(name,"re-first-503")||!strcmp(name,"re-first-timeout")||
             !strcmp(name,"re-error-busy")||!strcmp(name,"re-no-begin"))re_first(name);
     else if(!strcmp(name,"re-busy"))re_busy();
