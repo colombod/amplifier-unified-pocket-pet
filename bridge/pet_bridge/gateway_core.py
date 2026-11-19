@@ -1260,6 +1260,30 @@ class SessionOutcome:
     # ACKed commentary + audible output followed by quiet, not proof of hearing.
     replies_rendered: int = 0
     conversation_end: str | None = None
+    # Why nothing was submitted: counts and one coarse duration only, never
+    # words, audio or identifiers. Each refusal is counted under exactly one
+    # reason, where it is decided, so the refused_* fields sum to
+    # requests_refused. They describe this gateway's decisions, not the cause
+    # of late input or what the person said.
+    delegations: int = 0             # distinct requests the voice model raised
+    delegations_repeated: int = 0    # the same one delivered again: ignored
+    transcript_segments: int = 0     # distinct recognised segments with words
+    transcript_segments_unused: int = 0  # of those, outside any open request
+    refused_pending: int = 0         # raised while another request was in hand
+    refused_no_words: int = 0        # raised with no recognised words to send
+    refused_input_late: int = 0      # microphone input never caught up: call ended
+    refused_preflight: int = 0       # the conversation was busy or unreadable
+    refused_local: int = 0           # local begin/stage/seal/admission failed
+    refused_confirm: int = 0         # the host refused it, proven unsent
+    refused_ended: int = 0           # the call ended first, input not known late
+    refused_ended_input_late: int = 0  # the call ended first, input known late
+    input_wait_ms: int = 0           # requests held for late input, to 100 ms
+
+
+_REFUSAL_REASONS = (
+    "pending", "no_words", "input_late", "preflight", "local", "confirm",
+    "ended", "ended_input_late",
+)
 
 
 # Shared request/lifecycle states; conversation mode reuses the request states.
@@ -1517,6 +1541,13 @@ class PetSession:
         self._requests_accepted = 0
         self._requests_uncertain = 0
         self._requests_refused = 0
+        self._refused = dict.fromkeys(_REFUSAL_REASONS, 0)
+        self._delegations = 0
+        self._delegations_repeated = 0
+        self._segments = 0
+        self._segments_unused = 0
+        self._input_wait_total = 0.0
+        self._input_wait_end: float | None = None
         self._replies_rendered = 0
         self._last_speech = 0.0
         self._seen_delegations: set[str] = set()
@@ -1624,7 +1655,25 @@ class PetSession:
             requests_refused=self._requests_refused,
             replies_rendered=self._replies_rendered,
             conversation_end=self._converse_end,
+            delegations=self._delegations,
+            delegations_repeated=self._delegations_repeated,
+            transcript_segments=self._segments,
+            transcript_segments_unused=self._segments_unused,
+            **{f"refused_{reason}": count for reason, count in self._refused.items()},
+            input_wait_ms=self._input_wait_ms(),
         )
+
+    def _refuse(self, reason: str) -> None:
+        """Count one unsent request under exactly one fixed reason."""
+        self._requests_refused += 1
+        self._refused[reason] += 1
+
+    def _input_wait_ms(self) -> int:
+        waited = self._input_wait_total
+        if self._input_wait_t is not None:
+            end = self._clock.now() if self._input_wait_end is None else self._input_wait_end
+            waited += max(0.0, end - self._input_wait_t)
+        return round(waited * 10) * 100
 
     async def _dispatch_loop(self) -> None:
         while not self._finalize_flag:
@@ -1943,13 +1992,13 @@ class PetSession:
         self._send_result_emitted = True
         self._emit(gs.build_send_result(self._turn_str(), state))
 
-    def _known_unsent(self) -> None:
+    def _known_unsent(self, reason: str) -> None:
         """Record a PROVEN no-send once: nothing was ever submitted to the core."""
         if self._send_state is None and self._send_stage in ("", "preflight"):
             self._send_state = "refused"
             self._send_stage = "unsent"
             if self._converse:
-                self._requests_refused += 1
+                self._refuse(reason)
             self._emit_send_result("rejected")
 
     def _settle_unsent_send(self) -> None:
@@ -1958,9 +2007,11 @@ class PetSession:
         Later results are ignored in CLOSING/CLOSED, so no confirm can follow.
         """
         if self._state == _SENDING and self._send_stage == "preflight":
-            self._known_unsent()
+            self._known_unsent("ended")
         elif self._converse and self._state == _SETTLING:
-            self._known_unsent()
+            # Read only: what was already known about the input when the call ended.
+            late = self._input_wait_t is not None or self._input_behind(self._clock.now())
+            self._known_unsent("ended_input_late" if late else "ended")
 
     def _fail(self, code: str, device_code: int | None = None) -> None:
         if self._state in (_CLOSING, _CLOSED):
@@ -2003,6 +2054,8 @@ class PetSession:
         self._closed_for_recovery.set()
         self._settle_unsent_send()
         now = self._clock.now()
+        if self._input_wait_end is None:
+            self._input_wait_end = now  # a wait still open stops counting here
         hard = now + gs.CLOSE_DEADLINE_S
         if self._accepted_t is not None:
             cap = gs.CONVERSE_LIMIT_S if self._converse else gs.SESSION_CAP_S
@@ -2345,7 +2398,7 @@ class PetSession:
             return
         if not ok or value != "appended":
             if self._converse:
-                self._requests_refused += 1
+                self._refuse("local")
                 self._converse_notice("not_sent")
                 return
             self._fail("unstable_transcript")
@@ -2358,7 +2411,7 @@ class PetSession:
             return
         if not ok:
             if self._converse:
-                self._requests_refused += 1
+                self._refuse("local")
                 self._converse_notice("not_sent")
                 return
             blank = isinstance(value, core.BridgeError) and value.code == "blank_text"
@@ -2417,7 +2470,7 @@ class PetSession:
             if self._state != _SETTLING or not self._sealing:
                 return
             if not ok:
-                self._requests_refused += 1
+                self._refuse("local")
                 # An earlier send whose outcome is unknown blocks new ones: say that,
                 # not "busy" (which reads as the conversation working on something).
                 unresolved = getattr(value, "code", None) == "uncertain_unresolved"
@@ -2452,7 +2505,7 @@ class PetSession:
         if self._state != _SENDING:
             return
         if not ok or not getattr(value, "idle", False):
-            self._known_unsent()  # preflight is read-only: nothing was submitted
+            self._known_unsent("preflight")  # read-only: nothing was submitted
             if self._converse:
                 self._converse_notice("busy")
                 return
@@ -2470,7 +2523,7 @@ class PetSession:
             self._send_stage = "unsent"
             self._send_state = "refused"
             if self._converse:
-                self._requests_refused += 1
+                self._refuse("local")
                 self._converse_notice("not_sent")
                 return
             self._emit_send_result("rejected")
@@ -2528,7 +2581,7 @@ class PetSession:
             elif state == "uncertain":
                 self._requests_uncertain += 1
             else:
-                self._requests_refused += 1
+                self._refuse("confirm")
         self._post(("confirm_done", state, reason))
 
     def _on_confirm_done(self, state: str, reason: str | None) -> None:
@@ -3046,6 +3099,7 @@ class PetSession:
                 self._input_wait_t = now
         elif self._input_wait_t is not None:
             self._input_wait_s += now - self._input_wait_t
+            self._input_wait_total += now - self._input_wait_t
             self._input_quiet_t = now
             self._input_wait_t = None
 
@@ -3148,8 +3202,10 @@ class PetSession:
             return
         self._seen_transcripts.add(event.event_id)
         self._transcript_end = max(self._transcript_end, event.end_ms)
-        if event.text.strip():
+        words = bool(event.text.strip())
+        if words:
             self._last_speech = self._clock.now()
+            self._segments += 1
         # No implicit backlog/steering: speech during an active send/reply is
         # consumed, not silently queued for a later delegation. Late old-timeline
         # input is likewise never spliced into a new request.
@@ -3161,6 +3217,7 @@ class PetSession:
                 window[1] == _CAPTURING or (window[1] == _SETTLING and not window[2])
             )
         if not capturing or event.start_ms < self._transcript_floor or not event.text:
+            self._segments_unused += words
             return
         try:
             self._stager.add(
@@ -3181,15 +3238,17 @@ class PetSession:
     ) -> None:
         ident = event.delegation_id
         if ident is None or ident in self._seen_delegations:
+            self._delegations_repeated += ident is not None
             return
         if len(self._seen_delegations) >= 1024:
             self._fail("overflow")
             return
         self._seen_delegations.add(ident)
+        self._delegations += 1
         if self._state != _CAPTURING or (window is not None and (
             window[0] != self._request_seq or window[1] != _CAPTURING
         )):
-            self._requests_refused += 1
+            self._refuse("pending")
             return  # never queued or replayed after the pending request
         self._turn_id = None
         self._send_state = None
@@ -3212,7 +3271,7 @@ class PetSession:
             0.0 if self._input_wait_t is None else now - self._input_wait_t
         )
         if waiting + _EPS >= gs.CONVERSE_INPUT_MAX_S:
-            self._known_unsent()
+            self._known_unsent("input_late")
             self._emit(gs.build_converse_notice("not_sent"))
             self._converse_end = "not_sent"
             # Close instead of admitting the rejected utterance's delayed tail
@@ -3233,7 +3292,7 @@ class PetSession:
                     "begin",
                 )
         else:
-            self._requests_refused += 1
+            self._refuse("no_words")
             self._converse_notice("not_sent")  # delegation without recognised words
 
     def _converse_notice(self, code: str, *, timed_out: bool = False) -> None:

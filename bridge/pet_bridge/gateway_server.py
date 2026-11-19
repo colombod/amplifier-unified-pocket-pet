@@ -1292,6 +1292,9 @@ class _Gateway:
                         requests_refused=outcome.requests_refused + (
                             state in ("refused", "rejected")
                         ),
+                        refused_confirm=outcome.refused_confirm + (
+                            state in ("refused", "rejected")
+                        ),
                     )
             return Reconciliation(name, source, summary)
 

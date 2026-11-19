@@ -358,6 +358,27 @@ permissions. A new file is 0600; an existing file must be an owner-owned regular
 0600 file (no symlinks or hardlinks). Invalid paths fail before listening with
 `event_log_invalid` (a relative CLI path is a usage error).
 
+Each `session_end` record of a conversation says why requests were not sent, in
+counts only (no words, audio or identifiers):
+
+| Field | Counts |
+| --- | --- |
+| `delegations`, `delegations_repeated` | requests the voice model raised; the same one delivered again (ignored) |
+| `transcript_segments`, `transcript_segments_unused` | recognised segments with words; those heard outside any open request |
+| `refused_pending` | raised while another request was in hand |
+| `refused_no_words` | raised with no recognised words to send |
+| `refused_input_late` | microphone audio never caught up, so the gateway ended the call |
+| `refused_preflight` | the conversation was busy or could not be read |
+| `refused_local` | a local step before sending failed |
+| `refused_confirm` | the host refused it, proven unsent |
+| `refused_ended`, `refused_ended_input_late` | the call ended before the request was sent; the second when microphone audio was known to be behind |
+| `input_wait_ms` | total time requests were held for late microphone audio, to 100 ms |
+
+The `refused_*` fields add up to `requests_refused`. No delegation at all with
+`transcript_segments` above zero means speech was recognised and the voice model
+never raised a request. These fields record the gateway's decisions; they do not
+show why audio was late.
+
 ## Operate and inspect
 
 ```sh

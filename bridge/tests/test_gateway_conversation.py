@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import io
 import json
 import threading
@@ -761,6 +762,193 @@ class DelayedInputTest(ConversationCase):
         await self.h.push(old.delta("tail", "never replay", 400, 1800))
         await self.h.clock.advance(10)
         self.assertEqual(self.h.ops.count("confirm"), 0)
+
+
+class NoSubmitReasonTest(ConversationCase):
+    """Each way a request ends unsent is counted once, under one fixed reason."""
+
+    audio = DelayedInputTest.audio
+    prefix = DelayedInputTest.prefix
+
+    REASONS = ("pending", "no_words", "input_late", "preflight", "local", "confirm",
+               "ended", "ended_input_late")
+
+    def reasons(self, result):
+        counts = {name: getattr(result, f"refused_{name}") for name in self.REASONS}
+        self.assertEqual(sum(counts.values()), result.requests_refused)
+        return {name: count for name, count in counts.items() if count}
+
+    async def notice(self, index, code):
+        await self.request(index)
+        self.assertEqual(self.notices()[-1], code)
+        await self.render()
+
+    async def test_two_healthy_requests_have_no_refusal_and_no_input_wait(self):
+        for index in (1, 2):
+            await self.request(index)
+            await self.h.clock.advance(1.0)
+            await self.render()
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {})
+        self.assertEqual((result.requests_submitted, result.delegations,
+                          result.delegations_repeated, result.transcript_segments,
+                          result.transcript_segments_unused, result.input_wait_ms),
+                         (2, 2, 0, 2, 0, 0))
+
+    async def test_speech_without_a_delegation_is_visible_as_segments_only(self):
+        await self.audio(10)
+        await self.h.push(old.delta("e1", "request 1", 0, 500))
+        await self.h.push(old.delta("blank", "  ", 500, 600))
+        await self.audio(10)
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {})
+        self.assertEqual((result.delegations, result.transcript_segments,
+                          result.transcript_segments_unused, result.requests_submitted),
+                         (0, 1, 0, 0))
+
+    async def test_delegations_without_words_and_a_repeat_are_told_apart(self):
+        for ident in ("d1", "d2"):
+            await self.h.push(old.delegation(ident))
+            await self.h.clock.advance(1.5)
+            await self.render()
+        await self.h.push(old.delegation("d1"))  # the same one again: ignored, not refused
+        await self.h.clock.advance(3)
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"no_words": 2})
+        self.assertEqual((result.delegations, result.delegations_repeated), (2, 1))
+        self.assertEqual(self.h.ops.count("begin"), 0)
+
+    async def test_words_heard_outside_a_request_are_counted_unused_never_sent(self):
+        await self.h.push(old.delegation("d1"))
+        await self.h.clock.advance(1.5)
+        await self.h.push(old.delta("e1", "request 1", 1000, 1500))  # during the notice
+        await self.render()
+        await self.h.push(old.delegation("d2"))
+        await self.h.clock.advance(1.5)
+        await self.render()
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"no_words": 2})
+        self.assertEqual((result.transcript_segments, result.transcript_segments_unused), (1, 1))
+        self.assertEqual(self.h.ops.count("begin"), 0)
+
+    async def test_delegation_while_one_is_in_hand_is_pending(self):
+        await self.request()
+        await self.h.push(old.delta("e2", "something else", 2000, 2500))
+        await self.h.push(old.delegation("dlg_2"))
+        await self.h.clock.advance(1)
+        await self.render()
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"pending": 1})
+        self.assertEqual((result.requests_submitted, result.delegations,
+                          result.transcript_segments_unused), (1, 2, 1))
+
+    async def test_busy_conversation_is_preflight(self):
+        self.h.ops.results["preflight"] = Preflight(SESSION, 9, False, "busy")
+        await self.notice(1, "busy")
+        await self.notice(2, "busy")
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"preflight": 2})
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
+    async def test_local_begin_stage_and_seal_failures_are_local(self):
+        self.h.ops.results["begin"] = RuntimeError("fixture")
+        await self.notice(1, "busy")
+        self.h.ops.results["begin"] = IdFactory(600)
+        self.h.ops.results["stage"] = "conflict"
+        await self.notice(2, "not_sent")
+        self.h.ops.results.pop("stage")
+        self.h.ops.results["seal"] = RuntimeError("fixture")
+        await self.notice(3, "not_sent")
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"local": 3})
+        self.assertEqual((result.requests_submitted, self.h.ops.count("confirm")), (0, 0))
+
+    async def test_host_refusal_proven_unsent_is_confirm(self):
+        self.h.ops.results["confirm"] = core.CommandResult(TURN, "refused", "binding_mismatch", False)
+        await self.notice(1, "not_sent")
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"confirm": 1})
+        self.assertEqual((result.requests_submitted, result.requests_sent), (1, 0))
+
+    async def test_input_that_never_catches_up_is_input_late_with_the_whole_wait(self):
+        await self.prefix()
+        await self.h.clock.advance(8)
+        result = await self.h.finish()
+        self.assertEqual(self.reasons(result), {"input_late": 1})
+        self.assertEqual((result.conversation_end, result.input_wait_ms), ("not_sent", 6000))
+        self.assertEqual(self.h.ops.count("begin"), 0)
+
+    async def test_stop_while_input_is_behind_is_ended_input_late(self):
+        await self.prefix()
+        await self.h.clock.advance(1.6)
+        await self.h.push(old.delta("e2", "and again", 2000, 2500))
+        await self.h.push(old.delegation("second"))
+        await self.h.clock.advance(1.0)
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"pending": 1, "ended_input_late": 1})
+        self.assertEqual((result.requests_submitted, result.conversation_end,
+                          result.input_wait_ms), (0, "stopped", 2300))
+        self.assertEqual(self.h.ops.count("begin"), 0)
+        # The wait still open at the stop ends there: a later read does not grow.
+        await self.h.clock.advance(10)
+        self.assertEqual(self.h.session.outcome.input_wait_ms, 2300)
+        self.assertEqual(self.h.session.outcome, result)
+
+    async def test_device_lost_while_input_is_behind_is_ended_input_late(self):
+        await self.prefix()
+        await self.h.clock.advance(0.5)
+        self.h.device.disconnect()
+        result = await self.h.finish()
+        self.assertEqual(self.reasons(result), {"ended_input_late": 1})
+        self.assertEqual((result.conversation_end, result.input_wait_ms), ("device_lost", 200))
+        self.assertEqual(self.h.ops.count("begin"), 0)
+
+    async def test_stop_before_the_quiet_second_with_on_time_input_is_ended(self):
+        await self.prefix()
+        await self.audio(5)
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {"ended": 1})
+        self.assertEqual((result.requests_submitted, result.input_wait_ms), (0, 0))
+
+    async def test_stop_during_preflight_is_ended(self):
+        gate = self.h.ops.hold("preflight")
+        await self.request()
+        await self.h.feed('{"type":"pet.stop"}')
+        result = await self.h.finish()
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.reasons(result), {"ended": 1})
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+
+    async def test_input_that_catches_up_is_sent_once_and_only_the_wait_is_recorded(self):
+        await self.prefix()
+        await self.h.clock.advance(1.6)
+        for _ in range(32):
+            await self.audio(1, 0.05)
+        await self.audio(24)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        await self.h.clock.advance(1.0)
+        await self.render()
+        result = await self.stop()
+        self.assertEqual(self.reasons(result), {})
+        self.assertEqual((result.requests_submitted, result.requests_accepted), (1, 1))
+        self.assertEqual(result.input_wait_ms, 2600)
+
+    async def test_reasons_are_counts_and_never_content(self):
+        await self.h.push(old.delta("secret_event", TEXT_CANARY, 0, 500))
+        await self.h.push(old.delegation("secret_delegation"))
+        await self.h.push(old.delegation("secret_delegation"))
+        await self.h.clock.advance(0.5)
+        result = await self.stop()
+        added = {name: value for name, value in dataclasses.asdict(result).items()
+                 if name.startswith(("refused_", "delegations", "transcript_segments"))
+                 or name == "input_wait_ms"}
+        self.assertEqual(len(added), 13)
+        for value in added.values():
+            self.assertIs(type(value), int)
+        self.assertEqual(result.input_wait_ms % 100, 0)
+        for secret in (TEXT_CANARY, "secret_event", "secret_delegation"):
+            self.assertNotIn(secret, repr(added))
 
 
 class RealConversationFlowTest(flow.FlowCase):
@@ -1621,6 +1809,25 @@ class ConversationServerTest(server.GatewayCase):
         self.assertEqual(summary.send_outcome, "accepted")
         self.assertIsNone(summary.confirm_job)
         self.assertEqual(self.h.runner.held_results(), ())
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_late_refused_confirm_reconciles_into_the_confirm_reason(self):
+        task = await self.start_conversation()
+        self.h.ops.results["confirm"] = core.CommandResult(
+            TURN, "refused", "binding_mismatch", False)
+        gate = self.h.ops.hold("confirm")
+        await self.h.push(old.delta("e", "hello", 0, 500))
+        await self.h.push(old.delegation("d"))
+        await self.h.clock.advance(1.5)
+        await self.h.feed('{"type":"pet.stop"}')
+        await task
+        gate.set()
+        await old.until(lambda: not self.gw.busy)
+        summary = self.gw.last_outcome.conversation
+        self.assertEqual((summary.requests_submitted, summary.requests_sent,
+                          summary.requests_refused, summary.refused_confirm), (1, 0, 1, 1))
+        self.assertEqual(sum(getattr(summary, f"refused_{name}")
+                             for name in NoSubmitReasonTest.REASONS), 1)
         self.assertEqual(self.h.ops.count("confirm"), 1)
 
 

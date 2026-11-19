@@ -22,6 +22,11 @@ _OUTCOME_FIELDS = (
     "confirm_job", "close_origin", "conversation", "requests_submitted",
     "requests_sent", "requests_accepted", "requests_uncertain", "requests_refused",
     "replies_rendered", "conversation_end",
+    # Counts and one duration rounded to 100 ms: no words, audio or identifiers.
+    "delegations", "delegations_repeated", "transcript_segments",
+    "transcript_segments_unused", "refused_pending", "refused_no_words",
+    "refused_input_late", "refused_preflight", "refused_local", "refused_confirm",
+    "refused_ended", "refused_ended_input_late", "input_wait_ms",
 )
 _EVENT_FIELDS = {
     "gateway_start": (),
