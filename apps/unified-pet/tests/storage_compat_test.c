@@ -113,7 +113,10 @@ int main(void) {
  for(int i=0;i<KEY_COUNT;i++)assert(!own_present[i]);
  assert(legacy_reads[SSID]&&legacy_reads[API_KEY]&&legacy_reads[TS_KEY]&&legacy_reads[SETUP_PASS]);
  command_t blank={.kind=1,.ssid="SYNTHETIC-NEW-SSID",.password="SYNTHETIC-NEW-WIFI"};
+ strcpy(state.ssid,"SYNTHETIC-OLD-SSID");
  assert(join_network(&blank,true)); /* Actual production join/save body. */
+ /* Joining names no network: not the one left, not the one typed in. */
+ assert(!state.ssid[0]);
  assert(state.settings_saved&&state.key_saved&&state.connected);
  assert(own_present[SSID]&&own_present[PASSWORD]);
  assert(!strcmp(own_value[SSID],blank.ssid)&&!strcmp(own_value[PASSWORD],blank.password));

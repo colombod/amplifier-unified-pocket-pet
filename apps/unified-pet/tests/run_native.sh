@@ -40,6 +40,7 @@ for name in tailnet_storage tailnet_policy; do
   "$out/$name"
 done
 sh tests/run_storage.sh "$out/storage"
+sh tests/run_wifi_name.sh "$out/wifi-name"
 for name in setup_bridge bridge_protocol; do
   cc -Wall -Wextra -Werror -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I main -I tests/tls_host -I "$PET_REPO/tests/touch_host" \

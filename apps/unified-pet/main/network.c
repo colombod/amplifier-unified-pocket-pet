@@ -24,6 +24,7 @@
 #include "lwip/inet.h"
 #include "setup_address.h"
 #include "network_retry.h"
+#include "wifi_name.h"
 #include "esp_timer.h"
 #include "setup_tailscale.h"
 #include "setup_storage.h"
@@ -380,7 +381,9 @@ static void open_ap(void) {
     xSemaphoreTake(state_lock,portMAX_DELAY); state.setup=true; xSemaphoreGive(state_lock);
 }
 static bool join_network(const command_t *cmd,bool save) {
-    xSemaphoreTake(state_lock,portMAX_DELAY); state.joining=true; state.connected=false; xSemaphoreGive(state_lock);
+    /* The network being left is no longer the current one, and the one being
+     * joined is not yet: the name stays empty until the station reports it. */
+    xSemaphoreTake(state_lock,portMAX_DELAY); state.joining=true; state.connected=false; memset(state.ssid,0,sizeof(state.ssid)); xSemaphoreGive(state_lock);
     message("Connecting to your Wi-Fi...");
     xEventGroupClearBits(events,IP_READY|LINK_LOST);
     if(esp_wifi_disconnect()==ESP_OK) xEventGroupWaitBits(events,LINK_LOST,pdFALSE,pdFALSE,pdMS_TO_TICKS(600));
@@ -415,8 +418,19 @@ static bool join_network(const command_t *cmd,bool save) {
         message("Wi-Fi connected");
     }
     else { message("Could not connect. Check password or use a 2.4 GHz network."); open_ap(); }
-    xSemaphoreTake(state_lock,portMAX_DELAY); state.joining=false; state.connected=ok; if(ok) strlcpy(state.ssid,cmd->ssid,sizeof(state.ssid)); xSemaphoreGive(state_lock);
+    xSemaphoreTake(state_lock,portMAX_DELAY); state.joining=false; state.connected=ok; xSemaphoreGive(state_lock);
     return ok;
+}
+/* The access point the station is associated with, as the station itself
+ * reports it once a second: its signal and its name. The name shown is never
+ * the configured one; without an association, or without a report, it is empty. */
+static void refresh_station(bool connected) {
+    wifi_ap_record_t ap;
+    bool known=connected&&esp_wifi_sta_get_ap_info(&ap)==ESP_OK;
+    xSemaphoreTake(state_lock,portMAX_DELAY);
+    if(known)state.rssi=ap.rssi;
+    wifi_name_update(state.ssid,known,known?ap.ssid:NULL);
+    xSemaphoreGive(state_lock);
 }
 static void worker(void *arg) {
     network_retry_t retry={0};
@@ -464,15 +478,12 @@ static void worker(void *arg) {
             memset(&cmd,0,sizeof(cmd));
         }
         network_status_t s;network_snapshot(&s);
-        wifi_ap_record_t ap_info;
-        if(s.connected && esp_wifi_sta_get_ap_info(&ap_info)==ESP_OK) {
-            xSemaphoreTake(state_lock,portMAX_DELAY);state.rssi=ap_info.rssi;xSemaphoreGive(state_lock);
-        }
         if(s.connected && !(xEventGroupGetBits(events)&IP_READY)) {
             xSemaphoreTake(state_lock,portMAX_DELAY);state.connected=false;xSemaphoreGive(state_lock);
             s.connected=false;message("Wi-Fi disconnected. Saved network will be retried.");
             network_retry_failed(&retry,now_ms());
         }
+        refresh_station(s.connected);
         if(s.connected)network_retry_reset(&retry);
         else if(credentials_present && !s.setup_paused) {
             if(!retry.scheduled)network_retry_failed(&retry,now_ms());

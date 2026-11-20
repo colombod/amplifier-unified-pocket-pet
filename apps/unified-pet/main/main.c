@@ -12,6 +12,7 @@
 #include "bsp/display.h"
 #include "lvgl.h"
 #include "network.h"
+#include "wifi_name.h"
 #include "audio_test.h"
 #include "live_voice.h"
 #include "touch_calibration.h"
@@ -23,7 +24,7 @@ static lv_image_dsc_t frames[73];
 static lv_obj_t *pet, *title, *subtitle, *setup_panel, *qr, *wifi_details, *setup_message, *footer;
 static lv_obj_t *audio_panel,*audio_back,*volume_label;
 static lv_obj_t *talk_button,*talk_label,*audio_open_button,*settings_panel,*settings_gear,*microphone_icon,*mute_slash;
-static lv_obj_t *wifi_badge,*settings_connection,*settings_key;
+static lv_obj_t *wifi_badge,*settings_connection,*settings_signal,*settings_key;
 static lv_obj_t *back_button;
 static bool return_to_settings;
 static unsigned tick_count=0, wave_ticks=0;
@@ -250,8 +251,11 @@ static void refresh(lv_timer_t *timer) {
     else lv_obj_remove_state(audio_back,LV_STATE_DISABLED);
     network_status_t s;network_snapshot(&s);
     const char *signal=s.rssi>=-55?"excellent":s.rssi>=-67?"good":s.rssi>=-75?"fair":"weak";
-    if(s.connected){lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Connected");lv_label_set_text_fmt(settings_connection,"Wi-Fi connected\nSignal %s",signal);}
-    else{lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Disconnected");lv_label_set_text(settings_connection,s.joining?"Wi-Fi connecting...":"Wi-Fi disconnected");}
+    /* The network's name only while associated with it (wifi_name.h). */
+    char connection[40];wifi_name_line(connection,sizeof(connection),s.connected,s.joining,s.ssid);
+    lv_label_set_text(settings_connection,connection);
+    if(s.connected){lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Connected");lv_label_set_text_fmt(settings_signal,"Signal %s",signal);}
+    else{lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Disconnected");lv_label_set_text(settings_signal,"");}
     lv_obj_set_style_text_color(wifi_badge,lv_color_hex(s.connected?0x86efac:0xfbbf24),0);
     lv_label_set_text_fmt(settings_key,"%s\nVoice: %s",
         !s.bridge_valid?"Bridge settings invalid":s.bridge_enabled?"Host bridge configured":s.key_saved?"Standalone OpenAI key saved":"Configure bridge or standalone key",
@@ -368,6 +372,10 @@ void app_main(void) {
     lv_obj_set_style_pad_all(settings_panel,0,0);lv_obj_remove_flag(settings_panel,LV_OBJ_FLAG_SCROLLABLE);
     label(settings_panel,"Settings",340,0,14,&lv_font_montserrat_22);
     settings_connection=label(settings_panel,"",330,0,52,&lv_font_montserrat_16);
+    /* One line: a name too wide for it ends in dots and never moves the lines below. */
+    lv_label_set_long_mode(settings_connection,LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_height(settings_connection,lv_font_get_line_height(&lv_font_montserrat_16));
+    settings_signal=label(settings_panel,"",330,0,74,&lv_font_montserrat_16);
     settings_key=label(settings_panel,"",330,0,100,&lv_font_montserrat_14);
     footer=button(settings_panel,"Phone setup",0,0,280,setup_clicked);lv_obj_align(footer,LV_ALIGN_TOP_MID,0,140);lv_obj_set_height(footer,40);
     audio_open_button=button(settings_panel,"Volume",0,0,280,audio_clicked);lv_obj_align(audio_open_button,LV_ALIGN_TOP_MID,0,186);lv_obj_set_height(audio_open_button,40);

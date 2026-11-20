@@ -118,5 +118,38 @@ class PetUI(unittest.TestCase):
         self.assertIn("#define BRIDGE_SESSION_LIMIT_MS 660000", LIVE)
 
 
+    def test_settings_names_only_the_network_associated_now(self):
+        network = (APP / "main/network.c").read_text(encoding="utf-8")
+        # One writer of the name: the station's own access-point record.
+        self.assertEqual(network.count("wifi_name_update(state.ssid,"), 1)
+        self.assertNotRegex(network, r"state\.ssid,\s*cmd->ssid")
+        self.assertNotRegex(network, r"strlcpy\(state\.ssid")
+        # Joining wipes it before anything else; losing the link reaches the
+        # refresh with connected already false.
+        join = network.split("static bool join_network(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("state.connected=false; memset(state.ssid,0,sizeof(state.ssid));", join)
+        self.assertNotIn("ssid", join.split("ESP_ERROR_CHECK(esp_wifi_set_config", 1)[1].split("nvs_set_str", 1)[0])
+        worker = network.split("static void worker(", 1)[1]
+        self.assertEqual(worker.count("refresh_station(s.connected);"), 1)
+        self.assertLess(worker.index("s.connected=false;message("), worker.index("refresh_station(s.connected);"))
+        # The network name is never logged.
+        for line in network.splitlines():
+            if "ESP_LOG" in line:
+                self.assertNotIn("ssid", line.replace("ap_ssid", ""))
+        # The screen words it through the one rule, on one fixed line; the
+        # signal words stay, without numbers.
+        self.assertEqual(SOURCE.count("s.ssid"), 1)
+        self.assertIn("wifi_name_line(connection,sizeof(connection),s.connected,s.joining,s.ssid);", SOURCE)
+        self.assertIn("lv_label_set_long_mode(settings_connection,LV_LABEL_LONG_MODE_DOTS);", SOURCE)
+        self.assertIn('lv_label_set_text_fmt(settings_signal,"Signal %s",signal);', SOURCE)
+        self.assertIn('lv_label_set_text(settings_signal,"");', SOURCE)
+        settings = SOURCE.split("settings_panel=lv_obj_create(screen)", 1)[1]
+        self.assertNotIn("password", settings)
+        rule = (APP / "main/wifi_name.h").read_text(encoding="utf-8")
+        for text in ('"Wi-Fi: %s"', '"Wi-Fi connected"', '"Wi-Fi connecting..."', '"Wi-Fi disconnected"'):
+            self.assertIn(text, rule)
+        self.assertNotIn("ESP_LOG", rule)
+
+
 if __name__ == "__main__":
     unittest.main()
