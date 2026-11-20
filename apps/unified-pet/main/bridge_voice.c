@@ -21,6 +21,7 @@
 #include "freertos/event_groups.h"
 #if defined(PET_PRIVATE_MIC_DIAG)
 #include "driver/usb_serial_jtag.h"
+#include "esp_wifi.h"
 #endif
 #define BV_MIC 96000
 #define BV_SPEAKER (256*1024)
@@ -84,6 +85,19 @@ typedef struct {
     unsigned loop_us_max,frames_waiting_peak,playback_peak;
 } bv_diag_owner_t;
 typedef struct {unsigned play_bytes,play_skipped,play_write_us_max;} bv_diag_play_t;
+/* Whole-call counters, independent of the older 32-second bin window.
+ * Exactly one writer per group: play task / owner task respectively. */
+typedef struct {
+    unsigned underruns,total_ms,max_ms,hist[6];
+    uint32_t opened_ms;
+    bool open;
+} bv_diag_gaps_t;
+typedef struct {
+    unsigned count,max_ms,hist[6];
+    int64_t last;
+} bv_diag_arrivals_t;
+#define BV_CALL_PREBUFFER(c,conv) ((conv)?(c)->prebuffer_ms*48u:BV_PREBUFFER)
+#define BV_CALL_PRIME_WAIT(c,conv) ((conv)?((c)->prebuffer_ms+80u)*1000u:BV_PRIME_WAIT_US)
 #define BV_DIAG_TASKS 96u
 static int bv_diag_bin(int64_t start,int64_t stamp,bool *clipped){
     int64_t age=stamp-start;
@@ -91,6 +105,9 @@ static int bv_diag_bin(int64_t start,int64_t stamp,bool *clipped){
     if(age>=BV_DIAG_BINS*(int64_t)BV_DIAG_BIN_US){*clipped=true;return -1;}
     return (int)(age/BV_DIAG_BIN_US);
 }
+#else
+#define BV_CALL_PREBUFFER(c,conv) BV_PREBUFFER
+#define BV_CALL_PRIME_WAIT(c,conv) BV_PRIME_WAIT_US
 #endif
 typedef struct {char *text;int64_t received_at;bool after_local_control;} bv_frame_t;
 /* Free callback/worker storage only after transport task-deletion proof and
@@ -147,6 +164,15 @@ typedef struct {
     pet_bench_task_t *tasks_before,*tasks_after;
     unsigned tasks_before_n;
     pet_bench_task_t mic_task,play_task;
+    unsigned prebuffer_ms;
+    bv_diag_gaps_t gaps;
+    bv_diag_arrivals_t arrivals;
+    /* End stamp + 1 (0 = not ended), modulo 32-bit milliseconds. Published
+     * under the existing completion lock; no 64-bit atomic or new hot lock.
+     * The play task alone closes gaps, including an open terminal gap. */
+    atomic_uint diag_end_ms;
+    unsigned rssi_start,rssi_min;
+    int64_t wifi_next;
 #endif
 } bridge_voice_t;
 static SemaphoreHandle_t guard;
@@ -159,6 +185,46 @@ static atomic_bool restart_required;
  * thread's reconnect loop: whether another call follows, and the counts. */
 static struct { bool again,reached; unsigned failures; int64_t ended_at; } call_report;
 #if defined(PET_PRIVATE_MIC_DIAG)
+static atomic_uint bench_prebuffer_ms=320;
+bool bridge_voice_bench_jitter(unsigned ms){
+    if(ms!=320&&ms!=480&&ms!=640&&ms!=800&&ms!=960&&ms!=1280)return false;
+    atomic_store(&bench_prebuffer_ms,ms);return true;
+}
+static void bv_diag_gap_close(bridge_voice_t *c){
+    bv_diag_gaps_t *g=&c->gaps;
+    if(!g->open)return;
+    uint32_t end=atomic_load(&c->diag_end_ms);
+    uint32_t stamp=end?end-1:(uint32_t)(esp_timer_get_time()/1000);
+    int32_t delta=(int32_t)(stamp-g->opened_ms);
+    unsigned ms=delta>0?(unsigned)delta:0;
+    g->total_ms+=ms;if(ms>g->max_ms)g->max_ms=ms;
+    unsigned i=ms<100?0:ms<200?1:ms<400?2:ms<800?3:ms<1600?4:5;
+    g->hist[i]++;g->open=false;
+}
+static void bv_diag_arrival(bridge_voice_t *c){
+    bv_diag_arrivals_t *a=&c->arrivals;
+    int64_t now=esp_timer_get_time();
+    if(a->count){
+        unsigned ms=(unsigned)((now-a->last)/1000);
+        if(ms>a->max_ms)a->max_ms=ms;
+        unsigned i=ms<150?0:ms<250?1:ms<400?2:ms<800?3:ms<1600?4:5;
+        a->hist[i]++;
+    }
+    a->count++;a->last=now;
+}
+/* Only RSSI is retained, never the AP's identifiers. 0 means unavailable.
+ * Magnitude grows as signal weakens, so the dBm minimum is the largest value. */
+static unsigned bv_diag_rssi(void){
+    int rssi=0;
+    return esp_wifi_sta_get_rssi(&rssi)==ESP_OK&&rssi<0?(unsigned)-rssi:0;
+}
+static void bv_diag_wifi_sample(bridge_voice_t *c,int64_t now){
+    if(!c->mic_started||now<c->wifi_next)return;
+    unsigned rssi=bv_diag_rssi();
+    if(!c->wifi_next)c->rssi_start=rssi;
+    if(rssi>c->rssi_min)c->rssi_min=rssi;
+    c->wifi_next=now+1000000; /* no catch-up queries after a stalled owner */
+}
 static inline bv_diag_owner_t *bv_diag_owner_bin(bridge_voice_t *c){
     if(!c->mic_started)return NULL;
     int i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->owner_clipped);
@@ -172,6 +238,7 @@ static void bv_diag_peaks(bridge_voice_t *c,bv_diag_owner_t *b){
 }
 static void bv_diag_loop(bridge_voice_t *c){
     int64_t now=esp_timer_get_time();
+    bv_diag_wifi_sample(c,now);
     bv_diag_owner_t *b=bv_diag_owner_bin(c);
     if(b){
         if(c->loop_start&&(uint64_t)(now-c->loop_start)>b->loop_us_max)b->loop_us_max=now-c->loop_start;
@@ -204,6 +271,9 @@ static void quiet(bridge_voice_t *c){
 static void health_end(bridge_voice_t *c,int64_t at){
     portENTER_CRITICAL(&completion_mux);
     if(!c->ended_recorded||at<c->ended_at){c->ended_at=at;c->ended_recorded=true;}
+#if defined(PET_PRIVATE_MIC_DIAG)
+    atomic_store(&c->diag_end_ms,(uint32_t)(c->ended_at/1000)+1u);
+#endif
     portEXIT_CRITICAL(&completion_mux);
 }
 static void note_exit(bridge_voice_t *c,unsigned reason){
@@ -351,6 +421,9 @@ static void play_task(void *arg){
            (atomic_load(&c->capture_gate)||atomic_load(&c->play_gate)))quiet(c);
         unsigned next=atomic_load(&c->audio_epoch);
         if(!atomic_load(&c->play_gate)||atomic_load(&c->stop)||atomic_load(&c->failed)){
+#if defined(PET_PRIVATE_MIC_DIAG)
+            bv_diag_gap_close(c);
+#endif
             while(xStreamBufferReceive(c->playback,pcm,sizeof(pcm),0)){}
             epoch=next;primed=false;waiting=0;vTaskDelay(pdMS_TO_TICKS(5));continue;
         }
@@ -364,15 +437,23 @@ static void play_task(void *arg){
             if(draining)xEventGroupSetBits(c->events,BV_DRAINED);
             /* Conversation audio may be continuous or gappy. After a gap the
              * jitter buffer is rebuilt; a gap is never the end of the call. */
-            if(converse){primed=false;waiting=0;}
+            if(converse){
+#if defined(PET_PRIVATE_MIC_DIAG)
+                if(primed&&!c->gaps.open&&!atomic_load(&c->diag_end_ms)){
+                    c->gaps.underruns++;c->gaps.open=true;
+                    c->gaps.opened_ms=(uint32_t)(esp_timer_get_time()/1000);
+                }
+#endif
+                primed=false;waiting=0;
+            }
             vTaskDelay(pdMS_TO_TICKS(5));continue;
         }
         /* Finite-tail drain bypasses the old 320ms prebuffer. A packet gap never
          * seals the queue or declares completed speech. */
-        if(!primed&&available<BV_PREBUFFER&&!draining){
+        if(!primed&&available<BV_CALL_PREBUFFER(c,converse)&&!draining){
             int64_t now=esp_timer_get_time();
             if(!waiting)waiting=now;
-            if(!converse||now-waiting<BV_PRIME_WAIT_US){vTaskDelay(pdMS_TO_TICKS(5));continue;}
+            if(!converse||now-waiting<BV_CALL_PRIME_WAIT(c,converse)){vTaskDelay(pdMS_TO_TICKS(5));continue;}
         }
         primed=true;waiting=0;
         size_t n=xStreamBufferReceive(c->playback,pcm,sizeof(pcm),0);
@@ -392,6 +473,7 @@ static void play_task(void *arg){
             }
         }
 #if defined(PET_PRIVATE_MIC_DIAG)
+        bv_diag_gap_close(c); /* skipped silence above does not resume playback */
         int64_t write_begin=esp_timer_get_time();
         esp_err_t write_result=audio_stream_write(c->audio,pcm,n);
         int i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->play_clipped);
@@ -406,6 +488,7 @@ static void play_task(void *arg){
 #endif
     }
 #if defined(PET_PRIVATE_MIC_DIAG)
+    bv_diag_gap_close(c);
     pet_bench_task_final(&c->play_task);
 #endif
     setup_bridge_wipe(pcm,sizeof(pcm));xEventGroupSetBits(c->events,BV_PLAY_DONE);
@@ -893,6 +976,23 @@ static void bv_diag_report(bridge_voice_t *c){
     if(!bv_diag_write(line,n,sizeof(line),until))return;
     n=snprintf(line,sizeof(line),"pet-bench-v1 tasks_total %llu\n",(unsigned long long)(elapsed>0?elapsed:0));
     if(!bv_diag_write(line,n,sizeof(line),until))return;
+    const bv_diag_gaps_t *g=&c->gaps;const bv_diag_arrivals_t *a=&c->arrivals;
+    n=snprintf(line,sizeof(line),"pet-bench-v1 playback %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+        c->prebuffer_ms,g->underruns,g->total_ms,g->max_ms,
+        g->hist[0],g->hist[1],g->hist[2],g->hist[3],g->hist[4],g->hist[5],a->count,a->max_ms,
+        a->hist[0],a->hist[1],a->hist[2],a->hist[3],a->hist[4],a->hist[5]);
+    if(!bv_diag_write(line,n,sizeof(line),until))return;
+    unsigned rssi_end=bv_diag_rssi();
+    wifi_ap_record_t ap={0};
+    uint8_t channel=0;wifi_second_chan_t second=WIFI_SECOND_CHAN_NONE;
+    wifi_bandwidth_t bandwidth=WIFI_BW_HT20;
+    unsigned bw=0,is_11n=0;
+    if(esp_wifi_sta_get_ap_info(&ap)==ESP_OK)is_11n=ap.phy_11n?1:0;
+    if(esp_wifi_get_channel(&channel,&second)!=ESP_OK){channel=0;second=WIFI_SECOND_CHAN_NONE;}
+    if(esp_wifi_get_bandwidth(WIFI_IF_STA,&bandwidth)==ESP_OK)bw=bandwidth==WIFI_BW_HT40?40:20;
+    n=snprintf(line,sizeof(line),"pet-bench-v1 wifi %u %u %u %u %u %u %u\n",
+        c->rssi_start,c->rssi_min,rssi_end,(unsigned)channel,(unsigned)second,bw,is_11n);
+    if(!bv_diag_write(line,n,sizeof(line),until))return;
     static const char bench_end[]="pet-bench-v1 end\n";
     (void)bv_diag_write(bench_end,sizeof(bench_end)-1,sizeof(bench_end),until);
 }
@@ -1083,6 +1183,7 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
     c->decoded=heap_caps_malloc(BV_APPEND,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
 #if defined(PET_PRIVATE_MIC_DIAG)
     /* Optional diagnostic storage: allocation failure never changes call admission. */
+    c->prebuffer_ms=atomic_load(&bench_prebuffer_ms);
     c->task_scratch=heap_caps_malloc(BV_DIAG_TASKS*sizeof(*c->task_scratch),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     c->tasks_before=heap_caps_malloc(BV_DIAG_TASKS*sizeof(*c->tasks_before),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     c->tasks_after=heap_caps_malloc(BV_DIAG_TASKS*sizeof(*c->tasks_after),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
@@ -1174,7 +1275,12 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
                 bool room=!c->model.converse||xStreamBufferSpacesAvailable(c->playback)>=bytes;
                 if(e||!atomic_load(&c->play_gate)||atomic_load(&c->stop)||
                    (room&&xStreamBufferSend(c->playback,c->decoded,bytes,0)!=bytes)){note_exit(c,BV_EXIT_SPEAKER);atomic_store(&c->failed,true);}
-                else if(room)c->received_pcm+=(unsigned)bytes;}
+                else if(room){
+                    c->received_pcm+=(unsigned)bytes;
+#if defined(PET_PRIVATE_MIC_DIAG)
+                    bv_diag_arrival(c);
+#endif
+                }}
             give();bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);
 #if defined(PET_PRIVATE_MIC_DIAG)
             bv_diag_frame(c,frame_begin);
@@ -1197,6 +1303,7 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
 #if defined(PET_PRIVATE_MIC_DIAG)
             c->mic_start=esp_timer_get_time();
             c->mic_started=true;
+            bv_diag_wifi_sample(c,c->mic_start);
             c->tasks_start=esp_timer_get_time();
             c->tasks_before_n=bv_diag_snapshot(c,c->tasks_before);
             c->loop_start=c->mic_start;

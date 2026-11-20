@@ -22,3 +22,7 @@ bool bridge_voice_copy_preview(char *display,size_t capacity,uint32_t *revision)
 bool bridge_voice_restart_required(void);
 /* Owner already suspended; zero-wait late cleanup, never connects or sends. */
 void bridge_voice_reap_finished(void);
+#if defined(PET_PRIVATE_MIC_DIAG)
+/* Snapshotted once per call; never retunes an already running call. */
+bool bridge_voice_bench_jitter(unsigned ms);
+#endif

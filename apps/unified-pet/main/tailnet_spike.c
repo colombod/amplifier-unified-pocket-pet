@@ -13,6 +13,10 @@
 #include "esp_sntp.h"
 #include "sdkconfig.h"
 #include "driver/usb_serial_jtag.h"
+#if defined(PET_PRIVATE_MIC_DIAG)
+#include "bridge_voice.h"
+#include "esp_wifi.h"
+#endif
 #include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
@@ -271,6 +275,21 @@ static void console(void *arg) {
                     live_voice_stop();
                     static const char ack[]="pet-bench-v1 voice off\n";
                     usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
+                }
+                else if(!strcmp(line,"voice jitter 320")||!strcmp(line,"voice jitter 480")||
+                        !strcmp(line,"voice jitter 640")||!strcmp(line,"voice jitter 800")||
+                        !strcmp(line,"voice jitter 960")||!strcmp(line,"voice jitter 1280")){
+                    unsigned ms=0;
+                    if(sscanf(line+13,"%u",&ms)==1&&bridge_voice_bench_jitter(ms)){
+                        char ack[64];int len=snprintf(ack,sizeof(ack),"pet-bench-v1 voice jitter %u\n",ms);
+                        usb_serial_jtag_write_bytes(ack,len,pdMS_TO_TICKS(100));
+                    }
+                }
+                else if(!strcmp(line,"voice bw 20")||!strcmp(line,"voice bw 40")){
+                    unsigned bw=line[9]=='2'?20:40;
+                    esp_err_t e=esp_wifi_set_bandwidth(WIFI_IF_STA,bw==20?WIFI_BW_HT20:WIFI_BW_HT40);
+                    char ack[64];int len=snprintf(ack,sizeof(ack),"pet-bench-v1 voice bw %u %u\n",bw,(unsigned)e);
+                    usb_serial_jtag_write_bytes(ack,len,pdMS_TO_TICKS(100));
                 }
 #endif
             }

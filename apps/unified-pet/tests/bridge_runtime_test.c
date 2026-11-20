@@ -93,10 +93,27 @@ static unsigned a5_event_sends;
 static void bridge_transport_bench(pet_bench_transport_t *out){*out=(pet_bench_transport_t){0};}
 static unsigned mic_period, mic_service_every, mic_last_read, mic_lines;
 static unsigned bench_write_us;
+static bool playback_fixture;
+static int64_t playback_arrive,playback_end,playback_terminal,first_play_write;
+static int wifi_rssi=-57;
+static bool wifi_ok=true;
+static unsigned wifi_queries;
+typedef struct {unsigned phy_11n;} wifi_ap_record_t;
+typedef unsigned wifi_second_chan_t;
+typedef unsigned wifi_bandwidth_t;
+#define WIFI_IF_STA 0
+#define WIFI_SECOND_CHAN_NONE 0
+#define WIFI_BW_HT20 0
+#define WIFI_BW_HT40 1
+static esp_err_t esp_wifi_sta_get_rssi(int *rssi){wifi_queries++;*rssi=wifi_rssi;return wifi_ok?ESP_OK:5;}
+static esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *ap){ap->phy_11n=1;return wifi_ok?ESP_OK:5;}
+static esp_err_t esp_wifi_get_channel(uint8_t *channel,wifi_second_chan_t *second){*channel=6;*second=1;return wifi_ok?ESP_OK:5;}
+static esp_err_t esp_wifi_get_bandwidth(unsigned iface,wifi_bandwidth_t *bw){assert(iface==WIFI_IF_STA);*bw=WIFI_BW_HT40;return wifi_ok?ESP_OK:5;}
 static bool mic_owner_tick;
 static int64_t mic_cursor;
 static char mic_header[512], mic_trailer[512];
 static char bench_task_lines[2][512];
+static char bench_playback_line[512],bench_wifi_line[512];
 static unsigned bench_task_count;
 static int usb_serial_jtag_write_bytes(const void *p,size_t n,unsigned timeout){
     assert(cleanup_mode&&!model_lock_held&&codec_closes==1&&!deleted_streams&&timeout<=2000);
@@ -104,6 +121,8 @@ static int usb_serial_jtag_write_bytes(const void *p,size_t n,unsigned timeout){
     char *dst=mic_lines++?mic_trailer:mic_header;
     memcpy(dst,p,n);dst[n]=0;
     assert(!strncmp(dst,"pet-mic-v1 ",11)||!strncmp(dst,"pet-bench-v1 ",13));
+    if(!strncmp(dst,"pet-bench-v1 playback ",22))strcpy(bench_playback_line,dst);
+    if(!strncmp(dst,"pet-bench-v1 wifi ",18))strcpy(bench_wifi_line,dst);
     if(!strncmp(dst,"pet-bench-v1 task ",18)){
         assert(bench_task_count<2);
         strcpy(bench_task_lines[bench_task_count++],dst);
@@ -195,6 +214,7 @@ static esp_err_t audio_stream_read(audio_session_t *a,void *p,unsigned n){
 static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){
     (void)a;assert(played+n<=sizeof(played_bytes));memcpy(played_bytes+played,p,n);writes++;played+=n;
 #if defined(PET_PRIVATE_MIC_DIAG)
+    if(!first_play_write)first_play_write=now;
     now+=bench_write_us;
 #endif
     return ESP_OK;
@@ -244,6 +264,19 @@ static int a5_base64_encode(unsigned char *dst,size_t cap,size_t *olen,
 #undef mbedtls_base64_encode
 static void vTaskDelay(unsigned ms){
     a5_advance_us((int64_t)ms*1000);delay_calls++;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(playback_fixture){
+        bridge_voice_t *c=selected;
+        if(playback_arrive&&now>=playback_arrive){
+            memset(c->playback->data,1,15360);c->playback->n=15360;playback_arrive=0;
+        }
+        if(now>=playback_end){
+            health_end(c,playback_terminal?playback_terminal:now);
+            atomic_store(&c->active,false);
+        }
+        return;
+    }
+#endif
     if(cleanup_mode){
         assert(!codec_closes); /* observed DONE bits alone must not close codec */
         if(cleanup_final_on_delay){
@@ -299,6 +332,10 @@ static void reset(void){
 #if defined(PET_PRIVATE_MIC_DIAG)
     mic_period=mic_service_every=mic_last_read=mic_lines=0;
     bench_write_us=0;
+    playback_fixture=false;playback_arrive=playback_end=playback_terminal=first_play_write=0;
+    wifi_ok=true;wifi_rssi=-57;wifi_queries=0;
+    bench_playback_line[0]=bench_wifi_line[0]=0;
+    context.prebuffer_ms=320;
     bench_fixture_count=bench_task_count=0;
     mic_cursor=0;mic_owner_tick=false;
     mic_header[0]=mic_trailer[0]=0;
@@ -970,8 +1007,10 @@ static void cleanup_case(const char *name){
     }
     assert(current==NULL&&codec_closes==1&&deleted_queues==1&&deleted_streams==2&&deleted_groups==1&&!received_n);
 #if defined(PET_PRIVATE_MIC_DIAG)
-    assert(mic_lines==(!strcmp(name,"cleanup-cpu")?73u:71u)&&!strcmp(mic_header,"pet-mic-v1 begin 32 0 0 960 0\n"));
+    assert(mic_lines==(!strcmp(name,"cleanup-cpu")?75u:73u)&&!strcmp(mic_header,"pet-mic-v1 begin 32 0 0 960 0\n"));
     assert(!strcmp(mic_trailer,"pet-bench-v1 end\n"));
+    assert(!strcmp(bench_playback_line,"pet-bench-v1 playback 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"));
+    assert(!strcmp(bench_wifi_line,"pet-bench-v1 wifi 0 0 57 6 1 40 1\n"));
     if(!strcmp(name,"cleanup-cpu")){
         assert(bench_task_count==2);
         assert(!strcmp(bench_task_lines[0],"pet-bench-v1 task owner -1 5 2000\n"));
@@ -991,6 +1030,76 @@ static void cleanup_case(const char *name){
     cleanup_mode=false;selected=&context;
 }
 #if defined(PET_PRIVATE_MIC_DIAG)
+static void playback_cases(const char *name){
+    reset();
+    if(!strcmp(name,"playback-gaps")){
+        atomic_store(&context.converse,true);atomic_store(&context.play_gate,true);
+        speaker.n=15360;memset(speaker.data,1,speaker.n);
+        int64_t base=now;
+        playback_fixture=true;bench_write_us=20000;playback_arrive=base+900000;
+        playback_end=base+1450000;playback_terminal=base+1400000;
+        play_task(&context);
+        assert(played==30720&&writes==32);
+        assert(context.gaps.underruns==2&&!context.gaps.open);
+        assert(context.gaps.total_ms==760&&context.gaps.max_ms==580);
+        assert(context.gaps.hist[1]==1&&context.gaps.hist[3]==1);
+        assert(!context.gaps.hist[0]&&!context.gaps.hist[2]&&!context.gaps.hist[4]&&!context.gaps.hist[5]);
+    }else if(!strcmp(name,"playback-buckets")){
+        const unsigned durations[]={0,99,100,199,200,399,400,799,800,1599,1600,2000};
+        unsigned total=0;
+        for(unsigned i=0;i<12;i++){
+            context.gaps.open=true;context.gaps.opened_ms=(uint32_t)(now/1000);
+            now+=(int64_t)durations[i]*1000;total+=durations[i];
+            bv_diag_gap_close(&context);
+            bv_diag_gap_close(&context); /* cannot count a gap twice */
+        }
+        for(unsigned i=0;i<6;i++)assert(context.gaps.hist[i]==2);
+        assert(context.gaps.total_ms==total&&context.gaps.max_ms==2000);
+        /* Modulo-ms subtraction works over the 49-day uptime rollover. */
+        context.gaps.open=true;context.gaps.opened_ms=UINT32_MAX-49;
+        atomic_store(&context.diag_end_ms,51);bv_diag_gap_close(&context);
+        assert(context.gaps.total_ms==total+100);
+    }else if(!strcmp(name,"playback-arrivals")){
+        const unsigned gaps[]={149,150,249,250,399,400,799,800,1599,1600,2000,0};
+        context.decoded=append;context.model.converse=true;atomic_store(&context.play_gate,true);
+        production_reply_audio(&context,"AQIDBA==");
+        for(unsigned i=0;i<12;i++){now+=(int64_t)gaps[i]*1000;production_reply_audio(&context,"AQIDBA==");}
+        assert(context.arrivals.count==13&&context.arrivals.max_ms==2000);
+        for(unsigned i=0;i<6;i++)assert(context.arrivals.hist[i]==2);
+        speaker.n=BV_TEST_CAP;production_reply_audio(&context,"AQIDBA==");
+        assert(context.arrivals.count==13); /* whole-message drop is not accepted */
+        speaker.n=0;atomic_store(&context.stop,true);production_reply_audio(&context,"AQIDBA==");
+        assert(context.arrivals.count==13); /* no counting refused audio */
+    }else if(!strcmp(name,"playback-jitter")){
+        const unsigned values[]={320,480,640,800,960,1280};
+        assert(atomic_load(&bench_prebuffer_ms)==320);
+        assert(!bridge_voice_bench_jitter(0)&&!bridge_voice_bench_jitter(400)&&!bridge_voice_bench_jitter(1281));
+        for(unsigned i=0;i<6;i++){
+            reset();unsigned ms=values[i];assert(bridge_voice_bench_jitter(ms));
+            context.prebuffer_ms=atomic_load(&bench_prebuffer_ms);
+            assert(bridge_voice_bench_jitter(320)&&context.prebuffer_ms==ms);
+            assert(BV_CALL_PREBUFFER(&context,true)==ms*48);
+            assert(BV_CALL_PREBUFFER(&context,false)==15360&&BV_CALL_PRIME_WAIT(&context,false)==400000);
+            atomic_store(&context.converse,true);atomic_store(&context.play_gate,true);
+            speaker.n=4800;memset(speaker.data,1,speaker.n);
+            int64_t base=now;playback_fixture=true;bench_write_us=20000;
+            playback_end=now+(ms+80)*1000+200000;
+            play_task(&context);
+            assert(first_play_write==base+(ms+80)*1000&&played==4800);
+            assert(context.gaps.underruns==1); /* initial priming was NOT an underrun */
+        }
+    }else{
+        assert(!strcmp(name,"playback-wifi"));
+        context.mic_started=true;
+        bv_diag_wifi_sample(&context,now);assert(context.rssi_start==57&&context.rssi_min==57&&wifi_queries==1);
+        wifi_rssi=-72;now+=999999;bv_diag_loop(&context);assert(wifi_queries==1);
+        now++;bv_diag_loop(&context);assert(wifi_queries==2&&context.rssi_min==72);
+        wifi_rssi=-50;now+=3000000;bv_diag_loop(&context);
+        assert(wifi_queries==3&&context.rssi_start==57&&context.rssi_min==72);
+        wifi_ok=false;now+=1000000;bv_diag_loop(&context);
+        assert(context.rssi_min==72&&bv_diag_rssi()==0);
+    }
+}
 static void mic_profile(const char *name){
     bool slow=!strcmp(name,"mic-slow"), backlog=!strcmp(name,"mic-backlog");
     a5_begin(0);a5_timed_read=true;
@@ -1144,7 +1253,8 @@ int main(int argc,char **argv){
     assert(argc<=2);
     printf("CASE %s (synthetic clock/RTOS/codec/transport, no device/Unified)\n",name);
 #if defined(PET_PRIVATE_MIC_DIAG)
-    if(!strcmp(name,"mic-slow")||!strcmp(name,"mic-healthy")||!strcmp(name,"mic-backlog"))mic_profile(name);
+    if(!strncmp(name,"playback-",9))playback_cases(name);
+    else if(!strcmp(name,"mic-slow")||!strcmp(name,"mic-healthy")||!strcmp(name,"mic-backlog"))mic_profile(name);
     else if(!strncmp(name,"mic-",4))mic_controls(name);
     else
 #endif

@@ -177,6 +177,14 @@ compile() {
 }
 compile -o "$out/runtime"
 compile -DPET_PRIVATE_MIC_DIAG=1 -o "$out/runtime-micdiag"
+# The normal-source compile must not contain the private measurements/Wi-Fi calls.
+if nm "$out/runtime" | grep -E 'bv_diag_|bench_prebuffer|bridge_voice_bench_jitter|esp_wifi_'; then
+    echo 'private symbol leaked into normal compile' >&2; exit 1
+fi
+if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw'; then
+    echo 'private string leaked into normal compile' >&2; exit 1
+fi
+echo 'NORMAL PRIVATE SYMBOL/STRING CHECK: PASS'
 failed=0
 for name in conversation-drop conversation-near-full speaker-room send-limits \
     queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
@@ -207,6 +215,7 @@ do
 done
 for name in conversation-drop conversation-near-full speaker-room send-limits \
     queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
+    playback-gaps playback-buckets playback-arrivals playback-jitter playback-wifi \
     mic-play mic-stages mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
     capture-near-full capture-read-failure cleanup-cpu cleanup-audio-final cleanup-timeout cleanup-transport-timeout
 do
