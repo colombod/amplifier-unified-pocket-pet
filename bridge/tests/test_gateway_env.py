@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1138,6 +1139,23 @@ class EnvExampleTest(ServerOfflineCase):
         with self.assertRaises(gsv.StartupError) as ctx:
             gsv.load_env_config(copy)
         self.assertEqual(ctx.exception.code, "config_invalid")
+
+    def test_the_example_uses_the_source_cli_without_an_installed_launcher(self):
+        line, = (line.removeprefix("#   ") for line in EXAMPLE.read_text().splitlines()
+                 if line.startswith("#   ") and " serve " in line)
+        command = shlex.split(line)
+        self.assertEqual(command, [
+            "$PET_PYTHON", "-B", "-m", "pet_bridge", "serve", "--env-file",
+            "/ABSOLUTE/PATH/.env",
+        ])
+        copy = self.write("private settings.env", EXAMPLE.read_bytes())
+        result = subprocess.run(
+            [sys.executable, *command[1:-1], str(copy)], cwd=BRIDGE,
+            env={"HOME": str(self.base), "XDG_CONFIG_HOME": str(self.base)},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (1, "", "error: config_invalid\n"))
 
     def filled(self, doc: dict[str, Any], *, uncomment: bool, inline: str | None) -> str:
         """The example with each placeholder replaced by a synthetic value from ``doc``."""
