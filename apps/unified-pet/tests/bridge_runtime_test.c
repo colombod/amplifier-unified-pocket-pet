@@ -86,6 +86,20 @@ enum a5_event { A5_EVENT_NONE,A5_EVENT_STOP,A5_EVENT_FAILURE,A5_EVENT_PARENT,A5_
 static enum a5_event a5_event;
 static int64_t a5_event_at;
 static unsigned a5_event_sends;
+#if defined(PET_PRIVATE_MIC_DIAG)
+static unsigned mic_period, mic_service_every, mic_last_read, mic_lines;
+static bool mic_owner_tick;
+static int64_t mic_cursor;
+static char mic_header[144], mic_trailer[144];
+static int usb_serial_jtag_write_bytes(const void *p,size_t n,unsigned timeout){
+    assert(cleanup_mode&&!model_lock_held&&codec_closes==1&&!deleted_streams&&timeout<=250);
+    assert(n<sizeof(mic_header));
+    char *dst=mic_lines++?mic_trailer:mic_header;
+    memcpy(dst,p,n);dst[n]=0;
+    assert(!strncmp(dst,"pet-mic-v1 ",11));
+    return (int)n;
+}
+#endif
 static void a5_advance_us(int64_t us);
 static bool a5_owner_tick(void);
 static void a5_observe_append(const char *s,size_t n,unsigned timeout_ms);
@@ -141,6 +155,9 @@ static size_t xStreamBufferSend(StreamBufferHandle_t s,const void *p,size_t n,un
     (void)ms;stream_check(s);
     if(n>BV_TEST_CAP-s->n)n=BV_TEST_CAP-s->n; /* RTOS zero-wait partial write */
     memcpy(s->data+s->n,p,n);s->n+=n;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(mic_period&&s==a5_mic)a5_produced+=n; /* oracle sees actual admitted fixture PCM */
+#endif
     if(a5_enabled&&s==a5_mic&&s->n>a5_highwater)a5_highwater=s->n;
     stream_check(s);return n;
 }
@@ -244,6 +261,11 @@ static void reset(void){
     a5_last_start=a5_last_return=a5_last_due=a5_finish_at=a5_first_start=a5_frontier=0;
     a5_produced=a5_consumed_n=a5_wire_pcm=a5_highwater=a5_last_n=a5_last_pending=a5_read_bytes=0;
     a5_event=A5_EVENT_NONE;a5_event_at=0;a5_event_sends=0;a5_mic=&mic;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    mic_period=mic_service_every=mic_last_read=mic_lines=0;
+    mic_cursor=0;mic_owner_tick=false;
+    mic_header[0]=mic_trailer[0]=0;
+#endif
     transport=(bridge_transport_t){.upgraded=true};now=1000000;reads=writes=inhibits=sends=wait_ms=delay_calls=wire_bytes=played=0;
     amp_held=false;amplifier_level=amplifier_enables=0;audio_stream_prepare();
     lock_ok=true;stop_on_take=false;expire_send=false;end_on_delay=false;queue_on_delay=false;selected=&context;
@@ -362,6 +384,9 @@ static void a5_advance_us(int64_t us){
     }
 }
 static bool a5_owner_tick(void){
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(mic_period){bool tick=mic_owner_tick;mic_owner_tick=false;return tick;}
+#endif
     if(now>=a5_until||a5_overflow)return false;
     if(a5_stop_after_appends&&a5_appends>=a5_stop_after_appends)return false;
     assert(++a5_ticks<=11601);
@@ -378,6 +403,19 @@ static bool a5_owner_tick(void){
 static bool a5_read(void *p,unsigned n){
     if(!a5_enabled||(!a5_timed_read&&!a5_fast_read))return false;
     assert(n==960&&reads<=650); /* also bounds instant-read drop/continue bugs */
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(mic_period){
+        /* Deterministic interleave at the codec wait: both real bodies use the
+         * RTOS queue seam. This is not a time-sharing or physical codec model. */
+        a5_advance_us(mic_period);
+        if(reads%mic_service_every==0){
+            mic_owner_tick=true;production_capture_owner(&context,&mic_cursor);
+        }
+        for(size_t i=0;i<n;i++)((unsigned char*)p)[i]=a5_byte(a5_produced+i);
+        if(reads==mic_last_read)atomic_store(&context.active,false);
+        a5_read_bytes+=n;return true;
+    }
+#endif
     if(a5_timed_read)a5_advance_us(20000);
     for(size_t i=0;i<n;i++)((unsigned char*)p)[i]=a5_byte(a5_read_bytes+i);
     a5_read_bytes+=n;return true;
@@ -443,6 +481,9 @@ static void a5_begin(unsigned send_ms){
     a5_base=now;a5_until=now+10000000;
     a5_produce_until=a5_until;a5_produce_next=now+20000;
     atomic_store(&context.capture_gate,true);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    context.mic_start=now;context.mic_started=true;
+#endif
 }
 static void a5_enqueue(size_t n){
     assert(n<=BV_TEST_CAP-mic.n&&n%960==0);
@@ -567,6 +608,9 @@ static void a5_capture_near_full(void){
     assert(reads==11&&mic.n==BV_TEST_CAP);
     assert(atomic_load(&context.failed)&&!strcmp(context.model.code,"overflow"));
     assert(!atomic_load(&context.capture_gate)&&sends==0);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    assert(context.mic_bins[0].admitted==480&&context.mic_bins[0].queue_peak==BV_TEST_CAP);
+#endif
     assert((ev.bits&(BV_IDLE|BV_CAPTURE_DONE))==(BV_IDLE|BV_CAPTURE_DONE));
     for(size_t i=0;i<BV_TEST_CAP-480;i++)assert(mic.data[i]==a5_byte(i));
     for(size_t i=0;i<480;i++)assert(mic.data[BV_TEST_CAP-480+i]==a5_byte(9600+i));
@@ -629,6 +673,9 @@ static void a5_send_case(enum a5_event event,bool deadline,unsigned return_mode)
     assert(atomic_load(&context.failed)||atomic_load(&context.stop));
     if(event!=A5_EVENT_NONE)assert(a5_event_sends==1&&a5_event==A5_EVENT_NONE);
     a5_no_readmit(&next);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    assert(context.owner_bins[0].popped==960&&context.owner_bins[0].completed==(return_mode?0u:960u));
+#endif
 }
 static void a5_admission_stop(void){
     a5_begin(0);a5_seed(960);a5_until=now+5000;stop_on_take=true;int64_t next=0;
@@ -825,6 +872,10 @@ static bridge_voice_t *cleanup_fixture(void){
 static void cleanup_case(const char *name){
     reset();
     bridge_voice_t *c=cleanup_fixture();int64_t hard=c->hard;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    c->mic_start=now;c->mic_started=true;
+    c->capture->before=c->capture->after=STREAM_CANARY;c->capture->n=960;
+#endif
     bool retained=false;
     if(!strcmp(name,"cleanup-unknown")){c->model.confirmed=true;c->model.phase=BR_SENDING;}
     if(!strcmp(name,"cleanup-interrupted-tail")){
@@ -850,6 +901,9 @@ static void cleanup_case(const char *name){
     assert(dispose_calls==1&&dispose_deadline==hard&&sends==0);
     if(retained){
         assert(current==c&&atomic_load(&restart_required)&&!codec_closes&&!deleted_queues&&!deleted_groups);
+#if defined(PET_PRIVATE_MIC_DIAG)
+        assert(mic_lines==0); /* no summary from DONE bits or unproven transport */
+#endif
         if(terminal){
             assert(!c->transport&&c->transport_terminal==BR_TRANSPORT_POLICY);
             /* A real mute while inactive remains authoritative, even if the
@@ -864,6 +918,10 @@ static void cleanup_case(const char *name){
         cleanup_transport_ok=true;bridge_voice_reap_finished();
     }
     assert(current==NULL&&codec_closes==1&&deleted_queues==1&&deleted_streams==2&&deleted_groups==1&&!received_n);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    assert(mic_lines==34&&!strcmp(mic_header,"pet-mic-v1 begin 32 0 0 960 0\n"));
+    assert(!strcmp(mic_trailer,"pet-mic-v1 end\n"));
+#endif
     assert(!atomic_load(&restart_required)&&!terminal_view.can_send&&!terminal_view.can_stop);
     bridge_view_t view;assert(bridge_voice_snapshot(&view));
     if(!strcmp(name,"cleanup-unknown"))assert(view.send==BR_SEND_UNKNOWN&&strstr(last_status,"Unknown"));
@@ -876,11 +934,68 @@ static void cleanup_case(const char *name){
     }
     cleanup_mode=false;selected=&context;
 }
+#if defined(PET_PRIVATE_MIC_DIAG)
+static void mic_profile(const char *name){
+    bool slow=!strcmp(name,"mic-slow"), backlog=!strcmp(name,"mic-backlog");
+    a5_begin(0);a5_timed_read=true;
+    mic_period=slow?40000:20000;mic_service_every=backlog?10:1;
+    mic_last_read=2200000/mic_period;
+    capture_task(&context);
+    const bv_diag_capture_t *m=context.mic_bins;
+    const bv_diag_owner_t *o=context.owner_bins;
+    assert(!atomic_load(&context.failed)&&reads==mic_last_read);
+    assert(m[0].startup==9600&&m[1].startup==0&&m[1].gated==0&&m[1].read_errors==0);
+    assert(m[1].read==m[1].admitted&&m[1].read==(slow?24000u:48000u));
+    assert(m[1].read_max_us==mic_period);
+    unsigned peak=0;
+    for(unsigned i=0;i<BV_DIAG_BINS;i++)if(m[i].queue_peak>peak)peak=m[i].queue_peak;
+    assert(peak==a5_highwater&&o[1].popped==o[1].completed);
+    printf("MIC bin 1: read=%u max_read_us=%u queue_peak=%u complete=%u residual=%zu\n",
+        m[1].read,m[1].read_max_us,m[1].queue_peak,o[1].completed,mic.n);
+    if(backlog){
+        assert(m[1].queue_peak>m[0].queue_peak&&m[1].queue_peak>=40000);
+        assert(o[1].completed==24000&&mic.n>=40000);a5_no_unified();
+    }else{
+        assert(m[1].queue_peak==960&&o[1].completed==m[1].read&&mic.n==960);
+        context.model.phase=BR_SETTLING;
+        assert(finish_capture(&context,&mic_cursor));a5_exact_complete();
+        assert(o[0].completed+o[1].completed+o[2].completed==a5_produced);
+    }
+}
+static void mic_controls(const char *name){
+    if(!strcmp(name,"mic-stop")){
+        a5_capture_inflight(A5_EVENT_STOP);
+        assert(context.mic_bins[0].read==10560&&context.mic_bins[0].startup==9600);
+        assert(context.mic_bins[0].gated==960&&!context.mic_bins[0].admitted);
+        a5_send_case(A5_EVENT_STOP,false,0);
+    }else if(!strcmp(name,"mic-no-replay")){
+        for(unsigned mode=1;mode<=3;mode++)a5_send_case(A5_EVENT_NONE,false,mode);
+    }else if(!strcmp(name,"mic-send-boundary")){
+        a5_begin(75);a5_seed(960);
+        a5_advance_us(980000);a5_until=now+5000;int64_t next=0;
+        production_capture_owner(&context,&next);
+        assert(context.owner_bins[0].popped==960&&!context.owner_bins[0].completed);
+        assert(!context.owner_bins[1].popped&&context.owner_bins[1].completed==960);
+    }else {
+        assert(!strcmp(name,"mic-window"));
+        a5_begin(0);a5_seed(960);
+        a5_advance_us(31999000);a5_until=now+5000;int64_t next=0;
+        production_capture_owner(&context,&next);
+        assert(sends==1&&context.owner_clipped&&!context.mic_clipped);
+        assert(!context.owner_bins[31].popped&&!context.owner_bins[31].completed);
+    }
+}
+#endif
 int main(int argc,char **argv){
     setbuf(stdout,NULL);
     const char *name=argc==1?"legacy":argv[1];
     assert(argc<=2);
     printf("CASE %s (synthetic clock/RTOS/codec/transport, no device/Unified)\n",name);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(!strcmp(name,"mic-slow")||!strcmp(name,"mic-healthy")||!strcmp(name,"mic-backlog"))mic_profile(name);
+    else if(!strncmp(name,"mic-",4))mic_controls(name);
+    else
+#endif
     if(!strncmp(name,"cleanup-",8))cleanup_case(name);
     else if(!strcmp(name,"legacy"))legacy_cases();
     else if(!strcmp(name,"realtime-0"))a5_realtime(name,0,10);

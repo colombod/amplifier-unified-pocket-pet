@@ -65,6 +65,11 @@ parts=[text[a:b]]; hashes={};excerpts={}
 for name in ['take','give','quiet','health_end','note_exit','stopping','exit_status','callback_failed','protocol_failed','failure','speaker_active','capture_task','play_task','ws_event','transport_lost','pace_sent_audio','send_frame_timed','send_frame','send_action','append_audio','finish_capture','finalize_model','bridge_voice_stop','bridge_voice_finish_capture','bridge_voice_confirm','bridge_voice_snapshot','audio_exited','observe_converse_send','converse_end','retry_left','cleanup_unconfirmed','converse_tail','cleanup','bridge_voice_reap_finished']:
     start,end=function(name);body=text[start:end]
     hashes[name]=digest(body.encode());parts.append(located(start,end))
+    if name=='converse_tail':
+        for diag in ['bv_diag_write','bv_diag_report']:
+            start,end=function(diag);body=text[start:end]
+            hashes[diag]=digest(body.encode())
+            parts.extend(['#if defined(PET_PRIVATE_MIC_DIAG)',located(start,end),'#endif'])
 
 # Deliberately NOT a reimplementation of next_audio/append policy. Extract the
 # whole production capture-send block, including its break/failure and cursor
@@ -140,10 +145,14 @@ PY
 }
 trap finish EXIT
 lib=${PET_TLS_HOST_LIB:?real host mbedcrypto required}
-cc -std=gnu11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -fno-omit-frame-pointer \
- -UNDEBUG \
- -I "$out" -I main -I "$IDF_PATH/components/json/cJSON" -I "$IDF_PATH/components/mbedtls/mbedtls/include" \
- tests/bridge_runtime_test.c main/bridge_protocol.c "$IDF_PATH/components/json/cJSON/cJSON.c" "$lib/libmbedcrypto.a" -o "$out/runtime"
+compile() {
+  cc -std=gnu11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+   -UNDEBUG \
+   -I "$out" -I main -I "$IDF_PATH/components/json/cJSON" -I "$IDF_PATH/components/mbedtls/mbedtls/include" \
+   tests/bridge_runtime_test.c main/bridge_protocol.c "$IDF_PATH/components/json/cJSON/cJSON.c" "$lib/libmbedcrypto.a" "$@"
+}
+compile -o "$out/runtime"
+compile -DPET_PRIVATE_MIC_DIAG=1 -o "$out/runtime-micdiag"
 failed=0
 for name in legacy realtime-0 realtime-25 realtime-75 \
     realtime-long-0 realtime-long-25 realtime-long-75 realtime-long-67 realtime-long-jitter \
@@ -169,5 +178,11 @@ for name in legacy realtime-0 realtime-25 realtime-75 \
 do
     if "$out/runtime" "$name"; then rc=0; else rc=$?; failed=1; fi
     printf '%s %s\n' "$name" "$rc" >> "$out/case-results.txt"
+done
+for name in mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
+    capture-near-full capture-read-failure cleanup-audio-final cleanup-timeout cleanup-transport-timeout
+do
+    if "$out/runtime-micdiag" "$name"; then rc=0; else rc=$?; failed=1; fi
+    printf '%s %s\n' "$name" "$rc" >> "$out/micdiag-case-results.txt"
 done
 exit "$failed"

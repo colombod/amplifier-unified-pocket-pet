@@ -9,6 +9,8 @@
 set -eu
 app=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 repo=$(CDPATH= cd -- "$app/../.." && pwd)
+diag=${PET_PRIVATE_MIC_DIAG:-0}
+case "$diag" in 0|1) ;; *) echo 'PET_PRIVATE_MIC_DIAG must be 0 or 1' >&2; exit 2;; esac
 if [ "${1:-}" != --inside-sdk ]; then
   case "${1:-}" in ""|--offline-cache) ;; *) printf '%s\n' 'Usage: build.sh [--offline-cache]' >&2; exit 2;; esac
   image=${PET_DEV_IMAGE:-esp32-pet-dev:5.5.4}
@@ -40,7 +42,7 @@ if [ "${1:-}" != --inside-sdk ]; then
     --label purpose=unified-pet-offline-build \
     --mount "type=bind,src=$repo,dst=/project,readonly" \
     --mount "type=bind,src=$app,dst=/project/apps/unified-pet" \
-    --env CCACHE_DIR=/tmp/pet-ccache --env PYTHONDONTWRITEBYTECODE=1 \
+    --env CCACHE_DIR=/tmp/pet-ccache --env PYTHONDONTWRITEBYTECODE=1 --env "PET_PRIVATE_MIC_DIAG=$diag" \
     --workdir /project/apps/unified-pet
   if [ -n "${PET_COMPONENT_CACHE:-}" ]; then
     cache=$(CDPATH= cd -- "$PET_COMPONENT_CACHE" && pwd)
@@ -97,12 +99,13 @@ assets_python=${PET_ASSET_PYTHON:-/opt/pet-assets/bin/python}
 "$assets_python" scripts/export_pet.py
 if [ "${PET_OFFLINE_CACHE:-0}" = 1 ]; then
   idf.py -B "$app/build" -D "SDKCONFIG=$app/sdkconfig" \
+    -D "PET_PRIVATE_MIC_DIAG=$diag" \
     -D "SDKCONFIG_DEFAULTS=$app/sdkconfig.defaults" \
     -D "EXTRA_COMPONENT_DIRS=/cache/offline_components;$app/scripts/offline-components" \
     -D "CMAKE_PROJECT_INCLUDE=$app/scripts/offline-deps.cmake" \
     -D IDF_TARGET=esp32s3 reconfigure
 fi
-idf.py -B "$app/build" -D "SDKCONFIG=$app/sdkconfig" build
+idf.py -B "$app/build" -D "SDKCONFIG=$app/sdkconfig" -D "PET_PRIVATE_MIC_DIAG=$diag" build
 # A generated sdkconfig left by an earlier build takes precedence over changed
 # sdkconfig.defaults. Never report an image that silently lacks a checked-in
 # setting: remove the stale sdkconfig (and build directory) and build again.

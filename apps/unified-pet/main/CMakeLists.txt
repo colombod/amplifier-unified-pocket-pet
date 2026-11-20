@@ -8,6 +8,9 @@ configure_file("${CMAKE_CURRENT_LIST_DIR}/pet_asset.S.in"
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/pet_asset.S" PROPERTIES
     OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/assets/generated/tachikoma.rgb565")
 target_sources(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/pet_asset.S")
+if(PET_PRIVATE_MIC_DIAG)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE PET_PRIVATE_MIC_DIAG=1)
+endif()
 # Deliberate pinned 5.5.4 ABI dependency for the connect-only fence. The public
 # API cannot install a proxy get_socket callback; never compile a -1 FD chain.
 idf_component_get_property(pet_tcp_dir tcp_transport COMPONENT_DIR)
