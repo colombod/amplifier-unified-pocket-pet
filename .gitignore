@@ -13,8 +13,6 @@ secrets/
 # Generated ESP-IDF configuration can contain Wi-Fi credentials
 sdkconfig
 sdkconfig.old
-sdkconfig.bench
-sdkconfig.bench.old
 
 # Private local evidence; retain sanitized measurements in issues
 captures/

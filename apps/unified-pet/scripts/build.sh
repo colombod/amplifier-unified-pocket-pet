@@ -102,7 +102,7 @@ config="$app/sdkconfig"
 defaults="$app/sdkconfig.defaults"
 if [ "$diag" = 1 ]; then
   build="$app/build-bench"
-  config="$app/sdkconfig.bench"
+  config="$build/sdkconfig"  # inside the ignored build directory
   defaults="$defaults;$app/sdkconfig.bench.defaults"
 fi
 if [ "${PET_OFFLINE_CACHE:-0}" = 1 ]; then
