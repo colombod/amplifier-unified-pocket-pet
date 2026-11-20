@@ -165,7 +165,6 @@ class Origin:
 # -- routes -------------------------------------------------------------------
 _SESSION_ID_MAX = 128
 _BEFORE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
-_CLIENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,100}")
 
 
 @dataclass(frozen=True)
@@ -227,21 +226,6 @@ def route_send(session_id: Any) -> Route:
         PAIR_CAP,
         PAIR_CAP,
     )
-
-
-def route_companion(
-    sessions_cursor: Any = None, items_cursor: Any = None, client_id: Any = None
-) -> Route:
-    query: list[tuple[str, str]] = []
-    if sessions_cursor is not None:
-        query.append(("sessionsCursor", _cursor(sessions_cursor)))
-    if items_cursor is not None:
-        query.append(("itemsCursor", _cursor(items_cursor)))
-    if client_id is not None:
-        if type(client_id) is not str or _CLIENT_ID_RE.fullmatch(client_id) is None:
-            raise TransportError("route_invalid")
-        query.append(("clientId", client_id))
-    return Route("companion", "GET", "/api/companion", tuple(query), 0, COMPANION_CAP)
 
 
 def route_sessions_observation(

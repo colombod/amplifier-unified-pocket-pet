@@ -15,7 +15,6 @@ from pet_bridge.transport import (
     Response,
     TransportError,
     route_attach,
-    route_companion,
     route_detail,
     route_pair_start,
     route_pair_token,
@@ -120,38 +119,10 @@ class RouteTest(OfflineTestCase):
             self.assertEqual(
                 (route.max_request, route.max_response), (16 * 1024, 16 * 1024)
             )
-        self.assertEqual(route_companion().max_response, 256 * 1024)
+        self.assertEqual(route_sessions_observation().max_response, 256 * 1024)
         self.assertEqual(route_detail(SID).max_response, 1024 * 1024)
-        for route in (route_companion(), route_detail(SID)):
+        for route in (route_sessions_observation(), route_detail(SID)):
             self.assertEqual((route.method, route.max_request), ("GET", 0))
-
-    def test_companion_query_is_restricted_and_encoded(self):
-        self.assertEqual(route_companion().target, "/api/companion")
-        route = route_companion(
-            sessions_cursor="ab.c-d_e", items_cursor="x+y/z", client_id="cid_1-A"
-        )
-        self.assertEqual(
-            route.target,
-            "/api/companion?sessionsCursor=ab.c-d_e&itemsCursor=x%2By%2Fz&clientId=cid_1-A",
-        )
-        for kwargs in (
-            {"sessions_cursor": ""},
-            {"sessions_cursor": "a\nb"},
-            {"sessions_cursor": "a" * 1025},
-            {"sessions_cursor": 5},
-            {"items_cursor": "\x7f"},
-            {"client_id": "bad id"},
-            {"client_id": "a" * 101},
-            {"client_id": ""},
-        ):
-            with self.subTest(kwargs=kwargs):
-                exc = raised(route_companion, **kwargs)
-                self.assertIsInstance(exc, TransportError)
-                self.assertEqual(exc.code, "route_invalid")
-        # percent and ampersand can never smuggle a second parameter
-        route = route_companion(sessions_cursor="a&clientId=evil%2F")
-        self.assertEqual(route.target.count("="), 1)
-        self.assertNotIn("&clientId", route.target)
 
     def test_detail_route_is_messages_only_with_string_before(self):
         self.assertEqual(
@@ -203,7 +174,6 @@ class RouteTest(OfflineTestCase):
                 "route_pair_token",
                 "route_attach",
                 "route_send",
-                "route_companion",
                 "route_detail",
                 "route_sessions_observation",
             },

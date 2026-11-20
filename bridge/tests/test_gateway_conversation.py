@@ -972,6 +972,24 @@ class RealConversationFlowTest(flow.FlowCase):
             await self.quiesce()
             await self.clock.advance(0.1)
 
+    async def test_observation_403_refuses_request_with_busy_notice_and_no_send(self):
+        self.client.listing_response = Response(403, b"SECRET")
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        self.assertEqual(fs.device.of_type("pet.converse.notice"),
+                         [{"type": "pet.converse.notice", "code": "busy"}])
+        self.assertEqual([f["content"] for f in
+                          fs.provider.of_type("session.commentary.append")],
+                         ["That conversation is busy."])
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual([(c["method"], c["target"]) for c in self.client.calls],
+                         [("GET", flow.OBSERVATION_TARGET)])
+        await fs.feed('{"type":"pet.stop"}')
+        result = await fs.finish()
+        self.assertEqual((result.requests_refused, result.requests_sent,
+                          result.refused_preflight), (1, 0, 1))
+        self.assertEqual(result.send_outcome, "refused")
+
     async def test_real_core_two_correlated_requests_both_complete(self):
         self.client.reply_text = REPLY_TEXT
         fs = await self.begin_conversation()

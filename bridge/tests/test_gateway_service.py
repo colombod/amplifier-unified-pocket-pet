@@ -57,7 +57,7 @@ class RestartClient:
             return af.json_response(af.attach_ok(
                 hostInstanceId=self.instance, hostIdentity=self.identity
             ))
-        if route.name == "companion":
+        if route.name == "sessions_observation":
             return tc.lpage([tc.srow(srv.SESSION_ID)], hostInstanceId=self.instance,
                             hostIdentity=self.identity)
         if route.name == "send":

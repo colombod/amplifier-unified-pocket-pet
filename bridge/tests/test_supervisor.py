@@ -27,7 +27,7 @@ from pet_bridge.transport import (
     HttpsClient,
     Origin,
     TransportError,
-    route_companion,
+    route_sessions_observation,
     route_detail,
     route_pair_start,
 )
@@ -194,7 +194,7 @@ class RequestValidationTest(SupervisorCase):
                 exc = self.failure(c, **kwargs)
                 self.assertEqual(exc.code, "request_invalid")
                 self.assertFalse(exc.maybe_sent)
-        exc = self.failure(c, route_companion(), body=b"x")
+        exc = self.failure(c, route_sessions_observation(), body=b"x")
         self.assertEqual(exc.code, "request_invalid")
         self.assertEqual(self.spawn_args, [])
 

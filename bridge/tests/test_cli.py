@@ -45,7 +45,7 @@ from .authfakes import (
     raised_any,
 )
 from .fakes import FakeClock, IdFactory
-from .test_companion import catalog_bootstrap, cpage, lpage, srow
+from .test_companion import OBSERVATION_TARGET, cpage, lpage, srow
 
 CANARY = "CANARY-ARGV-SECRET-81f0"
 FULL_ID = "0a1b2c3d-1111-4222-8333-44445555aaaa"
@@ -617,6 +617,7 @@ class AttachListBindTest(CliCase):
         self.assertNotIn("instance", helptext.lower())
 
     def test_list_prints_short_ids_safe_titles_and_completeness(self):
+        before = len(self.client.calls)
         self.client.script = [self.listing()]
         code, out, err = self.run_cli("list")
         self.assertEqual((code, err), (0, ""))
@@ -627,6 +628,8 @@ class AttachListBindTest(CliCase):
         self.assertNotIn("\x1b", out)
         self.assertIn("complete", out.lower())
         self.assertNoSecrets(out, err)
+        self.assertEqual([c["route"].target for c in self.client.calls[before:]],
+                         [OBSERVATION_TARGET])
         self.client.script = [lpage([srow("s1")], "c1")] + [
             lpage([srow(f"s{i}")], f"c{i}") for i in range(2, 6)
         ]
@@ -651,7 +654,7 @@ class AttachListBindTest(CliCase):
         new_calls = self.client.calls[before:]
         self.assertEqual(
             [(c["route"].method, c["route"].path) for c in new_calls],
-            [("GET", "/api/companion")],
+            [("GET", "/api/sessions")],
         )
         with Journal(self.cfg / "journal") as journal:
             bridge = Bridge(
@@ -676,7 +679,7 @@ class AttachListBindTest(CliCase):
         "idle\x1b[0m",
         "IDLE",
         "idle ",
-        "x" * 5000,
+        "x" * 200,
     )
 
     def assertPlainOutput(self, text: str) -> None:
@@ -711,6 +714,15 @@ class AttachListBindTest(CliCase):
                 self.assertPlainOutput(out)
                 self.assertNotIn(status, out)
                 self.assertIn("Status: other.", out)
+
+    def test_oversized_status_is_rejected_without_display_for_list_and_bind(self):
+        for argv in (("list",), ("bind", FULL_ID)):
+            with self.subTest(argv=argv):
+                self.client.script = [self.listing([srow(FULL_ID, status="x" * 5000)])]
+                code, out, err = self.run_cli(*argv)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("error: companion_response_invalid", err)
+                self.assertPlainOutput(err)
 
     def test_every_known_status_is_printed_as_itself(self):
         known = (
@@ -815,9 +827,25 @@ class AllWorkListTest(CliCase):
         self.pair_and_attach()  # synthetic store/HTTP only
         self.client.calls.clear()
 
+    def test_both_cli_list_paths_only_page_observation_without_bootstrap(self):
+        for options in ((), ("--all-work",), ("--all-work", "--scope", "all"),
+                        ("--all-work", "--scope", "delegates")):
+            with self.subTest(options=options):
+                self.client.calls.clear()
+                scope = options[-1] if "--scope" in options else "roots"
+                role = "delegate" if scope == "delegates" else "root"
+                self.client.script = [
+                    cpage([{**srow("s1"), "role": role}], "c1"),
+                    cpage([{**srow("s2"), "role": role}]),
+                ]
+                self.assertEqual(self.run_cli("list", *options)[0], 0)
+                target = OBSERVATION_TARGET.replace("scope=roots", "scope=" + scope)
+                self.assertEqual([(c["route"].method, c["route"].target)
+                                  for c in self.client.calls],
+                                 [("GET", target), ("GET", target + "&cursor=c1")])
+
     def test_explicit_catalog_prints_dormant_unpinned_rows_and_never_mutates_journal(self):
         self.client.script = [
-            catalog_bootstrap(),
             cpage([srow(FULL_ID, title="Dormant\u202e\x1b\n" + "x" * 150)]),
         ]
         before = {p.name: p.read_bytes() for p in (self.cfg / "auth").iterdir()}
@@ -842,14 +870,14 @@ class AllWorkListTest(CliCase):
         self.assertEqual(before, {p.name: p.read_bytes() for p in (self.cfg / "auth").iterdir()})
         self.assertEqual(
             [(c["route"].method, c["route"].path) for c in self.client.calls],
-            [("GET", "/api/companion"), ("GET", "/api/sessions")],
+            [("GET", "/api/sessions")],
         )
 
     def test_scope_all_and_delegates_are_explicit(self):
         for scope in ("all", "delegates"):
             with self.subTest(scope=scope):
                 self.client.script = [
-                    catalog_bootstrap(), cpage([{**srow("delegate-12345678"), "role": "delegate"}])
+                    cpage([{**srow("delegate-12345678"), "role": "delegate"}])
                 ]
                 code, out, err = self.run_cli("list", "--all-work", "--scope", scope)
                 self.assertEqual((code, err), (0, ""))
@@ -858,7 +886,7 @@ class AllWorkListTest(CliCase):
                 self.assertEqual(dict(self.client.calls[-1]["route"].query)["scope"], scope)
 
     def test_cap_is_visible_incomplete_not_a_pin_requirement(self):
-        self.client.script = [catalog_bootstrap()] + [cpage([], f"c{i}") for i in range(5)]
+        self.client.script = [cpage([], f"c{i}") for i in range(5)]
         code, out, err = self.run_cli("list", "--all-work")
         self.assertEqual((code, err), (0, ""))
         self.assertIn("INCOMPLETE (cap reached)", out)
@@ -868,12 +896,12 @@ class AllWorkListTest(CliCase):
 
     def test_later_409_exposes_no_partial_catalog(self):
         self.client.script = [
-            catalog_bootstrap(), cpage([srow(FULL_ID)], "c1"),
+            cpage([srow(FULL_ID)], "c1"),
             transport.Response(409, b"SECRET-DETAIL"),
         ]
         code, out, err = self.run_cli("list", "--all-work")
         self.assertEqual((code, out, err), (1, "", "error: companion_snapshot_changed\n"))
-        self.assertEqual(len(self.client.calls), 3)
+        self.assertEqual(len(self.client.calls), 2)
 
     def test_unauthorized_or_unsupported_resource_has_no_fallback_or_auth_post(self):
         for status, code in ((401, "companion_unauthorized"), (403, "companion_unauthorized"),
@@ -881,13 +909,13 @@ class AllWorkListTest(CliCase):
                              (503, "companion_observation_busy")):
             with self.subTest(status=status):
                 self.client.calls.clear()
-                self.client.script = [catalog_bootstrap(), transport.Response(status, b"SECRET")]
+                self.client.script = [transport.Response(status, b"SECRET")]
                 result, out, err = self.run_cli("list", "--all-work")
                 self.assertEqual((result, out), (1, ""))
                 self.assertIn("error: " + code, err)
                 self.assertNotIn("SECRET", err)
                 self.assertNotIn("Pin", err)
-                self.assertEqual(len(self.client.calls), 2)
+                self.assertEqual(len(self.client.calls), 1)
                 self.assertTrue(all(c["route"].method == "GET" for c in self.client.calls))
         self.assertFalse((self.cfg / "journal").exists())
 
@@ -907,16 +935,16 @@ class AllWorkListTest(CliCase):
         self.client.script = [lpage([srow("default-list")])]
         code, out, err = self.run_cli("list")
         self.assertEqual((code, err), (0, ""))
-        self.assertTrue(out.startswith("Sessions: complete; revision 10;"))
+        self.assertTrue(out.startswith("Sessions: complete; revision 0;"))
         self.assertEqual(len(self.client.calls), 1)
-        self.assertEqual(self.client.calls[0]["route"].target, "/api/companion")
+        self.assertEqual(self.client.calls[0]["route"].target, OBSERVATION_TARGET)
 
     def test_catalog_leaves_existing_binding_and_disarmed_state_unchanged(self):
         self.client.script = [lpage([srow(FULL_ID)])]
         self.assertEqual(self.run_cli("bind", FULL_ID)[0], 0)
         before = {p.name: p.read_bytes() for p in (self.cfg / "journal").iterdir()}
         self.client.calls.clear()
-        self.client.script = [catalog_bootstrap(), cpage([srow("different-chat")])]
+        self.client.script = [cpage([srow("different-chat")])]
         with mock.patch.object(cli, "Journal", side_effect=AssertionError("opened journal")):
             self.assertEqual(self.run_cli("list", "--all-work")[0], 0)
         self.assertEqual(before, {p.name: p.read_bytes() for p in (self.cfg / "journal").iterdir()})

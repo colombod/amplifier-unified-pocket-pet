@@ -78,7 +78,7 @@ def request(**overrides: Any) -> dict[str, Any]:
         "host": "unified.example.ts.net",
         "port": 443,
         "method": "GET",
-        "target": "/api/companion",
+        "target": "/api/sessions?view=observation&scope=roots&activity=all&pinned=all&limit=200",
         "headers": {"Authorization": "Bearer " + CANARY, "Accept": "application/json"},
         "body": "",
         "max_request": 0,
@@ -137,7 +137,7 @@ class ExchangeTest(OfflineTestCase):
         self.assertEqual((host, port, timeout), ("unified.example.ts.net", 443, 10.0))
         self.assertTrue(ctx.check_hostname)
         method, target, body, headers = conn.requests[0]
-        self.assertEqual((method, target, body), ("GET", "/api/companion", None))
+        self.assertEqual((method, target, body), ("GET", request()["target"], None))
         self.assertEqual(headers["Connection"], "close")
         self.assertEqual(headers["Authorization"], "Bearer " + CANARY)
 

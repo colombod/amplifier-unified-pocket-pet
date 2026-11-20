@@ -99,7 +99,9 @@ MB_REPLY = " ".join(
 PCM_A = b"\x01\x02" * 2400  # 4800 bytes: one full paced chunk
 PCM_B = b"\x03\x04" * 1200  # 2400 bytes
 
-COMPANION_TARGET = "/api/companion"
+OBSERVATION_TARGET = (
+    "/api/sessions?view=observation&scope=roots&activity=all&pinned=all&limit=200"
+)
 SEND_TARGET = f"/api/sessions/{SESSION_ID}/commands"
 DETAIL_TARGET = f"/api/conversation/detail?sessionId={SESSION_ID}&part=messages"
 
@@ -239,6 +241,7 @@ class UnifiedFake:
         self.calls: list[dict[str, Any]] = []
         self.listing_status = "idle"
         self.listing_execution = False
+        self.listing_response: Response | None = None
         self.post_response: Response | Callable[[str], Response] | None = None
         self.post_gate: threading.Event | None = None
         self.post_entered = threading.Event()
@@ -265,7 +268,9 @@ class UnifiedFake:
                     "origin": origin,
                 }
             )
-        if route.name == "companion":
+        if route.name == "sessions_observation":
+            if self.listing_response is not None:
+                return self.listing_response
             return lpage(
                 [
                     srow(
@@ -582,7 +587,7 @@ class HappyFlowTest(FlowCase):
             self.client.calls, []
         )  # nothing reached Unified before confirm
         await fs.feed(golden_in(turn)["confirm"])
-        self.assertEqual([c["name"] for c in self.client.calls], ["companion", "send"])
+        self.assertEqual([c["name"] for c in self.client.calls], ["sessions_observation", "send"])
         await self.clock.advance(1.0)  # first poll -> reply -> commentary -> ack
         await self.clock.advance(3.0)  # paced audio; packet quiet does NOT finish speech
         self.assertEqual(fs.device.of_type("pet.reply.done"), [])
@@ -669,7 +674,7 @@ class HappyFlowTest(FlowCase):
         self.assertEqual(
             [(c["method"], c["target"]) for c in calls],
             [
-                ("GET", COMPANION_TARGET),
+                ("GET", OBSERVATION_TARGET),
                 ("POST", SEND_TARGET),
                 ("GET", DETAIL_TARGET),
             ],
@@ -871,7 +876,7 @@ class RefusedSendFlowTest(FlowCase):
         await fs.feed(self.confirm_frame(turn))
         outcome = await fs.finish()
         self.assertEqual(self.client.posts, [])
-        self.assertEqual([c["name"] for c in self.client.calls], ["companion"])
+        self.assertEqual([c["name"] for c in self.client.calls], ["sessions_observation"])
         self.assertEqual(self.command_names(), [])  # nothing persisted, nothing sent
         tail = fs.types()[-3:]
         self.assertEqual(tail, ["pet.turn.send_result", "pet.error", "session.closed"])
@@ -986,7 +991,7 @@ class RealRefusalFlowTest(FlowCase):
     ) -> None:
         self.assertEqual(self.client.posts, [])  # nothing was sent
         self.assertEqual(self.command_names(), [])  # no command record exists
-        self.assertEqual([c["name"] for c in self.client.calls], ["companion"])
+        self.assertEqual([c["name"] for c in self.client.calls], ["sessions_observation"])
         # the SENDING-bound app hears "rejected" BEFORE the error, then the session closes
         self.assertEqual(
             fs.types()[-3:], ["pet.turn.send_result", "pet.error", "session.closed"]

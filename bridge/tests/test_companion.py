@@ -58,18 +58,9 @@ def srow(
 
 def lpage(rows: list, nxt: Any = None, **changes: Any) -> Response:
     doc: dict[str, Any] = {
-        "protocolVersion": 1,
-        "revision": 10,
-        "observationRevision": 3,
-        "workingCount": 0,
-        "attentionCount": 0,
-        "sessions": rows,
-        "items": [{"kind": "unread", "sessionId": "x"}],
-        "sessionsTruncated": nxt is not None,
-        "itemsTruncated": False,
-        "sessionsNextCursor": nxt,
-        "itemsNextCursor": None,
-        "resources": {},
+        "revision": 3,
+        "items": rows,
+        "nextCursor": nxt,
         "hostIdentity": HOST_IDENTITY,
         "hostInstanceId": INSTANCE,
     }
@@ -77,21 +68,28 @@ def lpage(rows: list, nxt: Any = None, **changes: Any) -> Response:
     return json_response({k: v for k, v in doc.items() if v is not ...})
 
 
-def catalog_bootstrap(**changes: Any) -> Response:
-    return lpage(
-        [], **{"resources": {"sessions": "/api/sessions?view=observation"}, **changes}
-    )
-
-
 def cpage(rows: list, nxt: Any = None, **changes: Any) -> Response:
-    doc = {"revision": "opaque-sessions-v1", "items": rows, "nextCursor": nxt, **changes}
-    return json_response({k: v for k, v in doc.items() if v is not ...})
+    return lpage(rows, nxt, **{"revision": "opaque-sessions-v1", **changes})
+
+
+OBSERVATION_TARGET = (
+    "/api/sessions?view=observation&scope=roots&activity=all&pinned=all&limit=200"
+)
 
 
 class AllWorkCatalogTest(OfflineTestCase):
+    def test_listing_paths_never_request_removed_companion_or_bootstrap(self):
+        for listing in (list_sessions, list_all_work):
+            with self.subTest(listing=listing.__name__):
+                client = FakeClient(cpage([srow("s1")], "c1"), cpage([srow("s2")]))
+                result = listing(client, ATT)
+                self.assertTrue(result.complete)
+                self.assertEqual([c["route"].target for c in client.calls],
+                                 [OBSERVATION_TARGET, OBSERVATION_TARGET + "&cursor=c1"])
+                self.assertTrue(all(c["route"].method == "GET" for c in client.calls))
+
     def test_opt_in_includes_dormant_unpinned_roots_without_a_send_revision(self):
         client = FakeClient(
-            catalog_bootstrap(),
             cpage([srow("dormant-unpinned"), srow("busy", "working", execution=True)]),
         )
         listing = list_all_work(client, ATT, monotonic=lambda: 12.5)
@@ -107,7 +105,7 @@ class AllWorkCatalogTest(OfflineTestCase):
         self.assertEqual((listing.host_identity, listing.host_instance_id),
                          (HOST_IDENTITY, INSTANCE))
         self.assertEqual([c["route"].path for c in client.calls],
-                         ["/api/companion", "/api/sessions"])
+                         ["/api/sessions"])
         for call in client.calls:
             self.assertEqual(call["route"].method, "GET")
             self.assertEqual(call["body"], b"")
@@ -122,7 +120,6 @@ class AllWorkCatalogTest(OfflineTestCase):
         ):
             with self.subTest(scope=scope):
                 client = FakeClient(
-                    catalog_bootstrap(),
                     cpage([{**srow(f"s{i}"), "role": role} for i, role in enumerate(roles)]),
                 )
                 listing = list_all_work(client, ATT, scope=scope)
@@ -130,7 +127,7 @@ class AllWorkCatalogTest(OfflineTestCase):
                 self.assertEqual(dict(client.calls[-1]["route"].query)["scope"], scope)
         for scope, role in (("roots", "delegate"), ("delegates", "root"), ("all", "internal")):
             with self.subTest(scope=scope, role=role):
-                client = FakeClient(catalog_bootstrap(), cpage([{**srow("s1"), "role": role}]))
+                client = FakeClient(cpage([{**srow("s1"), "role": role}]))
                 self.assertEqual(raised_any(list_all_work, client, ATT, scope=scope).code,
                                  "companion_response_invalid")
 
@@ -138,7 +135,6 @@ class AllWorkCatalogTest(OfflineTestCase):
         for revision in (0, 42, "42", INSTANCE + ":sessions:" + "f" * 64):
             with self.subTest(revision=revision):
                 client = FakeClient(
-                    catalog_bootstrap(),
                     cpage([], "cursor+1/opaque=", revision=revision),
                     cpage([srow("s1")], "c2", revision=revision),
                     cpage([], "c3", revision=revision),
@@ -150,7 +146,7 @@ class AllWorkCatalogTest(OfflineTestCase):
                 self.assertEqual(listing.pages, 4)
                 self.assertIs(type(listing.observation_revision), type(revision))
                 self.assertEqual(listing.observation_revision, revision)
-                routes = [c["route"] for c in client.calls[1:]]
+                routes = [c["route"] for c in client.calls]
                 self.assertEqual([dict(r.query).get("cursor") for r in routes],
                                  [None, "cursor+1/opaque=", "c2", "c3"])
                 for route in routes:
@@ -161,46 +157,31 @@ class AllWorkCatalogTest(OfflineTestCase):
     def test_page_cap_is_explicitly_incomplete_even_for_empty_pages(self):
         for empty in (True, False):
             with self.subTest(empty=empty):
-                client = FakeClient(catalog_bootstrap(), *[
+                client = FakeClient(*[
                     cpage([] if empty else [srow(f"s{i}")], f"c{i}") for i in range(8)
                 ])
                 listing = list_all_work(client, ATT)
                 self.assertFalse(listing.complete)
-                self.assertEqual((listing.pages, len(client.calls)), (5, 6))
+                self.assertEqual((listing.pages, len(client.calls)), (5, 5))
                 self.assertEqual(len(listing.sessions), 0 if empty else 5)
 
-    def test_capability_is_exact_not_an_arbitrary_url_proxy(self):
-        bad_resources = (
-            {}, None, [], {"sessions": None},
-            {"sessions": "https://evil.example/api/sessions?view=observation"},
-            {"sessions": ORIGIN_URL + "/api/sessions?view=observation"},
-            {"sessions": "//evil.example/api/sessions?view=observation"},
-            {"sessions": "/api/sessions?view=observation&scope=all"},
-            {"sessions": "/api/sessions?view=observation#x"},
-            {"sessions": "/api/sessions?view=observation%26workspace=/private"},
-            {"sessions": "/api/../sessions?view=observation"},
-            {"sessions": "/api/actions"},
-        )
-        for resources in bad_resources:
-            with self.subTest(resources=resources):
-                client = FakeClient(catalog_bootstrap(resources=resources), cpage([]))
-                self.assertEqual(raised_any(list_all_work, client, ATT).code,
-                                 "companion_observation_unsupported")
-                self.assertEqual(len(client.calls), 1)  # only fixed bootstrap; no resource GET
+    def test_missing_or_different_identity_on_any_page_fails_closed(self):
+        for listing in (list_sessions, list_all_work):
+            for field, values in (
+                ("hostIdentity", (None, "6" * 64, ...)),
+                ("hostInstanceId", (None, INSTANCE_2, ...)),
+            ):
+                for value in values:
+                    for continuation in (False, True):
+                        with self.subTest(listing=listing.__name__, field=field,
+                                          value=value, continuation=continuation):
+                            before = [cpage([srow("s1")], "c1")] if continuation else []
+                            client = FakeClient(*before, cpage([], **{field: value}))
+                            self.assertEqual(raised_any(listing, client, ATT).code,
+                                             "companion_host_mismatch")
+                            self.assertEqual(len(client.calls), len(before) + 1)
 
-    def test_missing_or_unsupported_protocol_and_identity_fail_before_resource_get(self):
-        for field, values, code in (
-            ("protocolVersion", (None, True, "1", 2, ...), "companion_observation_unsupported"),
-            ("hostIdentity", (None, "6" * 64, ...), "companion_host_mismatch"),
-            ("hostInstanceId", (None, INSTANCE_2, ...), "companion_host_mismatch"),
-        ):
-            for value in values:
-                with self.subTest(field=field, value=value):
-                    client = FakeClient(catalog_bootstrap(**{field: value}), cpage([]))
-                    self.assertEqual(raised_any(list_all_work, client, ATT).code, code)
-                    self.assertEqual(len(client.calls), 1)
-
-    def test_bad_scope_or_limit_fails_before_bootstrap(self):
+    def test_bad_scope_or_limit_fails_before_request(self):
         for kwargs in ({"scope": "all&scope=roots"}, {"scope": None},
                        {"scope": []}, {"limit": True}, {"limit": 201}, {"limit": 0}):
             with self.subTest(kwargs=kwargs):
@@ -213,12 +194,12 @@ class AllWorkCatalogTest(OfflineTestCase):
         for first, second in ((1, 2), (1, "1"), ("1", 1), ("one", "two")):
             with self.subTest(first=first, second=second):
                 client = FakeClient(
-                    catalog_bootstrap(), cpage([srow("s1")], "c1", revision=first),
+                    cpage([srow("s1")], "c1", revision=first),
                     cpage([srow("s2")], revision=second),
                 )
                 self.assertEqual(raised_any(list_all_work, client, ATT).code,
                                  "companion_snapshot_changed")
-                self.assertEqual(len(client.calls), 3)
+                self.assertEqual(len(client.calls), 2)
 
     def test_duplicate_ids_and_cursor_cycles_fail_closed(self):
         cases = (
@@ -229,9 +210,9 @@ class AllWorkCatalogTest(OfflineTestCase):
         )
         for pages, code in cases:
             with self.subTest(code=code, pages=len(pages)):
-                client = FakeClient(catalog_bootstrap(), *pages)
+                client = FakeClient(*pages)
                 self.assertEqual(raised_any(list_all_work, client, ATT).code, code)
-                self.assertEqual(len(client.calls), 1 + len(pages))
+                self.assertEqual(len(client.calls), len(pages))
 
     def test_malformed_page_fields_fail_closed(self):
         changes = [
@@ -243,11 +224,11 @@ class AllWorkCatalogTest(OfflineTestCase):
         ]
         for change in changes:
             with self.subTest(change=list(change)):
-                client = FakeClient(catalog_bootstrap(), cpage([], **change))
+                client = FakeClient(cpage([], **change))
                 self.assertEqual(raised_any(list_all_work, client, ATT).code,
                                  "companion_response_invalid")
-                self.assertEqual(len(client.calls), 2)
-        client = FakeClient(catalog_bootstrap(), cpage([srow("s1"), srow("s2")]))
+                self.assertEqual(len(client.calls), 1)
+        client = FakeClient(cpage([srow("s1"), srow("s2")]))
         self.assertEqual(raised_any(list_all_work, client, ATT, limit=1).code,
                          "companion_response_invalid")
 
@@ -261,11 +242,11 @@ class AllWorkCatalogTest(OfflineTestCase):
         for change in changes:
             with self.subTest(change=list(change)):
                 raw = {k: v for k, v in {**srow("s1"), **change}.items() if v is not ...}
-                client = FakeClient(catalog_bootstrap(), cpage([raw]))
+                client = FakeClient(cpage([raw]))
                 self.assertEqual(raised_any(list_all_work, client, ATT).code,
                                  "companion_response_invalid")
         for raw in (None, [], "not-row"):
-            client = FakeClient(catalog_bootstrap(), cpage([raw]))
+            client = FakeClient(cpage([raw]))
             self.assertEqual(raised_any(list_all_work, client, ATT).code,
                              "companion_response_invalid")
 
@@ -274,9 +255,6 @@ class AllWorkCatalogTest(OfflineTestCase):
         del row["agentCreated"]
         row.update(workspace="/not/a/supported/fact", future={"anything": True})
         client = FakeClient(
-            catalog_bootstrap(future=True, resources={
-                "sessions": "/api/sessions?view=observation", "future": "https://evil.example"
-            }),
             cpage([row], future={"test": 1}),
         )
         listing = list_all_work(client, ATT)
@@ -293,9 +271,9 @@ class AllWorkCatalogTest(OfflineTestCase):
             (404, "companion_observation_unsupported"), (409, "companion_snapshot_changed"),
             (503, "companion_observation_busy"), (500, "companion_http_status"),
         ):
-            for stage in ("bootstrap", "first", "continuation"):
+            for stage in ("first", "continuation"):
                 with self.subTest(status=status, stage=stage):
-                    before = [] if stage == "bootstrap" else [catalog_bootstrap()]
+                    before = []
                     if stage == "continuation":
                         before.append(cpage([srow("partial")], "c1"))
                     client = FakeClient(*before, Response(status, b"SECRET-ERROR"), cpage([]))
@@ -312,11 +290,11 @@ class AllWorkCatalogTest(OfflineTestCase):
             (Response(200, b'{"items":[],"revision":1,"revision":2,"nextCursor":null}'),
              "companion_response_invalid"),
         ):
-            client = FakeClient(catalog_bootstrap(), result)
+            client = FakeClient(result)
             exc = raised_any(list_all_work, client, ATT)
             self.assertEqual(exc.code, code)
             self.assertIsNone(exc.__cause__)
-            self.assertEqual(len(client.calls), 2)
+            self.assertEqual(len(client.calls), 1)
         bare = Attachment(CRED_REF, ORIGIN_URL, CLIENT_ID, HOST_IDENTITY, INSTANCE)
         client = FakeClient()
         self.assertEqual(raised_any(list_all_work, client, bare).code, "companion_unauthorized")
@@ -343,7 +321,7 @@ class ListTest(OfflineTestCase):
         )
         listing = list_sessions(client, ATT, monotonic=FixedClock(50.0))
         self.assertEqual([r.id for r in listing.sessions], ["s1", "s2"])
-        self.assertEqual((listing.revision, listing.observation_revision), (10, 3))
+        self.assertEqual((listing.revision, listing.observation_revision), (0, 3))
         self.assertTrue(listing.complete)
         self.assertEqual(listing.pages, 1)
         self.assertEqual(listing.fetched_monotonic, 50.0)
@@ -364,7 +342,7 @@ class ListTest(OfflineTestCase):
         self.assertTrue(listing.sessions[1].execution)
         (call,) = client.calls
         self.assertEqual(
-            (call["route"].method, call["route"].target), ("GET", "/api/companion")
+            (call["route"].method, call["route"].target), ("GET", OBSERVATION_TARGET)
         )
         self.assertEqual(call["origin"], Origin.parse(ORIGIN_URL))
         self.assertEqual(call["headers"]["Authorization"], "Bearer " + TOKEN)
@@ -384,9 +362,9 @@ class ListTest(OfflineTestCase):
         self.assertEqual(
             [c["route"].target for c in client.calls],
             [
-                "/api/companion",
-                "/api/companion?sessionsCursor=cur-1",
-                "/api/companion?sessionsCursor=cur-2",
+                OBSERVATION_TARGET,
+                OBSERVATION_TARGET + "&cursor=cur-1",
+                OBSERVATION_TARGET + "&cursor=cur-2",
             ],
         )
 
@@ -414,7 +392,7 @@ class ListTest(OfflineTestCase):
         )
 
     def test_snapshot_changes_between_pages_fail_closed(self):
-        for change in ({"revision": 11}, {"observationRevision": 4}):
+        for change in ({"revision": 11}, {"revision": "opaque-new-snapshot"}):
             with self.subTest(change=change):
                 client = FakeClient(
                     lpage([srow("s1")], "c1"), lpage([srow("s2")], **change)
@@ -431,15 +409,15 @@ class ListTest(OfflineTestCase):
             with self.subTest(revision=revision):
                 listing = list_sessions(
                     FakeClient(
-                        lpage([srow("s1")], "c1", observationRevision=revision),
-                        lpage([srow("s2")], observationRevision=revision),
+                        lpage([srow("s1")], "c1", revision=revision),
+                        lpage([srow("s2")], revision=revision),
                     ),
                     ATT,
                 )
                 self.assertTrue(listing.complete)
                 self.assertEqual(listing.observation_revision, revision)
                 self.assertIsInstance(listing.observation_revision, str)
-                self.assertEqual(listing.revision, 10)
+                self.assertEqual(listing.revision, 0)
                 self.assertIs(type(listing.revision), int)
 
     def test_observation_revision_change_or_type_change_fails_closed(self):
@@ -448,8 +426,8 @@ class ListTest(OfflineTestCase):
                 with self.assertRaises(CompanionError) as caught:
                     list_sessions(
                         FakeClient(
-                            lpage([srow("s1")], "c1", observationRevision=first),
-                            lpage([srow("s2")], observationRevision=second),
+                            lpage([srow("s1")], "c1", revision=first),
+                            lpage([srow("s2")], revision=second),
                         ),
                         ATT,
                     )
@@ -460,27 +438,21 @@ class ListTest(OfflineTestCase):
                       "a b", "a\nb", "\x00", "révision"):
             with self.subTest(value=value):
                 with self.assertRaises(CompanionError) as caught:
-                    list_sessions(FakeClient(lpage([], observationRevision=value)), ATT)
+                    list_sessions(FakeClient(lpage([], revision=value)), ATT)
                 self.assertEqual(caught.exception.code, "companion_response_invalid")
 
-    def test_host_identity_instance_or_protocol_mismatch_fails_closed(self):
+    def test_host_identity_or_instance_mismatch_fails_closed(self):
         for change in (
             {"hostIdentity": "6" * 64},
             {"hostInstanceId": INSTANCE_2},
             {"hostIdentity": ...},
             {"hostInstanceId": ...},
-            {"protocolVersion": 2},
-            {"protocolVersion": True},
-            {"protocolVersion": "1"},
-            {"protocolVersion": ...},
         ):
             with self.subTest(change=change):
                 code = raised_any(
                     list_sessions, FakeClient(lpage([srow("s1")], **change)), ATT
                 ).code
-                self.assertIn(
-                    code, {"companion_host_mismatch", "companion_response_invalid"}
-                )
+                self.assertEqual(code, "companion_host_mismatch")
         client = FakeClient(
             lpage([srow("s1")], "c1"), lpage([srow("s2")], hostInstanceId=INSTANCE_2)
         )
@@ -490,45 +462,44 @@ class ListTest(OfflineTestCase):
 
     def test_malformed_pages_fail_closed(self):
         bad = {
-            "sessions not list": {"sessions": {}},
-            "row not dict": {"sessions": ["x"]},
+            "items not list": {"items": {}},
+            "items missing": {"items": ...},
+            "row not dict": {"items": ["x"]},
             "row no id": {
-                "sessions": [{k: v for k, v in srow("s1").items() if k != "id"}]
+                "items": [{k: v for k, v in srow("s1").items() if k != "id"}]
             },
-            "row id invalid": {"sessions": [srow("bad id")]},
-            "row id type": {"sessions": [srow(5)]},
-            "status type": {"sessions": [{**srow("s1"), "status": 5}]},
+            "row id invalid": {"items": [srow("bad id")]},
+            "row id type": {"items": [srow(5)]},
+            "status type": {"items": [{**srow("s1"), "status": 5}]},
             "status missing": {
-                "sessions": [{k: v for k, v in srow("s1").items() if k != "status"}]
+                "items": [{k: v for k, v in srow("s1").items() if k != "status"}]
             },
             "activity missing": {
-                "sessions": [{k: v for k, v in srow("s1").items() if k != "activity"}]
+                "items": [{k: v for k, v in srow("s1").items() if k != "activity"}]
             },
-            "activity flag int": {"sessions": [srow("s1", execution=0)]},
-            "activity flag str": {"sessions": [srow("s1", loading="false")]},
+            "activity flag int": {"items": [srow("s1", execution=0)]},
+            "activity flag str": {"items": [srow("s1", loading="false")]},
             "activity flag missing": {
-                "sessions": [
+                "items": [
                     {**srow("s1"), "activity": {"execution": False, "preparing": False}}
                 ]
             },
-            "title type": {"sessions": [{**srow("s1"), "title": 5}]},
-            "duplicate id": {"sessions": [srow("s1"), srow("s1")]},
+            "title type": {"items": [{**srow("s1"), "title": 5}]},
+            "title oversized": {"items": [srow("s1", title="x" * 201)]},
+            "status oversized": {"items": [srow("s1", status="x" * 201)]},
+            "pinned missing": {"items": [{k: v for k, v in srow("s1").items() if k != "pinned"}]},
+            "role scope mismatch": {"items": [{**srow("s1"), "role": "delegate"}]},
+            "duplicate id": {"items": [srow("s1"), srow("s1")]},
+            "page oversized": {"items": [srow(f"s{i}") for i in range(201)]},
             "revision bool": {"revision": True},
-            "revision str": {"revision": "10"},
+            "revision empty": {"revision": ""},
             "revision negative": {"revision": -1},
             "revision missing": {"revision": ...},
-            "observation revision": {"observationRevision": 1.5},
-            "truncated without cursor": {
-                "sessionsTruncated": True,
-                "sessionsNextCursor": None,
-            },
-            "cursor without truncated": {
-                "sessionsTruncated": False,
-                "sessionsNextCursor": "c",
-            },
-            "truncated type": {"sessionsTruncated": "yes"},
-            "cursor type": {"sessionsTruncated": True, "sessionsNextCursor": 5},
-            "cursor invalid": {"sessionsTruncated": True, "sessionsNextCursor": "a b"},
+            "observation revision": {"revision": 1.5},
+            "cursor missing": {"nextCursor": ...},
+            "cursor type": {"nextCursor": 5},
+            "cursor invalid": {"nextCursor": "a b"},
+            "cursor empty": {"nextCursor": ""},
         }
         for name, change in bad.items():
             with self.subTest(name):
@@ -556,20 +527,22 @@ class ListTest(OfflineTestCase):
             409: "companion_snapshot_changed",
             503: "companion_observation_busy",
             500: "companion_http_status",
-            404: "companion_http_status",
+            404: "companion_observation_unsupported",
         }
         for status, code in cases.items():
-            with self.subTest(status=status):
-                client = FakeClient(
+            for continuation in (False, True):
+                with self.subTest(status=status, continuation=continuation):
+                    before = [lpage([srow("partial")], "c1")] if continuation else []
+                    client = FakeClient(*before,
                     Response(
                         status,
                         b'{"error":"secret detail","code":"observation_pending"}',
                     )
-                )
-                exc = raised_any(list_sessions, client, ATT)
-                self.assertEqual((exc.code, exc.status), (code, status))
-                self.assertEqual(len(client.calls), 1)
-                self.assertNotIn("secret detail", str(exc) + repr(exc))
+                    )
+                    exc = raised_any(list_sessions, client, ATT)
+                    self.assertEqual((exc.code, exc.status), (code, status))
+                    self.assertEqual(len(client.calls), len(before) + 1)
+                    self.assertNotIn("secret detail", str(exc) + repr(exc))
 
     def test_transport_failure_is_fixed_and_chainless(self):
         exc = raised_any(
@@ -588,7 +561,7 @@ class ListTest(OfflineTestCase):
 
     def test_attention_items_and_extra_fields_do_not_matter(self):
         listing = list_sessions(
-            FakeClient(lpage([srow("s1")], items=[{"anything": 1}], extra="x")), ATT
+            FakeClient(lpage([srow("s1")], attentionItems=[{"anything": 1}], extra="x")), ATT
         )
         self.assertEqual(len(listing.sessions), 1)
 
@@ -617,7 +590,7 @@ class TitleTest(OfflineTestCase):
 
     def test_listing_exposes_only_the_sanitised_title(self):
         listing = list_sessions(
-            FakeClient(lpage([srow("s1", title="a\u202eb\x1b" + "z" * 300)])), ATT
+            FakeClient(lpage([srow("s1", title="a\u202eb\x1b" + "z" * 190)])), ATT
         )
         title = listing.sessions[0].title
         self.assertLessEqual(len(title), 80)
@@ -636,11 +609,11 @@ class PreflightTest(OfflineTestCase):
         result = preflight(listing, "s1", monotonic=FixedClock(105.0))
         self.assertEqual(
             (result.session_id, result.idle, result.revision, result.reason),
-            ("s1", True, 10, "idle"),
+            ("s1", True, 0, "idle"),
         )
 
     def test_hostile_status_text_is_retained_raw_and_is_never_idle(self):
-        for status in ("\x1b[31midle", "IDLE", "idle ", "idle\n", "x" * 5000):
+        for status in ("\x1b[31midle", "IDLE", "idle ", "idle\n", "x" * 200):
             with self.subTest(status=status[:10]):
                 listing = self.listing([srow("s1", status=status)])
                 self.assertEqual(listing.sessions[0].status, status)  # not sanitized

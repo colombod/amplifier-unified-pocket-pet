@@ -12,8 +12,9 @@ and ``bind`` only records an explicit selection in the private journal (it sends
 nothing and does not arm the bridge).  ``--help`` works offline without opening any
 config.
 
-``list --all-work [--scope roots|delegates|all]`` opts into a bounded read-only
-observation catalog. It neither binds nor changes the default list/preflight path.
+Both ``list``/idle preflight (roots) and ``list --all-work [--scope roots|delegates|all]``
+page ``GET /api/sessions?view=observation`` directly, without a companion bootstrap.
+The all-work option only changes the read-only catalog's scope, never the binding.
 
 Output is limited to the approval address and code, instructions, safe labels, short
 ids (the last 8 characters) and metadata.  Failures print ``error: <fixed code>`` only:

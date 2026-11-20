@@ -671,13 +671,26 @@ class UnifiedOpsTest(OpsCase):
         self.assertEqual(code, "duplicate_event")
         self.assertEqual(self.ops.seal(turn).text, "a")  # nothing after the failure
 
-    def test_t_core_ops_preflight_idle_with_the_global_revision(self):
+    def test_t_core_ops_preflight_idle_uses_only_observation_and_zero_revision(self):
         self.client.script = [lpage([srow(SESSION)])]
         result = self.ops.preflight()
         self.assertEqual(
             (result.session_id, result.revision, result.idle, result.reason),
-            (SESSION, 10, True, "idle"),
+            (SESSION, 0, True, "idle"),
         )
+        self.assertEqual([c["route"].path for c in self.client.calls], ["/api/sessions"])
+        self.assertEqual(dict(self.client.calls[0]["route"].query), {
+            "view": "observation", "scope": "roots", "activity": "all",
+            "pinned": "all", "limit": "200",
+        })
+
+    def test_observation_403_preflight_is_unauthorized_and_never_idle(self):
+        from pet_bridge.transport import Response
+
+        self.client.script = [Response(403, b"SECRET")]
+        result = self.ops.preflight()
+        self.assertEqual((result.idle, result.reason), (False, "companion_unauthorized"))
+        self.assertEqual([c["route"].path for c in self.client.calls], ["/api/sessions"])
 
     def test_t_core_ops_preflight_not_idle_unlisted_and_companion_error(self):
         self.client.script = [lpage([srow(SESSION, "working", execution=True)])]
