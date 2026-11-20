@@ -17,6 +17,7 @@ void live_voice_stop(void);
 #if defined(PET_PRIVATE_MIC_DIAG)
 /* Bench only: core for the next call's owner task; negative leaves it unpinned. */
 void live_voice_bench_core(int core);
+void live_voice_bench_priority(int priority);
 #endif
 /* Reclaim only a finished, suspended worker before releasing shared admission. */
 void live_voice_reap_finished(void);

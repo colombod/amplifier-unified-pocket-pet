@@ -524,11 +524,18 @@ void live_voice_reap_finished(void) {
  * message took 42-44 ms on the pet against 24-25 ms on core 1, and calls fell
  * behind real time (working-files/voice-bench, 20 November 2026). */
 #define VOICE_OWNER_CORE 1
+/* Above the display task (LVGL, priority 4, about three quarters of a core
+ * while the pet is animated) and the socket reader (5). At the display's own
+ * priority the owner shared its core with it in time slices and fell behind
+ * real time even on core 1, while the other core was a third idle. Its work
+ * per 100 ms of audio is bounded, so the display keeps the rest. */
+#define VOICE_OWNER_PRIORITY 6
 #if defined(PET_PRIVATE_MIC_DIAG)
 /* Bench only: 0 or 1 pins the next call's owner there; -1 leaves it unpinned,
  * as it was, to compare the placements. */
-static atomic_int bench_voice_core=VOICE_OWNER_CORE;
+static atomic_int bench_voice_core=VOICE_OWNER_CORE,bench_voice_priority=VOICE_OWNER_PRIORITY;
 void live_voice_bench_core(int core){atomic_store(&bench_voice_core,core<0?-1:core?1:0);}
+void live_voice_bench_priority(int priority){atomic_store(&bench_voice_priority,priority<4?4:priority>6?6:priority);}
 #endif
 void live_voice_start(void) {
  if(!tailnet_spike_audio_acquire())return;
@@ -540,11 +547,11 @@ void live_voice_start(void) {
  strlcpy(status.message,"Preparing voice...",sizeof(status.message));atomic_store(&stop_requested,false);
  session_deadline_us=esp_timer_get_time()+(int64_t)VOICE_SESSION_LIMIT_MS*1000;
 #if defined(PET_PRIVATE_MIC_DIAG)
- int bench_core=atomic_load(&bench_voice_core);
- if((bench_core<0?xTaskCreate(worker,"pet_live",12288,NULL,4,&worker_task):
-     xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,4,&worker_task,bench_core))!=pdPASS) {
+ int bench_core=atomic_load(&bench_voice_core),bench_priority=atomic_load(&bench_voice_priority);
+ if((bench_core<0?xTaskCreate(worker,"pet_live",12288,NULL,bench_priority,&worker_task):
+     xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,bench_priority,&worker_task,bench_core))!=pdPASS) {
 #else
- if(xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,4,&worker_task,VOICE_OWNER_CORE)!=pdPASS) {
+ if(xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,VOICE_OWNER_PRIORITY,&worker_task,VOICE_OWNER_CORE)!=pdPASS) {
 #endif
   worker_task=NULL;worker_finished=false;status.active=false;status.state=LIVE_ERROR;
   session_deadline_us=0;
