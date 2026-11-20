@@ -3,12 +3,16 @@
 Source facts from static reading only, NOT a live wire qualification: legacy
 paths reviewed at Unified 0.80.1; opt-in observation-v1 at reference 0bcb8c30.
 
-* ``GET /api/companion`` returns up to 50 active-or-pinned root sessions per page with
-  a signed cursor, a GLOBAL ``revision`` and the host identity/instance.
-* Opt-in ``list_all_work`` checks that bootstrap's protocol/identity and exact
-  observation resource, then reads all activity/pins in an explicit scope. The
-  observation revision is opaque and NEVER a global send/preflight revision.
-  Advertisement does not grant scope: a 403 stops without auth changes or fallback.
+* ``GET /api/sessions?view=observation`` (observation-v1) returns sessions with their
+  status, activity flags and role in an explicit scope, with a cursor, an opaque
+  snapshot ``revision`` and the host identity/instance on every page. It is the one
+  session listing a paired device may read: ``GET /api/companion``, which earlier
+  versions of this module used, answered 200 on 16 November 2026 and 403 from
+  19 November 2026 on the same host after a Unified update, and every send was then
+  refused as "busy". ``list_sessions`` (root sessions, for the idle preflight) and
+  ``list_all_work`` both read the observation resource and nothing else.
+  The observation revision is opaque and NEVER a send revision. A 403 stops without
+  auth changes or fallback.
 * ``GET /api/conversation/detail?sessionId=&part=messages[&before=<message id>]`` for a
   native client returns the newest resident tail
   ``{items, offset, total, before, userOffset, sourceOffset}``; ``before`` is a MESSAGE
@@ -16,9 +20,8 @@ paths reviewed at Unified 0.80.1; opt-in observation-v1 at reference 0bcb8c30.
 
 What this module guarantees, and what it does not:
 
-* Every operation is bounded: ``list_sessions`` makes at most 5 GETs, ``detail_window``
-  at most 4, ``list_all_work`` at most 6 including bootstrap; none retried inside
-  the call. A cap, a cursor cycle, a changed snapshot
+* Every operation is bounded: ``list_sessions`` and ``list_all_work`` make at most 5
+  GETs, ``detail_window`` at most 4; none retried inside the call. A cap, a cursor cycle, a changed snapshot
   or any malformed field fails closed or is reported as an incomplete window.
 * ``detail_window`` never invents an ``offset``, ``total`` or coverage: a window is
   ``complete`` only if the pages reached ``offset == 0`` and validated end to end.
@@ -193,7 +196,11 @@ class SessionRow:
 
 @dataclass(frozen=True)
 class SessionList:
-    """Exact rows with the GLOBAL revision.  ``complete`` is False if a cap was hit."""
+    """Exact root rows.  ``complete`` is False if a cap was hit.
+
+    ``revision`` is kept for callers of the earlier listing and is always 0: the
+    observation resource has no global revision, and none is used as a send token.
+    """
 
     sessions: tuple[SessionRow, ...] = field(repr=False)
     revision: int
@@ -243,84 +250,6 @@ def _row(raw: Any) -> SessionRow:
     )
 
 
-def _list_page(
-    doc: dict[str, Any], attachment: Any
-) -> tuple[list[SessionRow], int, int | str, str | None]:
-    version = doc.get("protocolVersion")
-    if type(version) is not int or version != 1:
-        raise _invalid()
-    if (
-        doc.get("hostIdentity") != attachment.host_identity
-        or doc.get("hostInstanceId") != attachment.host_instance_id
-    ):
-        raise CompanionError("companion_host_mismatch")
-    revision = _int(doc.get("revision"))
-    observed = _observation_revision(doc.get("observationRevision"))
-    sessions, truncated, nxt = (
-        doc.get("sessions"),
-        doc.get("sessionsTruncated"),
-        doc.get("sessionsNextCursor"),
-    )
-    if (
-        type(sessions) is not list
-        or len(sessions) > MAX_ROWS_PER_PAGE
-        or type(truncated) is not bool
-    ):
-        raise _invalid()
-    if truncated != (nxt is not None):
-        raise _invalid()
-    if nxt is not None:
-        try:
-            transport.route_companion(sessions_cursor=nxt)
-        except TransportError:
-            raise _invalid() from None
-    return [_row(item) for item in sessions], revision, observed, nxt
-
-
-def list_sessions(
-    client: Any, attachment: Any, *, monotonic: Callable[[], float] = time.monotonic
-) -> SessionList:
-    """Up to 5 bounded GETs following the server cursor; fail closed on any anomaly."""
-    started = monotonic()
-    rows: list[SessionRow] = []
-    seen_ids: set[str] = set()
-    cursors: set[str] = set()
-    cursor: str | None = None
-    snapshot: tuple[int, int | str] | None = None
-    complete = False
-    pages = 0
-    while pages < MAX_LIST_PAGES:
-        route = _route(transport.route_companion, sessions_cursor=cursor)
-        doc = _get(client, attachment, route, _LIST_STATUS)
-        page, revision, observed, cursor = _list_page(doc, attachment)
-        pages += 1
-        if snapshot is not None and snapshot != (revision, observed):
-            raise CompanionError("companion_snapshot_changed")
-        snapshot = (revision, observed)
-        for row in page:
-            if row.id in seen_ids:
-                raise _invalid()
-            seen_ids.add(row.id)
-            rows.append(row)
-        if cursor is None:
-            complete = True
-            break
-        if cursor in cursors:
-            raise CompanionError("companion_cursor_cycle")
-        cursors.add(cursor)
-    assert snapshot is not None
-    return SessionList(
-        tuple(rows),
-        snapshot[0],
-        snapshot[1],
-        complete,
-        pages,
-        attachment.host_identity,
-        attachment.host_instance_id,
-        started,
-    )
-
-
 @dataclass(frozen=True)
 class SessionCatalog:
     """Read-only observation, NOT a SessionList or send/idle admission evidence."""
@@ -341,23 +270,6 @@ _CATALOG_STATUS = {
 }
 
 
-def _catalog_capability(doc: dict[str, Any], attachment: Any) -> None:
-    version = doc.get("protocolVersion")
-    if type(version) is not int or version != 1:
-        raise CompanionError("companion_observation_unsupported")
-    if (
-        doc.get("hostIdentity") != attachment.host_identity
-        or doc.get("hostInstanceId") != attachment.host_instance_id
-    ):
-        raise CompanionError("companion_host_mismatch")
-    resources = doc.get("resources")
-    if (
-        type(resources) is not dict
-        or resources.get("sessions") != transport.SESSIONS_OBSERVATION_RESOURCE
-    ):
-        raise CompanionError("companion_observation_unsupported")
-
-
 def _catalog_row(raw: Any, scope: str) -> SessionRow:
     row = _row(raw)
     role, created = raw.get("role"), raw.get("agentCreated")
@@ -376,32 +288,29 @@ def _catalog_row(raw: Any, scope: str) -> SessionRow:
     )
 
 
-def list_all_work(
-    client: Any,
-    attachment: Any,
-    *,
-    scope: str = "roots",
-    limit: int = MAX_ROWS_PER_PAGE,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> SessionCatalog:
-    """One bootstrap + <=5 sequential GETs, no retry or mutation.
+def _observation_pages(
+    client: Any, attachment: Any, scope: str, limit: int, max_pages: int
+) -> tuple[list[SessionRow], int | str, bool, int]:
+    """Sequential GETs of the observation resource; no retry, no mutation.
 
-    Empty pages with continuation are not terminal. Any page/status/snapshot
-    failure discards the entire traversal; only the page cap returns incomplete
-    rows. No workspace paths are in this resource, so no grouping is inferred.
+    Every page must name this attachment's host identity and instance. Empty pages
+    with continuation are not terminal. Any page/status/snapshot failure discards
+    the entire traversal; only the page cap returns incomplete rows.
     """
     route = _route(transport.route_sessions_observation, scope=scope, limit=limit)
-    started = monotonic()
-    bootstrap = _get(client, attachment, transport.route_companion(), _CATALOG_STATUS)
-    _catalog_capability(bootstrap, attachment)
     rows: list[SessionRow] = []
     ids: set[str] = set()
     cursors: set[str] = set()
     snapshot: int | str | None = None
     complete = False
     pages = 0
-    while pages < MAX_CATALOG_PAGES:
+    while pages < max_pages:
         doc = _get(client, attachment, route, _CATALOG_STATUS)
+        if (
+            doc.get("hostIdentity") != attachment.host_identity
+            or doc.get("hostInstanceId") != attachment.host_instance_id
+        ):
+            raise CompanionError("companion_host_mismatch")
         observed = _observation_revision(doc.get("revision"))
         if snapshot is not None and snapshot != observed:
             raise CompanionError("companion_snapshot_changed")
@@ -434,6 +343,45 @@ def list_all_work(
             raise CompanionError("companion_cursor_cycle")
         cursors.add(cursor)
     assert snapshot is not None
+    return rows, snapshot, complete, pages
+
+
+def list_sessions(
+    client: Any, attachment: Any, *, monotonic: Callable[[], float] = time.monotonic
+) -> SessionList:
+    """Root sessions for the idle preflight: up to 5 bounded GETs, fail closed."""
+    started = monotonic()
+    rows, snapshot, complete, pages = _observation_pages(
+        client, attachment, "roots", MAX_ROWS_PER_PAGE, MAX_LIST_PAGES
+    )
+    return SessionList(
+        tuple(rows),
+        0,
+        snapshot,
+        complete,
+        pages,
+        attachment.host_identity,
+        attachment.host_instance_id,
+        started,
+    )
+
+
+def list_all_work(
+    client: Any,
+    attachment: Any,
+    *,
+    scope: str = "roots",
+    limit: int = MAX_ROWS_PER_PAGE,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> SessionCatalog:
+    """All activity/pins in an explicit scope: up to 5 sequential GETs.
+
+    No workspace paths are in this resource, so no grouping is inferred.
+    """
+    started = monotonic()
+    rows, snapshot, complete, pages = _observation_pages(
+        client, attachment, scope, limit, MAX_CATALOG_PAGES
+    )
     return SessionCatalog(
         tuple(rows), snapshot, complete, pages, scope,
         attachment.host_identity, attachment.host_instance_id, started,
