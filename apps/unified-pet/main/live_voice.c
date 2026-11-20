@@ -517,12 +517,17 @@ void live_voice_reap_finished(void) {
  }
  xSemaphoreGive(status_lock);
 }
+/* The voice owner runs on core 1. The codec's volume and gain calls use the
+ * FPU, and this chip pins a task to its current core at its first FPU use, so
+ * an unpinned owner stayed on whichever core it happened to be on for the whole
+ * call. On core 0, beside the Wi-Fi and timer tasks, handling one host audio
+ * message took 42-44 ms on the pet against 24-25 ms on core 1, and calls fell
+ * behind real time (working-files/voice-bench, 20 November 2026). */
+#define VOICE_OWNER_CORE 1
 #if defined(PET_PRIVATE_MIC_DIAG)
-/* Bench only. The codec's volume and gain calls use the FPU, and this chip
- * pins a task to its current core at its first FPU use, so an unpinned voice
- * owner ends up on either core for the whole call. -1 keeps that behaviour;
- * 0 or 1 creates the owner already pinned, to compare the two placements. */
-static atomic_int bench_voice_core=-1;
+/* Bench only: 0 or 1 pins the next call's owner there; -1 leaves it unpinned,
+ * as it was, to compare the placements. */
+static atomic_int bench_voice_core=VOICE_OWNER_CORE;
 void live_voice_bench_core(int core){atomic_store(&bench_voice_core,core<0?-1:core?1:0);}
 #endif
 void live_voice_start(void) {
@@ -539,7 +544,7 @@ void live_voice_start(void) {
  if((bench_core<0?xTaskCreate(worker,"pet_live",12288,NULL,4,&worker_task):
      xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,4,&worker_task,bench_core))!=pdPASS) {
 #else
- if(xTaskCreate(worker,"pet_live",12288,NULL,4,&worker_task)!=pdPASS) {
+ if(xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,4,&worker_task,VOICE_OWNER_CORE)!=pdPASS) {
 #endif
   worker_task=NULL;worker_finished=false;status.active=false;status.state=LIVE_ERROR;
   session_deadline_us=0;

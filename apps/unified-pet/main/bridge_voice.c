@@ -39,7 +39,8 @@
 #define BV_BEGIN_US 30000000     /* connected, but the host never began the conversation */
 #define BV_LINGER_US 1500000     /* after our close, let the host close its side before the fence */
 #define BV_SEND_MS 1000          /* how long one frame may wait for the socket to take it */
-#define BV_SEND_ROOM_MS 200      /* a conversation's audio may wait longer, while the microphone buffer keeps this much room */
+#define BV_STALL_MS 5000         /* a conversation's frame may wait this long for a stalled link before the call is given up */
+#define BV_FRAME_WAIT_MS 3000    /* a conversation's reader waits this long for the owner before a full message queue ends the call */
 #define BV_SEND_WAITING 4800      /* a further full 100 ms frame of microphone audio is already waiting */
 #define BV_SEND_CATCHUP 2         /* then the next frame may start early: at most this many times real time */
 /* Reconnecting while the mic is on (conversation mode only). After a call ends
@@ -313,6 +314,12 @@ static void capture_task(void *arg){
         /* A conversation keeps streaming while the pet speaks, but never sends
          * its own audible speech back as the user's words (as live_voice.c). */
         if(atomic_load(&c->converse)&&speaker_active(c))memset(pcm,0,sizeof(pcm));
+        /* A conversation outlives a stalled link. One lost packet can hold the
+         * socket for seconds until TCP sends it again; the buffer then fills.
+         * The newest audio is dropped while it is full and the call continues
+         * with a gap. What is already buffered is still sent once, in order;
+         * whole chunks only, so samples stay aligned. */
+        if(atomic_load(&c->converse)&&xStreamBufferSpacesAvailable(c->capture)<sizeof(pcm))continue;
         size_t admitted=xStreamBufferSend(c->capture,pcm,sizeof(pcm),0);
 #if defined(PET_PRIVATE_MIC_DIAG)
         i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->mic_clipped);
@@ -453,7 +460,15 @@ static void ws_event(void *arg,esp_event_base_t base,int32_t id,void *data){
             if(!message){atomic_store(&c->ingress_incomplete,true);callback_failed(c);return;}
             memcpy(message,c->assembly_memory,c->assembly.used);message[c->assembly.used]=0;
             bv_frame_t frame={.text=message,.received_at=c->assembly_received_at,.after_local_control=c->assembly_after_local_control};
-            if(xQueueSend(c->frames,&frame,0)!=pdTRUE){
+            /* After a stalled link the host's backlog arrives faster than the
+             * owner plays it. A conversation's reader then waits here, which
+             * holds the socket back, instead of ending the call at once. Mic
+             * off, a failure or the end of the call end the wait. */
+            bool queued=xQueueSend(c->frames,&frame,0)==pdTRUE;
+            for(unsigned waited=0;!queued&&atomic_load(&c->converse)&&waited<BV_FRAME_WAIT_MS&&
+                    atomic_load(&c->active)&&!atomic_load(&c->stop)&&!atomic_load(&c->failed);waited+=10)
+                queued=xQueueSend(c->frames,&frame,pdMS_TO_TICKS(10))==pdTRUE;
+            if(!queued){
                 atomic_store(&c->ingress_incomplete,true);setup_bridge_wipe(message,c->assembly.used);free(message);callback_failed(c);
             }
         }
@@ -523,16 +538,11 @@ static bool append_audio(bridge_voice_t *c,size_t n,int64_t *next_audio){
     if(e)return false;
     memcpy(c->append_json+sizeof(prefix)-1+count,"\"}",3);
     /* The SDK drops the connection when a send times out, and one lost packet
-     * can hold the socket for longer than BV_SEND_MS until TCP sends it again.
-     * Captured audio waits in the microphone buffer meanwhile, so a
-     * conversation's frame may wait for as long as that buffer has room: a
-     * stall the buffer can absorb no longer replaces the call. Nothing is sent
-     * twice; a longer stall still ends this call exactly as before. */
-    unsigned limit=BV_SEND_MS;
-    if(atomic_load(&c->converse)){
-        unsigned room_ms=(unsigned)((BV_MIC-xStreamBufferBytesAvailable(c->capture))/48);
-        if(room_ms>BV_SEND_MS+BV_SEND_ROOM_MS)limit=room_ms-BV_SEND_ROOM_MS;
-    }
+     * can hold the socket for seconds until TCP sends it again. A
+     * conversation's frame may therefore wait BV_STALL_MS; the microphone
+     * buffer drops its newest audio meanwhile (capture_task). Nothing is sent
+     * twice; a longer stall ends this call as a lost connection. */
+    unsigned limit=atomic_load(&c->converse)?BV_STALL_MS:BV_SEND_MS;
     int64_t admitted_at=0;
 #if defined(PET_PRIVATE_MIC_DIAG)
     int64_t send_begin=esp_timer_get_time();
@@ -1154,8 +1164,13 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
             if(event.kind==BR_EV_REPLY_STARTED&&c->model.phase==BR_REPLYING&&!atomic_load(&c->stop)&&!atomic_load(&c->failed)){atomic_store(&c->play_gate,true);atomic_store(&c->audio_epoch,c->model.audio_epoch);}
             if(a&BR_ACT_DRAIN)atomic_store(&c->drain,true);
             if(a&BR_ACT_PLAY){size_t bytes=0;int e=mbedtls_base64_decode(c->decoded,BV_APPEND,&bytes,(const unsigned char*)event.audio,strlen(event.audio));
-                if(e||!atomic_load(&c->play_gate)||atomic_load(&c->stop)||xStreamBufferSend(c->playback,c->decoded,bytes,0)!=bytes){note_exit(c,BV_EXIT_SPEAKER);atomic_store(&c->failed,true);}
-                else c->received_pcm+=(unsigned)bytes;}
+                /* A conversation's backlog after a stalled link can exceed the
+                 * speaker buffer: that reply audio is dropped whole (a gap),
+                 * never a partial, misaligned write, and the call continues. */
+                bool room=xStreamBufferSpacesAvailable(c->playback)>=bytes;
+                if(e||!atomic_load(&c->play_gate)||atomic_load(&c->stop)||(!room&&!c->model.converse)||
+                   (room&&xStreamBufferSend(c->playback,c->decoded,bytes,0)!=bytes)){note_exit(c,BV_EXIT_SPEAKER);atomic_store(&c->failed,true);}
+                else if(room)c->received_pcm+=(unsigned)bytes;}
             give();bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);
 #if defined(PET_PRIVATE_MIC_DIAG)
             bv_diag_frame(c,frame_begin);
