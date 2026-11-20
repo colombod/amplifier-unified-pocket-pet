@@ -78,21 +78,31 @@ It does not replace an existing cache. Keep the resulting cache in an
 owner-controlled location and do not modify it during the build. A teammate's
 complete fresh-machine setup is not yet verified.
 
-The repository's `Dockerfile` pins the ESP-IDF 5.5.4 multi-platform image index
-and Pillow wheel hashes. The index includes the originally pinned ARM64 image
-and a different, official AMD64 image from the same release. A fresh Dockerfile
-image build, including actual architecture and Python compatibility, has not
-been verified on either platform. The root `compose.yaml` selects ARM64 and
-builds the older root app, not this Unified app. A clean teammate's image
-bootstrap remains to be validated; do not describe a substituted tools image as
-the result of that build.
-Once a matched local image is available, including Pillow at
-`/opt/pet-assets/bin/python`, substitute its name below; the command uses the
-exported `PET_COMPONENT_CACHE` above:
+The repository's `Dockerfile` pins the official ESP-IDF 5.5.4 multi-platform
+image index and Pillow wheel hashes. On Linux AMD64, prepare the tools image
+once from the same checkout, with access to Docker Hub and PyPI. From the
+repository root, use a private context containing only the two listed files;
+choose an unused local tag, and stop at any failed command:
 
 ```sh
-PET_DEV_IMAGE="YOUR-VERIFIED-LOCAL-IMAGE" \
-  sh apps/unified-pet/scripts/build.sh --offline-cache
+PET_DEV_IMAGE=pocket-pet-tools:idf-v5.5.4-amd64
+PET_TOOLS_CONTEXT=$(mktemp -d)
+cp Dockerfile .dockerignore "$PET_TOOLS_CONTEXT/"
+docker build --platform linux/amd64 --pull --no-cache \
+  --tag "$PET_DEV_IMAGE" "$PET_TOOLS_CONTEXT"
+```
+
+On the maintainer's Linux AMD64 host, Docker resolved the pinned image index,
+reused local base layers, and ran the architecture and Python checks and a
+fresh, hash-checked Pillow install. This did not test an empty Docker base-image
+store or ARM64. The root `compose.yaml` selects ARM64 for the older root app;
+it is not the Unified app's build command.
+
+Then use the new image and the `PET_COMPONENT_CACHE` exported above to run
+the offline build from the same checkout:
+
+```sh
+PET_DEV_IMAGE="$PET_DEV_IMAGE" sh apps/unified-pet/scripts/build.sh --offline-cache
 ```
 
 The build container has networking disabled; outputs and `flasher_args.json`
