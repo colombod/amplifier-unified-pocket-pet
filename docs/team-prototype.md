@@ -49,8 +49,9 @@ published release package or validated fresh-board flashing procedure. The root
 app's older `esp32_pet` image is **not** the Unified app.
 
 The independent app's build script is `apps/unified-pet/scripts/build.sh`. It
-requires a locally cached ESP-IDF 5.5.4 image with Pillow 11.3.0 and, for its
-explicit `--offline-cache` mode, the matching component cache. It deliberately
+requires a reachable Docker daemon (`docker info`) and a locally cached ESP-IDF
+5.5.4 image with Pillow 11.3.0. Its explicit `--offline-cache` mode also requires
+the matching component cache. The build deliberately
 does not download an SDK or components during the build.
 
 The public component cache can be prepared separately on Linux with Python 3,
@@ -96,6 +97,10 @@ PET_DEV_IMAGE="YOUR-VERIFIED-LOCAL-IMAGE" \
 
 The build container has networking disabled; outputs and `flasher_args.json`
 belong to `apps/unified-pet/build/`. Building is not installation or physical proof.
+The build above also generates `apps/unified-pet/sdkconfig` from the tracked
+`sdkconfig.defaults` on a clean clone. Run checks that read the generated file,
+including the link rig and the historical isolation boundary check, **after**
+the build. Do not copy an `sdkconfig` from a different checkout into a clean one.
 
 A maintainer must identify the actual board and port, preserve and verify the
 board's existing flash before replacing firmware, use the exact matching manifest,
@@ -544,7 +549,9 @@ pinned ESP-IDF 5.5.4 environment with `PET_TLS_HOST_LIB` pointing to the
 appropriate real-host mbedTLS libraries; see `apps/unified-pet/AGENTS.md`.
 Those SDK checks and a target build must be tied to the exact release source and
 inputs. The historical isolation test requires its original private baseline;
-it is not a clean-clone acceptance test. A failed or unrun check is not a pass.
+even its standalone `test_project_boundary` needs the generated `sdkconfig`
+from the build above. It is not a clean-clone acceptance test. A failed or unrun
+check is not a pass.
 
 ## 4. Run and use the prototype
 
@@ -557,6 +564,8 @@ was installed on the original host; its TLS listener returned the expected
 unauthenticated `401`, and the user heard a real Unified reply through it. The
 gateway journal matched the recognized input to the front-door chat. Same-host
 restart handling and a second person's service setup remain unverified.
+For a new host, follow the [current-start and LAN listener checks](../bridge/deploy/README.md#check-the-current-start)
+before trying the device. The LAN check sends no bearer and makes no paid call.
 
 Tap the round microphone control to connect and speak. Wait for **Listening**,
 ask a short question, and wait for the spoken reply before speaking again. Tap

@@ -12,10 +12,19 @@ repo=$(CDPATH= cd -- "$app/../.." && pwd)
 if [ "${1:-}" != --inside-sdk ]; then
   case "${1:-}" in ""|--offline-cache) ;; *) printf '%s\n' 'Usage: build.sh [--offline-cache]' >&2; exit 2;; esac
   image=${PET_DEV_IMAGE:-esp32-pet-dev:5.5.4}
-  docker image inspect "$image" >/dev/null 2>&1 || {
-    printf '%s\n' "Missing cached $image (IDF 5.5.4 + Pillow 11.3.0); no build/pull authorized" >&2
+  if ! command -v docker >/dev/null 2>&1; then
+    printf '%s\n' 'Docker CLI not found; install Docker before preparing the tools image' >&2
     exit 1
-  }
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    if ! docker info --format '{{.ServerVersion}}' >/dev/null; then
+      printf '%s\n' 'Docker daemon unavailable; verify your Docker context and access' >&2
+    else
+      printf '%s\n' "Cannot inspect local image $image (IDF 5.5.4 + Pillow 11.3.0); check the image name and local cache" >&2
+    fi
+    printf '%s\n' 'No build or pull attempted' >&2
+    exit 1
+  fi
   offline=0
   if [ "${1:-}" = --offline-cache ]; then
     offline=1

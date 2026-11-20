@@ -29,6 +29,19 @@ interpreter path, not a temporary application update directory; test the
 environment again after changes. Installing dependencies may access a package
 registry. No package hashes or fresh-machine install qualification are claimed.
 
+The install above installs dependencies, not a `pet_bridge` or `pet-bridge`
+executable. From this repo's `bridge/` directory, set `PET_PYTHON` to the absolute
+path of your venv's Python and check both before pairing:
+
+```sh
+"$PET_PYTHON" -B -m pet_bridge --help
+"$PET_PYTHON" -I -B -c 'import aiohttp; print(aiohttp.__version__)'
+```
+
+Help can succeed without aiohttp. Stop if the import fails or the printed version
+does not match the environment you intended to install. For the next steps, use
+the [team guide's pairing procedure](../../docs/team-prototype.md#2-prepare-unified-and-the-gateway).
+
 ## Private settings in a local `.env` file (recommended)
 
 Machine-specific and secret values stay on the machine, never in the repository.
@@ -281,6 +294,27 @@ automatic restarts after your start.
 The listening line reports that the socket was bound, not that a device can
 reach it. These commands follow the systemd documentation and the gateway
 source; they have not been exercised against a live unit in this change.
+
+For a separate LAN reachability check, use `curl` from a trusted computer on the
+pet's LAN. Set `PET_GATEWAY_IP` and `PET_GATEWAY_PORT` to the configured listener
+address and port, and `PET_GATEWAY_FQDN` to the certificate name the pet will use.
+Use the literal Host value from your gateway config (shown here as `IP:port`):
+
+```sh
+curl --disable --noproxy '*' --http1.1 --max-time 10 --silent --show-error --include \
+  --resolve "$PET_GATEWAY_FQDN:$PET_GATEWAY_PORT:$PET_GATEWAY_IP" \
+  --header "Host: $PET_GATEWAY_IP:$PET_GATEWAY_PORT" \
+  "https://$PET_GATEWAY_FQDN:$PET_GATEWAY_PORT/v1/pet/live"
+```
+
+Use no bearer or TLS verification bypass. HTTP `401` with `unauthorized` is the
+expected result: the client verified TLS, reached the gateway and was refused
+before it could start a paid call. HTTP `421` indicates a Host mismatch; a TLS
+verification error is not a successful probe. This check uses the computer's
+trust store, not the firmware bundle or the Unified HTTPS child's trust store.
+It does not prove pairing, authenticated device traffic or voice. Do not run it
+as a recurring health check: unauthenticated requests count toward the source
+IP's failure limit.
 
 ## Optional LAN and Tailnet listeners
 
