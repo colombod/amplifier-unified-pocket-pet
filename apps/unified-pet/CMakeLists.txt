@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-set(PROJECT_VER "0.3.11-wifi-name")
+set(PROJECT_VER "0.3.12-voice-steady")
 if(PET_PRIVATE_MIC_DIAG)
-    set(PROJECT_VER "0.3.11-private-micdiag")
+    set(PROJECT_VER "0.3.12-private-micdiag")
     # Private configuration must never seed the normal sdkconfig.
     set(SDKCONFIG "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.bench")
     set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.bench.defaults")

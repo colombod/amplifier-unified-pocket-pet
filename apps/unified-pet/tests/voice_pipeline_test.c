@@ -104,9 +104,11 @@ static void xSemaphoreGive(SemaphoreHandle_t p) {
     }
 }
 static void *entry(void *p) {self=p;self->fn(self->arg);abort();}
+static _Thread_local bool pinned_creation;
 static int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,TaskHandle_t *out) {
     bool main_worker=!strcmp(name,"pet_live");
-    assert(stack==(main_worker?12288:4096)&&priority==(main_worker?4:5));
+    assert(!main_worker||pinned_creation);
+    assert(stack==(main_worker?12288:4096)&&priority==(main_worker?6:5));
     if(main_worker&&fail_worker_creation)return 0;
     TaskHandle_t p=calloc(1,sizeof(*p));assert(p);p->fn=fn;p->arg=arg;
     if(out)*out=p;else {
@@ -114,6 +116,12 @@ static int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *
         assert(!audio_tasks_host[index]);audio_tasks_host[index]=p;
     }
     assert(!pthread_create(&p->thread,NULL,entry,p));return pdPASS;
+}
+static int xTaskCreatePinnedToCore(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,TaskHandle_t *out,int core) {
+    assert(!strcmp(name,"pet_live")&&core==1&&priority==6);
+    pinned_creation=true;
+    int result=xTaskCreate(fn,name,stack,arg,priority,out);
+    pinned_creation=false;return result;
 }
 static void vTaskSuspend(TaskHandle_t p) {
     assert(!p&&self);atomic_store(&self->state,eSuspended);pthread_exit(NULL);

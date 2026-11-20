@@ -99,6 +99,12 @@ static void production_capture_owner(bridge_voice_t *c,int64_t *cursor){
 '''+located(d,de)+'''
 }
 ''')
+# Exercise the exact reply admission block too, without duplicating its policy.
+a=unique(text,'if(a&BR_ACT_PLAY){')
+b=brace_end(text,text.index('{',a))
+excerpts['owner_reply_audio']={'start':a,'end':b,'sha256':digest(text[a:b].encode())}
+parts.append('static void production_reply_audio(bridge_voice_t *c,char *audio){\n'
+             'bridge_event_t event={.audio=audio};unsigned a=BR_ACT_PLAY;\n'+located(a,b)+'\n}\n')
 (out/'bridge-runtime-production.inc').write_text('\n'.join(parts)+'\n')
 (out/'production-bodies.json').write_text(json.dumps({
     'source':str(source),'sha256':digest(text.encode()),'bodies':hashes,
@@ -172,7 +178,9 @@ compile() {
 compile -o "$out/runtime"
 compile -DPET_PRIVATE_MIC_DIAG=1 -o "$out/runtime-micdiag"
 failed=0
-for name in legacy realtime-0 realtime-25 realtime-75 \
+for name in conversation-drop conversation-near-full speaker-room send-limits \
+    queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
+    legacy realtime-0 realtime-25 realtime-75 \
     realtime-long-0 realtime-long-25 realtime-long-75 realtime-long-67 realtime-long-jitter \
     realtime-long-owner-jitter realtime-long-alternating \
     pacer-stall empty small-0 small-25 \
@@ -197,7 +205,9 @@ do
     if "$out/runtime" "$name"; then rc=0; else rc=$?; failed=1; fi
     printf '%s %s\n' "$name" "$rc" >> "$out/case-results.txt"
 done
-for name in mic-play mic-stages mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
+for name in conversation-drop conversation-near-full speaker-room send-limits \
+    queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
+    mic-play mic-stages mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
     capture-near-full capture-read-failure cleanup-cpu cleanup-audio-final cleanup-timeout cleanup-transport-timeout
 do
     if "$out/runtime-micdiag" "$name"; then rc=0; else rc=$?; failed=1; fi

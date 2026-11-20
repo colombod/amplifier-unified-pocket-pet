@@ -79,7 +79,27 @@ second where the owner's send time went (transport lock, socket, or neither).
 | `listen-rtt160` | 160 ms round trip, microphone only | same |
 | `loss-0.5pct` | 10 ms round trip, 0.5% loss each way | same |
 | `blackout-600ms` | 0.6 s total blackout while listening | same |
-| `blackout-2500ms` | 2.5 s total blackout during an answer | may be replaced by a new call; ends on the user's mic off; nothing twice or out of order |
+| `blackout-2500ms` | 2.5 s total blackout during an answer | one call through mic off; up to 4 s of whole-chunk capture gaps; nothing twice or out of order |
+
+For `0.3.12-voice-steady`, only the long-blackout expectation changes: a 5 s
+send allowance and newest-chunk dropping replace the former 1.8 s send limit
+and FIFO-overflow exit. It must now keep one call, not reconnect. Its delivered
+audio minimum subtracts the explicit 4 s gap budget; all six other scenarios
+still require their original audio minimum and no observed gaps.
+
+The codec seam now encodes an absolute index in each nonzero sample pair rather
+than a counter repeating every 0.34 s. The host distinguishes forward,
+whole-960-byte capture gaps from replay, backward order and misalignment, which
+remain failures even in the long blackout. Eight oracle self-checks run before
+the build. Identical digital silence cannot reveal a gap or replay by content;
+gap counts cover nonsilent counter observations, not all physical audio.
+
+One offline run of this source passed all seven scenarios with one call each,
+no failed sends and final `Mic off`. The 2.5 s blackout held one send for
+3.099 s, delivered 18.56 s of microphone audio over the 20 s scenario, and
+exposed 26,400 missing counter samples (1.10 s); no replay/order/alignment
+errors occurred. The six other cases had no observed counter gaps. This is a
+single impaired-link run, not a radio or normal-firmware device qualification.
 
 ## What it found (17 November 2026)
 
@@ -136,7 +156,7 @@ packet holds the socket for 1.0 to 1.8 s until lwIP sends it again. A 0.6 s
 blackout survived or not depending on where in a frame it began (two of five
 start offsets survived).
 
-A conversation's microphone frame may now wait for as long as the 2 s capture
+In `0.3.10-send-wait`, a conversation's microphone frame could wait for as long as the 2 s capture
 buffer still has room, less 0.2 s: at most 1.8 s. Measured on the rig:
 
 - `blackout-600ms` at five start offsets 100 ms apart: one call each, longest

@@ -30,6 +30,11 @@ def extract(path, names):
             depth += lines[end].count("{") - lines[end].count("}")
             if depth == 0 and "}" in lines[end]:
                 break
+        if name=="live_voice_start":
+            # Both preprocessor branches open the same failure if; keep them
+            # verbatim through the column-zero function end, not the next body.
+            end=next(i for i in range(start+1,len(lines)) if lines[i].startswith("}"))
+            assert lines[end+1].startswith("void live_voice_stop(")
         body = "".join(lines[start:end + 1])
         result.append(f'#line {start + 1} "{path}"\n' + body)
         print("production-body", path.name, name, hashlib.sha256(body.encode()).hexdigest())
@@ -56,7 +61,7 @@ for module, names in [
         # Bind actual private cap state/value, never a fixture duplicate or a
         # disabled deadline. Start/reap below remain verbatim production.
         if module=="live_voice" and re.match(
-                r"^(?:#define VOICE_SESSION_LIMIT_MS\b|static int64_t session_deadline_us;)",line):
+                r"^(?:#define VOICE_(?:SESSION_LIMIT_MS|OWNER_CORE|OWNER_PRIORITY)\b|static int64_t session_deadline_us;)",line):
             globals_.append(line)
     # Test-only empty lifecycle slots allow compiling the old init for RED.
     if not re.search(r"^static TaskHandle_t worker_task;", text, re.M):

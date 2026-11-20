@@ -42,6 +42,7 @@ static _Thread_local bool deleting_audio;
 static atomic_uint creates,deletes,opens,closes,tones,mics,sessions;
 static atomic_bool work_allowed,work_done,allow_suspend,task_attempted;
 static bool fail_create;
+static _Thread_local bool pinned_creation;
 static atomic_int owner;
 static unsigned release_after_delete;
 static bool cleanup_error;
@@ -107,8 +108,9 @@ static void *host_entry(void *arg) {
 }
 static int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *arg,
                        unsigned priority,TaskHandle_t *published) {
-    assert(priority==4);
     bool audio=!strcmp(name,"audio_test");
+    assert(priority==(audio?4:6));
+    assert(audio||pinned_creation);
     assert(stack==(audio?6144:12288));assert(audio||!strcmp(name,"pet_live"));
     if(!audio)assert_voice_deadline_start();
     if(fail_create){if(published)*published=(TaskHandle_t)(uintptr_t)1;return 0;}
@@ -122,6 +124,13 @@ static int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *
     while(!atomic_load(&task_attempted))sched_yield(); /* Start BEFORE handle publication. */
     *published=task;
     return pdPASS;
+}
+static int xTaskCreatePinnedToCore(void (*fn)(void *),const char *name,unsigned stack,void *arg,
+                                 unsigned priority,TaskHandle_t *published,int core) {
+    assert(!strcmp(name,"pet_live")&&core==1&&priority==6);
+    pinned_creation=true;
+    int result=xTaskCreate(fn,name,stack,arg,priority,published);
+    pinned_creation=false;return result;
 }
 static eTaskState eTaskGetState(TaskHandle_t task) {
     assert(held==1&&task&&!task->deleted);return atomic_load(&task->state);

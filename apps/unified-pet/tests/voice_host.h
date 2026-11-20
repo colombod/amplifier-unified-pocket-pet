@@ -82,6 +82,7 @@ static int64_t esp_timer_get_time(void);
 static unsigned xTaskGetTickCount(void);
 static void vTaskDelay(unsigned);
 static int xTaskCreate(void (*)(void *),const char *,unsigned,void *,unsigned,TaskHandle_t *);
+static int xTaskCreatePinnedToCore(void (*)(void *),const char *,unsigned,void *,unsigned,TaskHandle_t *,int);
 static void vTaskDelete(TaskHandle_t);
 static void vTaskSuspend(TaskHandle_t);
 static eTaskState eTaskGetState(TaskHandle_t);

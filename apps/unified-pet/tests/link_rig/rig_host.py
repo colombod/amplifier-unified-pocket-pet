@@ -47,7 +47,8 @@ class Call:
         self.mic_bytes = 0
         self.zero_samples = 0
         self.voice_samples = 0
-        self.phase: int | None = None
+        self.next_pair: int | None = None
+        self.gap_samples = 0
         self.order_errors = 0
         self.first_audio: float | None = None
         self.max_late = 0.0
@@ -69,20 +70,29 @@ class Call:
         self.late_by_second[second] = max(self.late_by_second.get(second, 0.0), late)
         if late > self.max_late:
             self.max_late, self.late_at = late, now - (self.began_at or now)
-        position = self.mic_bytes // 2
-        for index, (value,) in enumerate(struct.iter_unpack("<H", pcm)):
-            if value == 0:
-                self.zero_samples += 1
+        if len(pcm) % 4:
+            self.order_errors += 1
+            return
+        for low, high in struct.iter_unpack("<HH", pcm):
+            if low == high == 0:
+                self.zero_samples += 2
+                if self.next_pair is not None:
+                    self.next_pair += 1
                 continue
-            self.voice_samples += 1
-            phase = (value - 0x1000 - (position + index)) % 0x2000
-            if not 0x1000 <= value < 0x3000:
+            self.voice_samples += 2
+            if not low or not high:
                 self.order_errors += 1
-            elif self.phase is None:
-                self.phase = phase
-            elif phase != self.phase:
+                continue
+            pair = low - 1 + (high - 1) * 65535
+            if self.next_pair is not None and pair < self.next_pair:
                 self.order_errors += 1
-                self.phase = phase  # count each discontinuity once
+                continue  # never move the frontier backwards on replay
+            if self.next_pair is not None:
+                gap = pair - self.next_pair
+                if gap % 240:  # capture drops only whole 960-byte chunks
+                    self.order_errors += 1
+                self.gap_samples += gap * 2
+            self.next_pair = pair + 1
         self.frames.append((now - (self.began_at or now), len(pcm)))
         self.mic_bytes += len(pcm)
 
@@ -97,6 +107,7 @@ class Call:
             "mic_voice_samples": self.voice_samples,
             "mic_silence_samples": self.zero_samples,
             "mic_order_errors": self.order_errors,
+            "mic_gap_samples": self.gap_samples,
             "mic_max_late_seconds": round(self.max_late, 3),
             "mic_max_late_at_seconds": round(self.late_at, 3),
             "mic_late_by_second": {str(k): round(v, 2) for k, v in sorted(self.late_by_second.items())},
@@ -270,5 +281,31 @@ async def main(argv: list[str]) -> None:
         await server.serve_forever()
 
 
+def self_test() -> None:
+    def pcm(*positions):
+        return b"".join(struct.pack("<HH", 1 + p % 65535, 1 + p // 65535) for p in positions)
+    call = Call(1, 0)
+    call.audio(1, pcm(65534, 65535, 65536))  # digit carry is not a gap
+    assert call.order_errors == call.gap_samples == 0
+    call.audio(2, pcm(70337, 70338))  # 4800-pair gap: longer than the old cycle
+    assert call.order_errors == 0 and call.gap_samples == 9600
+    call.audio(3, pcm(70338))  # duplicate
+    assert call.order_errors == 1 and call.next_pair == 70339
+    call.audio(4, pcm(65535))  # reordered old chunk
+    assert call.order_errors == 2 and call.next_pair == 70339
+    call.audio(5, b"\0" * 8 + pcm(70341))  # gated silence advances the frontier
+    assert call.order_errors == 2 and call.next_pair == 70342
+    call.audio(6, b"\1\0\0\0")  # half-silence / misaligned digits are invalid
+    assert call.order_errors == 3
+    call.audio(7, b"\1\0")  # partial pair invalid
+    assert call.order_errors == 4
+    call.audio(8, pcm(70343))  # forward gap not a whole capture chunk
+    assert call.order_errors == 5
+    print("PASS rig microphone oracle: 8 gap/replay/order/silence/alignment checks")
+
+
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1:]))
+    if sys.argv[1:] == ["--self-test"]:
+        self_test()
+    else:
+        asyncio.run(main(sys.argv[1:]))

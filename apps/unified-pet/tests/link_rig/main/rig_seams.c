@@ -5,7 +5,7 @@
  * Microphone and speaker run in real time. The microphone produces a counter
  * pattern that is never zero, so the host can tell every real sample from the
  * digital silence the device substitutes while its speaker is audible, and can
- * check that nothing was dropped, repeated or reordered. */
+ * distinguish forward gaps from repeated or reordered input. */
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -136,9 +136,14 @@ esp_err_t audio_stream_read(audio_session_t *s,void *pcm,unsigned bytes){
     s->mic_next+=(int64_t)bytes*1000000/48000;
     until(s->mic_next);
     uint8_t *b=pcm;
-    for(unsigned i=0;i+1<bytes;i+=2){
-        unsigned v=0x1000u+(unsigned)(mic_index++&0x1FFFu); /* 4096..12287: never zero */
-        b[i]=(uint8_t)v;b[i+1]=(uint8_t)(v>>8);
+    /* Two nonzero 16-bit digits encode an absolute sample-pair index. Unlike
+     * the former 8192-sample cycle, a multi-second drop cannot alias replay.
+     * Whole 960-byte drops and silence substitution preserve pair alignment. */
+    for(unsigned i=0;i+3<bytes;i+=4){
+        uint64_t pair=mic_index/2;mic_index+=2;
+        unsigned low=1+(unsigned)(pair%65535),high=1+(unsigned)(pair/65535);
+        b[i]=(uint8_t)low;b[i+1]=(uint8_t)(low>>8);
+        b[i+2]=(uint8_t)high;b[i+3]=(uint8_t)(high>>8);
     }
     atomic_fetch_add(&mic_bytes,bytes);
     return ESP_OK;

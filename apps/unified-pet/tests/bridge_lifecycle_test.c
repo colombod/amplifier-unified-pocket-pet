@@ -617,6 +617,7 @@ static size_t xStreamBufferReceive(StreamBufferHandle_t s,void *p,size_t n,unsig
     memmove(s->bytes,s->bytes+n,s->n-n);s->n-=n;return n;
 }
 static size_t xStreamBufferBytesAvailable(StreamBufferHandle_t s){return s->n;}
+static size_t xStreamBufferSpacesAvailable(StreamBufferHandle_t s){return sizeof(s->bytes)-s->n;}
 int xSemaphoreTake(SemaphoreHandle_t s,unsigned ticks){(void)ticks;assert(s==&model_guard);return pthread_mutex_lock(&s->mutex)==0;}
 int xSemaphoreGive(SemaphoreHandle_t s){assert(s==&model_guard&&!pthread_mutex_unlock(&s->mutex));return pdTRUE;}
 static void *heap_caps_malloc(size_t n,unsigned flags){(void)flags;return malloc(n);}

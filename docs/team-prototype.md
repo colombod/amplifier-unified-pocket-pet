@@ -618,6 +618,20 @@ known. Sustained loss of a few percent, or a blackout of seconds, still ends a
 call; with the mic on the pet then starts a new one, and microphone audio not
 yet sent is discarded, never sent later.
 
+### Voice scheduling and stalled links (`0.3.12-voice-steady`)
+
+On-device bench comparisons identified two causes of self-ending calls: the
+voice owner shared a core at the animated display's priority and fell behind,
+and 1–5 s link stalls filled the two-second microphone FIFO. The owner now runs
+on core 1 at priority 6. Conversations allow a microphone send up to 5 s,
+wait up to 3 s for host-message queue room, and drop whole newest microphone
+or reply-audio chunks when their buffers are full. Buffered microphone audio
+is sent once in order, never replayed; dropped audio is a gap. A send stalled
+longer than about 5 s still ends the call as a lost connection. One-turn mode
+retains its earlier behavior. Only the private bench candidate was run on the
+device (24 calls without self-ending, including a 2.7 s stall); the normal
+`0.3.12-voice-steady` build is not physically qualified.
+
 The draft gateway no longer sends a request while the pet's audio is known to be
 arriving late, catching up, or still queued toward the provider: it waits for the
 stream to recover and for a fresh quiet period, so trailing words are not cut off

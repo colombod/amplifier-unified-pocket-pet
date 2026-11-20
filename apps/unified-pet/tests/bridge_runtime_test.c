@@ -65,6 +65,8 @@ static char wire[TEST_WIRE_CAP][7000];
 typedef struct {char *text;int64_t received_at;bool after_local_control;} fixture_frame_t;
 static fixture_frame_t received[4];
 static unsigned received_n;
+static unsigned queue_waits,queue_wait_mode,last_send_limit;
+static void queue_wait_tick(unsigned ms);
 static unsigned char played_bytes[32000];
 /* All A5 state is inert during the unchanged legacy main body. */
 static bool a5_enabled,a5_producer,a5_overflow,a5_timed_read,a5_fast_read;
@@ -82,7 +84,7 @@ static int64_t a5_frontier;
 static size_t a5_produced,a5_consumed_n,a5_wire_pcm,a5_highwater,a5_last_n,a5_last_pending,a5_read_bytes;
 static unsigned char a5_consumed[A5_PCM_CAP];
 static StreamBufferHandle_t a5_mic;
-enum a5_event { A5_EVENT_NONE,A5_EVENT_STOP,A5_EVENT_FAILURE,A5_EVENT_PARENT,A5_EVENT_FAILED_FLAG };
+enum a5_event { A5_EVENT_NONE,A5_EVENT_STOP,A5_EVENT_FAILURE,A5_EVENT_PARENT,A5_EVENT_FAILED_FLAG,A5_EVENT_END };
 static enum a5_event a5_event;
 static int64_t a5_event_at;
 static unsigned a5_event_sends;
@@ -120,7 +122,11 @@ static void stream_check(StreamBufferHandle_t s){
     assert(s&&s->before==STREAM_CANARY&&s->after==STREAM_CANARY&&s->n<=BV_TEST_CAP);
 }
 static void *heap_caps_malloc(size_t n,unsigned flags){(void)flags;return malloc(n);}
-static int xQueueSend(QueueHandle_t q,const void *p,unsigned ms){(void)q;(void)ms;if(received_n==4)return 0;memcpy(&received[received_n++],p,sizeof(received[0]));return pdTRUE;}
+static int xQueueSend(QueueHandle_t q,const void *p,unsigned ms){
+    (void)q;if(received_n==4&&ms)queue_wait_tick(ms);
+    if(received_n==4)return 0;
+    memcpy(&received[received_n++],p,sizeof(received[0]));return pdTRUE;
+}
 static unsigned uxQueueMessagesWaiting(QueueHandle_t q){(void)q;return received_n;}
 static int xQueueReceive(QueueHandle_t q,void *out,unsigned ms){
     (void)q;(void)ms;if(!received_n)return pdFALSE;
@@ -160,6 +166,7 @@ static unsigned xEventGroupSetBits(EventGroupHandle_t e,unsigned bits){e->bits|=
 static unsigned xEventGroupClearBits(EventGroupHandle_t e,unsigned bits){e->bits&=~bits;return e->bits;}
 static unsigned xEventGroupWaitBits(EventGroupHandle_t e,unsigned bits,int clear,int all,unsigned ms){(void)clear;(void)all;wait_ms=ms;if((e->bits&bits)!=bits)now+=(int64_t)ms*1000;return e->bits;}
 static size_t xStreamBufferBytesAvailable(StreamBufferHandle_t s){stream_check(s);return s->n;}
+static size_t xStreamBufferSpacesAvailable(StreamBufferHandle_t s){stream_check(s);return BV_TEST_CAP-s->n;}
 static size_t xStreamBufferSend(StreamBufferHandle_t s,const void *p,size_t n,unsigned ms){
     (void)ms;stream_check(s);
     if(n>BV_TEST_CAP-s->n)n=BV_TEST_CAP-s->n; /* RTOS zero-wait partial write */
@@ -209,7 +216,7 @@ static bool bridge_transport_dispose_result(bridge_transport_t *t,int64_t until,
 static void audio_stream_close(audio_session_t *a){assert(!model_lock_held);codec_closes++;free(a);}
 static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const char *s,size_t n,unsigned ms){
     assert(!model_lock_held); /* no model guard across the blocking SDK call */
-    (void)h;assert(sends<TEST_WIRE_CAP&&n<7000);memcpy(wire[sends],s,n);wire[sends++][n]=0;
+    (void)h;last_send_limit=ms;assert(sends<TEST_WIRE_CAP&&n<7000);memcpy(wire[sends],s,n);wire[sends++][n]=0;
     if(strstr(s,"session.input_audio.append")){
         wire_bytes+=(unsigned)n;
         if(a5_enabled)a5_observe_append(s,n,ms);
@@ -256,6 +263,18 @@ static void vTaskDelay(unsigned ms){
 /* Parent Stop may be injected at final send-admission guard, before it decides. */
 static bool parent_stopped(void){return a5_parent_stop;}
 static bridge_voice_t context;
+/* Deterministic interleave at the RTOS queue wait, not a scheduler model.
+ * Existing cleanup cases separately pin final-access proof before free. */
+static void queue_wait_tick(unsigned ms){
+    assert(!model_lock_held&&ms==10);
+    queue_waits++;now+=(queue_wait_mode==7?1000000:(int64_t)ms*1000);
+    if(queue_waits!=2)return;
+    if(queue_wait_mode==1){free(received[0].text);memmove(received,received+1,--received_n*sizeof(*received));}
+    else if(queue_wait_mode==2)bridge_voice_stop();
+    else if(queue_wait_mode==3)a5_parent_stop=true;
+    else if(queue_wait_mode==4)atomic_store(&context.failed,true);
+    else if(queue_wait_mode==5)atomic_store(&context.active,false);
+}
 static struct {unsigned bits;} ev;
 static struct test_stream mic,speaker;
 static bridge_transport_t transport;
@@ -264,6 +283,7 @@ static char assembly[96000];
 static void reset(void){
     for(unsigned i=0;i<received_n;i++)free(received[i].text);
     received_n=0;memset(played_bytes,0,sizeof(played_bytes));
+    queue_waits=queue_wait_mode=last_send_limit=0;
     memset(&context,0,sizeof(context));memset(&ev,0,sizeof(ev));memset(&mic,0,sizeof(mic));memset(&speaker,0,sizeof(speaker));memset(wire,0,sizeof(wire));
     mic.before=mic.after=speaker.before=speaker.after=STREAM_CANARY;
     a5_enabled=a5_producer=a5_overflow=a5_timed_read=a5_fast_read=a5_jitter=false;
@@ -371,6 +391,7 @@ static void a5_inject(void){
     else if(event==A5_EVENT_FAILURE)failure(&context,"reply_unavailable");
     else if(event==A5_EVENT_PARENT)a5_parent_stop=true;
     else if(event==A5_EVENT_FAILED_FLAG)atomic_store(&context.failed,true);
+    else if(event==A5_EVENT_END)atomic_store(&context.active,false);
 }
 static void a5_advance_us(int64_t us){
     assert(us>=0);
@@ -465,19 +486,19 @@ static void a5_observe_append(const char *s,size_t n,unsigned timeout_ms){
         int64_t gap=now-a5_last_start;
         /* At most one 5ms owner-wait quantum of timing jitter may be recovered;
          * a running deadline must not turn a long stall into a burst. */
-        if(gap<duration-5000)a5_burst++;
+        if(gap<duration/(atomic_load(&context.converse)?2:1)-5000)a5_burst++;
         /* With pending PCM and latency within this frame's budget, network
          * time cannot become an extra period of idle. 10ms permits tick edges. */
         if(a5_last_pending>=960&&a5_last_return-a5_last_start<=duration&&gap>duration+10000)
             a5_cadence_late++;
     }
-    int64_t prior=(int64_t)a5_wire_pcm*1000000/48000;
+    int64_t prior=(int64_t)a5_wire_pcm*1000000/48000/(atomic_load(&context.converse)?2:1);
     if(!a5_appends){a5_first_start=now;a5_frontier=now;}
     else assert(a5_window_ok(prior,now,a5_frontier));
     if(now-prior>a5_frontier)a5_frontier=now-prior;
     /* Independent cumulative rate oracle: repeated 5ms credit cannot grow into
      * an arbitrarily early stream, even when each pairwise gap looks bounded. */
-    assert(now-a5_first_start+5000>=(int64_t)a5_wire_pcm*1000000/48000);
+    assert(now-a5_first_start+5000>=prior);
     a5_last_start=now;a5_last_n=bytes;
     a5_last_due=now+(int64_t)bytes*1000000/48000;
     a5_wire_pcm+=bytes;a5_appends++;
@@ -1042,6 +1063,81 @@ static void mic_controls(const char *name){
     }
 }
 #endif
+static void conversation_drop(bool near_full){
+    a5_begin(0);a5_seed(near_full?95040:96000);
+    /* Leave only half a chunk free as well: no partial admission is allowed. */
+    if(near_full){mic.n+=480;a5_produced+=480;for(size_t i=95040;i<mic.n;i++)mic.data[i]=a5_byte(i);}
+    size_t buffered=mic.n;
+    atomic_store(&context.converse,true);a5_timed_read=true;
+    a5_event=A5_EVENT_END;a5_event_at=now+300000;
+    capture_task(&context);
+    assert(reads==15&&!atomic_load(&context.failed)&&mic.n==buffered&&sends==0);
+    for(size_t i=0;i<buffered;i++)assert(mic.data[i]==a5_byte(i));
+#if defined(PET_PRIVATE_MIC_DIAG)
+    assert(context.mic_bins[0].read==14400&&context.mic_bins[0].startup==9600);
+    assert(!context.mic_bins[0].admitted&&!context.mic_bins[0].gated);
+#endif
+    atomic_store(&context.active,true);context.model.phase=BR_SETTLING;
+    int64_t next=0;assert(finish_capture(&context,&next));
+    assert(a5_appends==20&&a5_finishes==1&&a5_wire_pcm==buffered);
+    a5_exact_complete();
+    unsigned sent=sends;a5_until=now+20000;production_capture_owner(&context,&next);
+    assert(sends==sent&&mic.n==0); /* owner cannot replay the drained input */
+}
+static void queue_case(const char *name){
+    reset();atomic_store(&context.accepting,true);
+    bool one=!strcmp(name,"queue-one-turn");atomic_store(&context.converse,!one);
+    queue_wait_mode=!strcmp(name,"queue-drain")?1:!strcmp(name,"queue-stop")?2:
+        !strcmp(name,"queue-parent")?3:!strcmp(name,"queue-failure")?4:
+        !strcmp(name,"queue-end")?5:!strcmp(name,"queue-descheduled")?7:6;
+    for(unsigned i=0;i<4;i++)received[received_n++]=(fixture_frame_t){.text=strdup("old")};
+    const char valid[]="{\"type\":\"session.closed\"}";
+    esp_websocket_event_data_t frame={.data_len=sizeof(valid)-1,.payload_len=sizeof(valid)-1,.op_code=1,.fin=true,.data_ptr=valid};
+    int64_t begin=now;ws_event(&context,NULL,WEBSOCKET_EVENT_DATA,&frame);
+    assert(received_n==4&&sends==0);
+    if(queue_wait_mode==1){
+        assert(queue_waits==2&&now-begin==20000&&!atomic_load(&context.failed));
+        assert(!strcmp(received[3].text,valid));
+        for(unsigned i=0;i<3;i++)assert(!strcmp(received[i].text,"old"));
+    }else{
+        assert(atomic_load(&context.failed)&&atomic_load(&context.ingress_incomplete));
+        for(unsigned i=0;i<4;i++)assert(!strcmp(received[i].text,"old"));
+        if(one)assert(queue_waits==0&&now==begin);
+        else if(queue_wait_mode<6)assert(queue_waits==2&&now-begin==20000);
+        else assert(now-begin==BV_FRAME_WAIT_MS*1000&&queue_waits==(queue_wait_mode==7?3:300));
+        if(queue_wait_mode==2||queue_wait_mode==3){
+            assert(atomic_load(&context.stop)&&atomic_load(&context.muted));
+            assert(!atomic_load(&context.capture_gate)&&!atomic_load(&context.play_gate));
+            assert(!send_frame(&context,"audio")&&sends==0);
+        }
+    }
+    reset(); /* release fixture-owned queue strings under ASan */
+}
+static void speaker_room(void){
+    for(unsigned conv=0;conv<2;conv++)for(unsigned off=0;off<2;off++){
+        reset();context.decoded=append;context.model.converse=conv;
+        speaker.n=BV_TEST_CAP-1;memset(speaker.data,0x5a,speaker.n);
+        atomic_store(&context.play_gate,true);if(off)bridge_voice_stop();
+        production_reply_audio(&context,"AQIDBA=="); /* four bytes */
+        assert(speaker.n==(conv||off?BV_TEST_CAP-1:BV_TEST_CAP));
+        assert(atomic_load(&context.failed)==(!conv||off));
+        assert(context.received_pcm==0);
+        for(size_t i=0;i<BV_TEST_CAP-1;i++)assert(speaker.data[i]==0x5a);
+        if(!conv&&!off)assert(speaker.data[BV_TEST_CAP-1]==1); /* original partial write */
+    }
+    reset();context.decoded=append;context.model.converse=true;atomic_store(&context.play_gate,true);
+    production_reply_audio(&context,"AQIDBA==");
+    assert(!atomic_load(&context.failed)&&context.received_pcm==4&&speaker.n==4);
+    assert(!memcmp(speaker.data,"\1\2\3\4",4));
+}
+static void send_limits(void){
+    for(unsigned conv=0;conv<2;conv++){
+        reset();atomic_store(&context.converse,conv);int64_t next=0;
+        assert(append_audio(&context,960,&next)&&sends==1);
+        assert(last_send_limit==(conv?BV_STALL_MS:BV_SEND_MS));
+        bridge_voice_stop();assert(!append_audio(&context,960,&next)&&sends==1);
+    }
+}
 int main(int argc,char **argv){
     setbuf(stdout,NULL);
     const char *name=argc==1?"legacy":argv[1];
@@ -1052,7 +1148,12 @@ int main(int argc,char **argv){
     else if(!strncmp(name,"mic-",4))mic_controls(name);
     else
 #endif
-    if(!strncmp(name,"cleanup-",8))cleanup_case(name);
+    if(!strcmp(name,"conversation-drop"))conversation_drop(false);
+    else if(!strcmp(name,"conversation-near-full"))conversation_drop(true);
+    else if(!strncmp(name,"queue-",6))queue_case(name);
+    else if(!strcmp(name,"speaker-room"))speaker_room();
+    else if(!strcmp(name,"send-limits"))send_limits();
+    else if(!strncmp(name,"cleanup-",8))cleanup_case(name);
     else if(!strcmp(name,"legacy"))legacy_cases();
     else if(!strcmp(name,"realtime-0"))a5_realtime(name,0,10);
     else if(!strcmp(name,"realtime-25"))a5_realtime(name,25,10);

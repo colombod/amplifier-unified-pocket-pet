@@ -32,13 +32,21 @@ for name in names:
     # Braces in strings balance in these bodies; no preprocessor body replacement.
     depth=1
     end=pos+1
-    while depth:
+    while depth and name!="live_voice_start":
         depth += (text[end]=="{")-(text[end]=="}")
         end+=1
+    if name=="live_voice_start":
+        # Alternate preprocessor branches each open the same creation-failure
+        # if. Preserve both verbatim; raw brace counting sees an extra open.
+        end=text.index("\n}",pos)+2
+        assert text[end:].startswith("\nvoid live_voice_stop(")
     body=text[match.start():end]+"\n"
     hashes[name]=hashlib.sha256(body.encode()).hexdigest()
     parts.append(f'#line {text.count(chr(10),0,match.start())+1} "{source}"\n'+body)
 definitions=parts[0]
+for line in text.splitlines():
+    if re.match(r'^#define VOICE_OWNER_(CORE|PRIORITY)\b',line):
+        parts.insert(1,line)
 hashes["connection-and-globals"]=hashlib.sha256(definitions.encode()).hexdigest()
 prefix='#define PET_VOICE_METRICS 1\n' if "voice_pipeline_t" in definitions else ""
 (out/"voice-production.inc").write_text(prefix+"\n".join(parts),encoding="utf-8")

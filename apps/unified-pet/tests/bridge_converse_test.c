@@ -236,8 +236,22 @@ static QueueHandle_t xQueueCreate(unsigned n,size_t size){
 static int64_t late_min_us,late_max_us,owner_stall_at,owner_stall_us;
 static uint32_t late_seed;
 static unsigned frames_high;
+/* Ending-evidence regressions inject a lying capacity probe to exercise the
+ * defensive short-enqueue failure even though ordinary conversation overflow
+ * now drops. They do not claim a real FIFO overflow still ends a conversation. */
+static bool force_capture_short;
+static void queue_fault_stall(void){
+    force_capture_short=true;owner_stall_at=now+3000000;owner_stall_us=2600000;
+}
+static uint64_t capture_positions[40000];
+static unsigned capture_positions_n,capture_positions_sent,capture_position_offset;
+static uint64_t fixture_capture_position;
 static int xQueueSend(QueueHandle_t q,const void *p,unsigned ticks){
-    assert(!ticks);if(q->n==q->cap)return pdFALSE;memcpy(&q->items[q->n++],p,sizeof(q->items[0]));
+    /* Event scripts deliver callbacks synchronously, not on a reader task.
+     * Saturation here stays full for the requested interval; focused runtime
+     * tests separately interleave owner drain/Stop/failure with queue waits. */
+    if(q->n==q->cap){now+=(int64_t)ticks*1000;return pdFALSE;}
+    memcpy(&q->items[q->n++],p,sizeof(q->items[0]));
     if(q->n>frames_high)frames_high=q->n;
     return pdTRUE;
 }
@@ -261,6 +275,10 @@ static StreamBufferHandle_t xStreamBufferCreateStatic(size_t size,size_t trigger
     s->cap=size-1;s->data=malloc(s->cap);assert(s->data);streams_made++;return s;
 }
 static size_t xStreamBufferBytesAvailable(StreamBufferHandle_t s){return s->n;}
+static size_t xStreamBufferSpacesAvailable(StreamBufferHandle_t s){
+    if(force_capture_short&&s->cap==96000&&s->n==s->cap)return 960; /* injected probe fault */
+    return s->cap-s->n;
+}
 static size_t mic_high,mic_waiting; /* microphone audio captured but not yet sent */
 static unsigned mic_short_writes;
 static size_t xStreamBufferSend(StreamBufferHandle_t s,const void *p,size_t n,unsigned ticks){
@@ -268,6 +286,11 @@ static size_t xStreamBufferSend(StreamBufferHandle_t s,const void *p,size_t n,un
     if(n>s->cap-s->n){ /* zero-wait partial write, as the RTOS */
         if(s->cap==96000)mic_short_writes++;
         n=s->cap-s->n;
+    }
+    if(s->cap==96000&&n){
+        assert(n==960&&capture_positions_n<40000);
+        if(capture_positions_n)assert(fixture_capture_position>capture_positions[capture_positions_n-1]);
+        capture_positions[capture_positions_n++]=fixture_capture_position;
     }
     memcpy(s->data+s->n,p,n);s->n+=n;if(s->n>s->high)s->high=s->n;
     if(s->cap==96000){mic_waiting=s->n;if(s->n>mic_high)mic_high=s->n;}
@@ -369,6 +392,7 @@ static esp_err_t audio_stream_read(audio_session_t *a,void *p,unsigned n){
         unsigned v=echo?0x7000u+(unsigned)(mic_samples%0x800):mic_stamp(mic_call,mic_samples);
         bytes[i]=(unsigned char)v;bytes[i+1]=(unsigned char)(v>>8);
     }
+    fixture_capture_position=mic_samples-480;
     return ESP_OK;
 }
 static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){
@@ -450,6 +474,7 @@ static bridge_transport_t *bridge_transport_new(const setup_bridge_t *cfg,const 
     assert(call_no<63);call_at[++call_no]=now;base=now;
     assert(deadline==now+SESSION_US);
     sent_n=0;call_appends=0;call_mic_sent=0;send_failed=false;began_sent=false;
+    capture_positions_n=capture_positions_sent=capture_position_offset=0;
     transport=(bridge_transport_t){.deadline=deadline};session_deadline=deadline;transport_live=true;
     void (*plan)(void)=call_no<=32&&plans[call_no-1]?plans[call_no-1]:call_no>1||plans[0]?plan_rest:NULL;
     if(plan)plan();
@@ -523,11 +548,10 @@ static void later(int64_t us,ev_kind kind,const char *text){
 }
 static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const char *s,size_t n,unsigned ticks){
     bool audio=!strncmp(s,APPEND,sizeof(APPEND)-1);
-    /* Only a conversation's microphone frame may wait longer than 1 s, and
-     * never longer than the room its 2 s buffer still had, less 200 ms. */
-    assert(h==&transport&&!guard_held&&ticks&&ticks<=(audio?1800u:1000u)&&n==strlen(s));
+    /* Conversations use the measured 5 s limit independent of FIFO room. */
+    assert(h==&transport&&!guard_held&&ticks&&ticks<=(audio?5000u:1000u)&&n==strlen(s));
     if(audio){
-        assert(ticks==1000||(size_t)ticks*48+9600<=96000-mic_waiting+960);
+        assert(ticks==(unsigned)((session_deadline-now)/1000<5000?(session_deadline-now)/1000:5000));
         if(ticks>send_limit_high)send_limit_high=ticks;
     }
     assert(transport.started&&!transport.cancelled); /* nothing leaves after the fence */
@@ -561,8 +585,10 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
          * connection appears once, in order. A sample captured in an earlier
          * connection carries another stamp and would fail here. */
         assert(mic_call==call_no);
-        if(!call_appends)wire_samples=open_samples+4800;
+        if(!call_appends)assert(capture_positions[capture_positions_sent]==open_samples+4800);
         for(size_t i=0;i<bytes;i+=2,wire_samples++){
+            assert(capture_positions_sent<capture_positions_n);
+            wire_samples=capture_positions[capture_positions_sent]+capture_position_offset;
             unsigned v=pcm[i]|(unsigned)pcm[i+1]<<8;
             if(!v)zero_bytes+=2;
             else if(v>=0x7000)echo_bytes+=2;
@@ -572,6 +598,7 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
                         (unsigned long long)wire_samples,call_no,v);
                 assert(v==mic_stamp(call_no,wire_samples));speech_bytes+=2;
             }
+            if(++capture_position_offset==480){capture_position_offset=0;capture_positions_sent++;}
         }
         assert(wire_samples<=mic_samples);
         /* Over ANY span of sends, never more than twice real time (one 20 ms
@@ -887,6 +914,7 @@ static void fresh(void){
     send_wait_at=send_wait_us=0;
     sent_n=appends=appends_before_begin=0;mic_sent=echo_bytes=zero_bytes=speech_bytes=0;send_latency_us=2000;
     mic_samples=wire_samples=0;mic_high=mic_waiting=0;mic_short_writes=0;frames_high=0;
+    force_capture_short=false;capture_positions_n=capture_positions_sent=capture_position_offset=0;
     late_min_us=late_max_us=owner_stall_at=owner_stall_us=0;late_seed=20261115u;
     first_append_at=last_append_at=max_append_gap=rate_floor=0;rate_floor_set=false;peak_second=0;window_from=0;
     queues_made=queues_deleted=streams_made=streams_deleted=groups_made=groups_deleted=0;
@@ -898,7 +926,10 @@ static void opened(void){ /* the design's sequence up to "listening" */
 }
 /* Every sample this connection captured and was able to send reached the wire. */
 static void call_done(void){
-    if(call_appends)assert((wire_samples-open_samples)*2==9600+call_mic_sent&&wire_samples<=mic_samples);
+    if(call_appends){
+        assert(call_mic_sent/2==(uint64_t)capture_positions_sent*480+capture_position_offset);
+        assert(wire_samples<=mic_samples); /* forward gaps allowed; never replay/reorder */
+    }
 }
 /* One tap on the microphone button with a bridge configured: one mic-on. */
 static void call(bool retained){
@@ -1229,17 +1260,17 @@ static void host_end_race(const char *name){
     fresh();host_closes=false;
     const char *expect="Mic off (quiet)";live_state_t state=LIVE_OFF;
     if(!strcmp(name,"notice-queue")){
-        opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        opened();queue_fault_stall();
         at(5300,EV_TEXT,G_NOTICE("idle_timeout"));
     }else if(!strcmp(name,"notice-linger")){
-        opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        opened();queue_fault_stall();
         at(5700,EV_TEXT,G_NOTICE("time_limit"));at(5750,EV_WS_CLOSED,NULL);
         expect="Mic off (time limit)";
     }else if(!strcmp(name,"notice-begin")){
         at(40,EV_CONNECT,NULL);at(60,EV_TEXT,STARTED);
         at(30100,EV_TEXT,G_NOTICE("idle_timeout"));at(30150,EV_WS_CLOSED,NULL);
     }else if(!strcmp(name,"notice-user")){
-        opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        opened();queue_fault_stall();
         at(5700,EV_TEXT,G_NOTICE("idle_timeout"));at(5750,EV_MIC_OFF,NULL);at(5800,EV_WS_CLOSED,NULL);
         expect="Mic off";
     }else{
@@ -1262,13 +1293,13 @@ static void reviewed_races(void){
     max_calls=2;plans[1]=plan_again;call(false);stopped_cleanly(2);assert(new_calls==2);
     /* Permanent host error after queue overflow remains fatal even if followed
      * by a transient error and a normal-end notice during linger. */
-    fresh();opened();host_closes=false;owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();host_closes=false;queue_fault_stall();
     at(5700,EV_TEXT,"{\"type\":\"pet.error\",\"code\":\"model_mismatch\"}");
     at(5710,EV_TEXT,"{\"type\":\"pet.error\",\"code\":\"busy\"}");
     at(5720,EV_TEXT,G_NOTICE("idle_timeout"));at(5750,EV_WS_CLOSED,NULL);
     call(false);ended(LIVE_ERROR,"Host error: model_mismatch");assert(new_calls==1);
     /* An unprocessed tail frame on guard failure never grants a retry. */
-    fresh();opened();host_closes=false;owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();host_closes=false;queue_fault_stall();
     at(5700,EV_TEXT,G_NOTICE("idle_timeout"));check(5710,fail_tail_lock);at(5750,EV_WS_CLOSED,NULL);
     call(false);ended(LIVE_ERROR,"Voice connection interrupted.");assert(new_calls==1);
     /* The owner cannot lose an already-dequeued notice on a lock failure and
@@ -1284,7 +1315,7 @@ static void reviewed_races(void){
     call(false);ended(LIVE_ERROR,"Voice connection interrupted.");assert(new_calls==1);
     /* A previously admitted SDK DATA callback can arrive after cancellation
      * but before the transport task's final-access proof. */
-    fresh();opened();host_closes=false;owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();host_closes=false;queue_fault_stall();
     text_during_dispose=G_NOTICE("idle_timeout");
     call(false);ended(LIVE_OFF,"Mic off (quiet)");assert(new_calls==1);
 }
@@ -1320,7 +1351,7 @@ static void terminal_wire(void){
 }
 static void malformed_tail(void){
     /* Invalid JSON queued during release is still terminal, not a reconnect. */
-    fresh();opened();host_closes=false;owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();host_closes=false;queue_fault_stall();
     at(5700,EV_TEXT,"not json");at(5750,EV_WS_CLOSED,NULL);
     call(false);ended(LIVE_ERROR,"Host sent an invalid message.");assert(new_calls==1);
 }
@@ -1498,7 +1529,7 @@ static void send_wait(void){
     check(4300,backlog_seen);check(8000,backlog_gone);at(12000,EV_MIC_OFF,NULL);
     call(false);late_report("send-wait");stopped_cleanly(2);
     assert(new_calls==1&&!shown("Reconnecting...")&&!send_failed);
-    assert(send_limit_high>1700&&send_limit_high<=1800);  /* the room a nearly empty buffer leaves */
+    assert(send_limit_high==5000);
     assert(mic_high>=60000&&mic_high<96000&&mic_short_writes==0);
     assert(peak_second<=96000+4800&&mic_sent>(uint64_t)48000*11);
     assert(played_audible==host_audible);
@@ -1516,17 +1547,17 @@ static void send_wait_off(const char *name){
      * the tap, none is sent again, and no new call is made. */
     bool lost=!strcmp(name,"send-wait-off-lost");
     fresh();opened();host_audio(100);at(1900,EV_TEXT,G_STATE("answering"));says(2000,6000);
-    send_wait_at=run_start+3000000;send_wait_us=lost?2500000:1400000;
+    send_wait_at=run_start+3000000;send_wait_us=lost?6000000:1400000;
     at(3300,EV_MIC_OFF,NULL);check(3400,after_off);
     call(false);ended(LIVE_OFF,"Mic off");
     printf("%s: idle_after_off_ms=%lld send_limit_ms=%u played_after_off=%llu appends=%u frames=%u\n",name,
         (long long)((run_end-mic_off_at)/1000),send_limit_high,(unsigned long long)played_after_off,appends,sent_n);
     assert(new_calls==1&&!shown("Reconnecting...")&&appends==off_appends&&played_after_off<=960);
-    assert(mic_short_writes==0&&send_limit_high>1700&&send_limit_high<=1800);
+    assert(mic_short_writes==0&&send_limit_high==5000);
     if(lost){
-        /* The send is given up 1.8 s after it began, 1.5 s after the tap; the
+        /* The send is given up 5 s after it began, 4.7 s after the tap; the
          * connection is gone, so there is no stop to send. */
-        assert(send_failed&&sent_n==2&&run_end-mic_off_at<=1700000);
+        assert(send_failed&&sent_n==2&&run_end-mic_off_at>=4700000&&run_end-mic_off_at<=4900000);
     }else{
         /* The frame leaves 1.1 s after the tap, then the ordinary stop. */
         assert(!send_failed&&sent_n==4&&!strcmp(sent[2],PET_STOP)&&!strcmp(sent[3],SESSION_CLOSE));
@@ -1643,11 +1674,9 @@ static void re_drop(const char *name){
     else if(!strcmp(name,"re-error")){at(drop,EV_TEXT,"{\"type\":\"pet.error\",\"code\":\"reply_unavailable\"}");at(drop+10,EV_WS_CLOSED,NULL);}
     else if(!strcmp(name,"re-flood")){for(unsigned i=0;i<40;i++)at(drop,EV_TEXT,G_STATE("asking"));}
     else if(!strcmp(name,"re-send")){send_fail_at=140;drop=2800;} /* one microphone frame not fully written */
-    else if(!strcmp(name,"re-stall")){send_latency_us=900000;plans[1]=plan_again_fast;drop=0;} /* the link cannot carry the microphone */
+    else if(!strcmp(name,"re-stall")){send_latency_us=900000;host_next=0;plans[1]=plan_again_fast;drop=0;} /* isolate a link that cannot carry the microphone */
     else if(!strcmp(name,"re-stall-long")){owner_stall_at=run_start+3000000;owner_stall_us=2600000;drop=5600;}
-    /* The socket takes nothing for longer than the microphone buffer can cover:
-     * the send is given up 1.8 s in, before that buffer overflows. */
-    else if(!strcmp(name,"re-send-wait-long")){send_wait_at=run_start+3000000;send_wait_us=2500000;drop=4800;}
+    else if(!strcmp(name,"re-send-wait-long")){send_wait_at=run_start+3000000;send_wait_us=2500000;drop=5500;}
     else{assert(!strcmp(name,"re-listening"));at(drop,EV_WS_DROP,NULL);}
     if(!strcmp(name,"re-close")){
         call(false);ended(LIVE_OFF,"Mic off (call ended)");
@@ -1657,7 +1686,24 @@ static void re_drop(const char *name){
         call(false);ended(LIVE_ERROR,"Host error: reply_unavailable");
         assert(new_calls==1&&!shown("Reconnecting..."));return;
     }
-    if(!strcmp(name,"re-stall")||!strcmp(name,"re-stall-long")||!strcmp(name,"re-send")){
+    if(!strcmp(name,"re-stall")||!strcmp(name,"re-stall-long")||!strcmp(name,"re-send-wait-long")){
+        /* Full microphone FIFO drops newest chunks; one call survives until
+         * explicit mute, with admitted sample positions checked at the wire. */
+        max_calls=1;at(12000,EV_MIC_OFF,NULL);
+        call(false);
+        if(!strcmp(name,"re-stall")){
+            /* This fixture delays EVERY send, including both cleanup controls,
+             * by 900 ms. Audio must mute now; release includes those waits. */
+            ended(LIVE_OFF,"Mic off");
+            assert(sent_n==4&&!strcmp(sent[2],PET_STOP)&&!strcmp(sent[3],SESSION_CLOSE));
+            assert(!up_at_fence&&run_end-mic_off_at<=3*send_latency_us+50000&&played_after_off<=960);
+        }else stopped_cleanly(2);
+        assert(new_calls==1&&!shown("Reconnecting...")&&mic_high==96000&&mic_short_writes==0);
+        assert(send_limit_high==5000);
+        if(strcmp(name,"re-stall"))assert(!send_failed&&mic_sent>48000*10);
+        return;
+    }
+    if(!strcmp(name,"re-send")){
         /* The local failure is real, but the default peer answers cleanup with
          * valid session.closed. Its cause is unknowable: do not replace. */
         max_calls=1;
@@ -1683,7 +1729,6 @@ static void re_drop(const char *name){
     if(drop){check(drop+1000,waiting);check(drop+1900,still_quiet);}
     call(false);reconnect_report(name);stopped_cleanly(2);
     assert(new_calls==2&&opens==2&&closes==2&&tasks_created==4&&dispose_calls==2);
-    if(!strcmp(name,"re-send-wait-long"))assert(send_limit_high>1700&&mic_high>=80000&&mic_high<96000&&mic_short_writes==0);
     assert(shown(first)&&shown("Reconnecting...")&&inhibits>=2);
     if(drop&&strcmp(name,"re-send"))assert(call_at[2]-(run_start+drop*1000)>=2000000&&call_at[2]-(run_start+drop*1000)<=2200000);
     /* The lost call was never told to stop (its link was gone); the new one was. */
@@ -1695,7 +1740,7 @@ static void inject_queued_close(void){inject_before_control=true;}
 static void retry_boundaries(void){
     /* Overflow with queued asking then normal close. Neither the independent
      * host ending nor cleanup settles that observed pending send. */
-    fresh();opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();queue_fault_stall();
     at(5300,EV_TEXT,G_STATE("asking"));at(5310,EV_TEXT,CLOSED);
     call(false);ended(LIVE_ERROR,PENDING_TEXT);
     assert(new_calls==1&&frames_high>=2);
@@ -1703,7 +1748,7 @@ static void retry_boundaries(void){
     /* A callback arrives after the first empty tail drain, but before the
      * control admission. Its queued snapshot remains authoritative when the
      * second tail drain runs after local stop/close. */
-    fresh();opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();queue_fault_stall();
     check(5400,inject_queued_close);
     call(false);ended(LIVE_OFF,"Mic off (call ended)");
     assert(new_calls==1&&injected_pre_control==1);
@@ -1711,7 +1756,7 @@ static void retry_boundaries(void){
     /* Even inside a full or short pet.stop send, valid session.closed ends
      * replacement eligibility. A short result is uncertain, never repeated. */
     for(unsigned short_send=0;short_send<2;short_send++){
-        fresh();opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        fresh();opened();queue_fault_stall();
         reply_during_stop=true;short_stop=short_send!=0;plans[1]=plan_simple_stop;
         call(false);ended(LIVE_OFF,"Mic off (call ended)");
         assert(new_calls==1&&mic_high==96000&&stop_replies==1&&short_stops==short_send&&frames_total==4);
@@ -1740,7 +1785,7 @@ static void retry_boundaries(void){
     /* This fragmented host close began before local controls but completes
      * during disposal, after the overflow prompted those controls. */
     for(unsigned rfc=0;rfc<2;rfc++){
-        fresh();opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        fresh();opened();queue_fault_stall();
         at(5300,EV_PARTIAL_TEXT,CLOSED);finish_during_dispose=true;fragment_rfc6455=rfc!=0;host_closes=false;
         call(false);ended(LIVE_OFF,"Mic off (call ended)");
         assert(new_calls==1&&fragment_starts_before==1&&fragment_starts_after==0&&fragment_finishes_after==1);
@@ -1751,7 +1796,7 @@ static void retry_boundaries(void){
      * either cause. Its valid completion during disposal vetoes replacement,
      * including when our local send returned short. */
     for(unsigned rfc=0;rfc<2;rfc++)for(unsigned short_send=0;short_send<2;short_send++){
-        fresh();opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        fresh();opened();queue_fault_stall();
         fragment_reply_on_stop=true;fragment_rfc6455=rfc!=0;short_stop=short_send!=0;
         host_closes=false;plans[1]=plan_simple_stop;
         call(false);ended(LIVE_OFF,"Mic off (call ended)");
@@ -1763,7 +1808,7 @@ static void retry_boundaries(void){
 
     /* A local-control-era prefix is not enough to classify an unknown frame.
      * If the callback never completes it, settled assembly must veto retry. */
-    fresh();opened();owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    fresh();opened();queue_fault_stall();
     fragment_reply_on_stop=true;fragment_rfc6455=true;drop_fragment_completion=true;host_closes=false;
     call(false);ended(LIVE_ERROR,"Voice connection interrupted.");
     assert(new_calls==1&&mic_high==96000&&stop_replies==1&&fragment_starts_after==1);
@@ -1806,7 +1851,7 @@ static void ending_ingress(void){
     ending_probe.first_order=++ending_probe.serial;
 }
 static void ending_queued_after_failure(void){
-    /* The audio task really overflowed while the owner was blocked. The first
+    /* The injected capacity-probe fault caused a real short enqueue while the owner was blocked. The first
      * terminal frame is waiting for the first cleanup tail, not the main loop. */
     assert(current&&atomic_load(&current->failed)&&current->model.phase==BR_CLOSING);
     assert(atomic_load(&current->exit_reason)==BV_EXIT_QUEUE&&mic_high==96000);
@@ -1905,8 +1950,8 @@ static void terminal_error_cleanup(const char *name){
     bool post=!strcmp(name,"terminal-error-tail-post");
     bool muted=!strcmp(name,"terminal-error-muted");
     if(local||queued||pre||post){
-        /* Actual capture-task overflow, not a forged owner reason/model. */
-        owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        /* Injected capacity-probe fault; actual capture-task failure path, not a forged owner reason/model. */
+        queue_fault_stall();
         if(local){
             ending_probe.first=NULL;ending_probe.normal=local_normal;
         }else if(queued){
@@ -1982,7 +2027,7 @@ static void uncertain_ending(const char *name){
     }else{
         assert(queued||!strcmp(name,"uncertain-tail-post")||tail_muted);
         ending_script(G_NOTICE("send_uncertain"));
-        owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        queue_fault_stall();
         if(queued){
             at(5300,EV_TEXT,G_NOTICE("send_uncertain"));check(5400,ending_queued_after_failure);
             ending_probe.consumed_before_stop=true;
@@ -2026,7 +2071,7 @@ static void terminal_code_matrix(void){
         assert(new_calls==1&&start_calls==1&&!call_report.again&&!shown("Reconnecting..."));
     }
 }
-/* ==== Unconfirmed closing evidence after real local queue overflow ====
+/* ==== Unconfirmed closing evidence after an injected local enqueue fault ====
  * Hooks observe real owner I/O/release boundaries; they never set an owner exit,
  * model, cleanup flag or retry result. The shared sample/wire oracles above stay
  * active in every case. Receipt provenance never permits replacement. */
@@ -2167,7 +2212,7 @@ static void cleanup_unconfirmed_case(const char *name){
     if(cleanup_probe.startup){at(40,EV_CONNECT,NULL);at(60,EV_TEXT,STARTED);}
     else opened();
     if(cleanup_probe.drop)at(2000,EV_WS_DROP,NULL);
-    else if(!cleanup_probe.startup){owner_stall_at=run_start+3000000;owner_stall_us=2600000;}
+    else if(!cleanup_probe.startup){queue_fault_stall();}
     stop_send_hook=cleanup_stop_observed;dispose_hook=cleanup_disposal_observed;audio_close_hook=cleanup_release_observed;
     if(short_send||failed||cancelled||cancelled_full){
         stop_fault=short_send?STOP_SHORT:failed?STOP_FAILED:cancelled?STOP_CANCELLED:STOP_CANCELLED_FULL;
@@ -2300,7 +2345,7 @@ static void cleanup_race_stop_sent(void){
     assert(!cleanup_race_probe.stops&&sent_n==3&&!strcmp(sent[2],PET_STOP));
     assert(atomic_load(&current->failed)&&atomic_load(&current->exit_reason)==BV_EXIT_QUEUE);
     assert(current->model.phase==BR_CLOSING&&current->began_at);
-    assert(mic_high==96000&&mic_short_writes==1); /* actual capture-task overflow */
+    assert(mic_high==96000&&mic_short_writes==1); /* actual failure under injected probe fault */
     assert(!atomic_load(&current->capture_gate)&&!atomic_load(&current->play_gate));
     assert(stop_fault==STOP_FULL&&!stop_faults&&!short_stops);
     if(cleanup_race_probe.generated_before_stop)
@@ -2369,7 +2414,7 @@ static void cleanup_race_case(const char *name){
     if(cleanup_race_probe.pending){
         at(1000,EV_TEXT,G_STATE("asking"));at(1500,EV_TEXT,G_STATE("listening"));
     }
-    owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+    queue_fault_stall();
     stop_send_hook=cleanup_race_stop_sent;dispose_hook=cleanup_race_disposed;audio_close_hook=cleanup_race_released;
     /* Bound a forbidden second call so RED is the one-call assertion, not a
      * runaway fake session. This does not grant it: max_calls remains ONE. */
@@ -2486,7 +2531,7 @@ static void pending_send_case(const char *name){
     audio_close_hook=pending_release_observed;plans[1]=pending_next_call;
     if(replace)max_calls=2;
     if(queued||pending_probe.tail_post||pending_probe.tail_resolve){
-        owner_stall_at=run_start+3000000;owner_stall_us=2600000;
+        queue_fault_stall();
         before_control_hook=pending_control_observed;
         if(queued){
             /* The owner returns from its stalled queue receive with the neutral

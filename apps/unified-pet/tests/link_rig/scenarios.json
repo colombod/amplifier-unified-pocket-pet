@@ -68,7 +68,7 @@
     "expect": "survives"
   },
   "blackout-2500ms": {
-    "about": "A 2.5 s total blackout during an answer.",
+    "about": "A 2.5 s blackout during an answer: one call survives, dropping newest whole capture chunks if retransmission fills its FIFO.",
     "link": "delay:both:0:0:3;drop:both:5500:8000:0",
     "answers": [
       {
@@ -78,6 +78,7 @@
     ],
     "mic_off_ms": 20000,
     "accept_calls": 3,
-    "expect": "survives_or_reconnects"
+    "mic_gap_max_ms": 4000,
+    "expect": "survives_with_gaps"
   }
 }

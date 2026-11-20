@@ -465,8 +465,12 @@ static void ws_event(void *arg,esp_event_base_t base,int32_t id,void *data){
              * holds the socket back, instead of ending the call at once. Mic
              * off, a failure or the end of the call end the wait. */
             bool queued=xQueueSend(c->frames,&frame,0)==pdTRUE;
-            for(unsigned waited=0;!queued&&atomic_load(&c->converse)&&waited<BV_FRAME_WAIT_MS&&
-                    atomic_load(&c->active)&&!atomic_load(&c->stop)&&!atomic_load(&c->failed);waited+=10)
+            int64_t until=esp_timer_get_time()+(int64_t)BV_FRAME_WAIT_MS*1000;
+            /* No guard spans a queue wait. Cleanup retains frames, assembly
+             * and c until this transport task's final-access proof. The parent
+             * latch matters even if the UI's bridge Stop missed the guard. */
+            while(!queued&&atomic_load(&c->converse)&&esp_timer_get_time()<until&&
+                    atomic_load(&c->active)&&!stopping(c)&&!atomic_load(&c->failed))
                 queued=xQueueSend(c->frames,&frame,pdMS_TO_TICKS(10))==pdTRUE;
             if(!queued){
                 atomic_store(&c->ingress_incomplete,true);setup_bridge_wipe(message,c->assembly.used);free(message);callback_failed(c);
@@ -1167,8 +1171,8 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
                 /* A conversation's backlog after a stalled link can exceed the
                  * speaker buffer: that reply audio is dropped whole (a gap),
                  * never a partial, misaligned write, and the call continues. */
-                bool room=xStreamBufferSpacesAvailable(c->playback)>=bytes;
-                if(e||!atomic_load(&c->play_gate)||atomic_load(&c->stop)||(!room&&!c->model.converse)||
+                bool room=!c->model.converse||xStreamBufferSpacesAvailable(c->playback)>=bytes;
+                if(e||!atomic_load(&c->play_gate)||atomic_load(&c->stop)||
                    (room&&xStreamBufferSend(c->playback,c->decoded,bytes,0)!=bytes)){note_exit(c,BV_EXIT_SPEAKER);atomic_store(&c->failed,true);}
                 else if(room)c->received_pcm+=(unsigned)bytes;}
             give();bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);

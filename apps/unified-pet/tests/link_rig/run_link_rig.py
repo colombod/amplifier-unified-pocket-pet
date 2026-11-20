@@ -52,6 +52,7 @@ def sh(*args: str, **kwargs) -> subprocess.CompletedProcess:
 
 
 def build(out: Path, firmware_config: Path, overrides: list[str]) -> None:
+    sh("python3", str(HERE / "rig_host.py"), "--self-test")
     project, pki = out / "project", out / "pki"
     for stale in (project, out / "build"):
         shutil.rmtree(stale, ignore_errors=True)
@@ -197,15 +198,19 @@ def judge(scenario: dict, result: dict) -> dict:
     if result["device_exit"] != 0:
         problems.append(f"device run did not finish normally (exit {result['device_exit']})")
     if any(c["mic_order_errors"] for c in calls):
-        problems.append("microphone stream reached the host out of order or with a gap")
+        problems.append("microphone stream reached the host repeated, out of order or misaligned")
+    allowed_gap_samples = scenario.get("mic_gap_max_ms", 0) * 24
+    if sum(c["mic_gap_samples"] for c in calls) > allowed_gap_samples:
+        problems.append("observed microphone gaps exceeded this scenario's bound")
     interrupted = "Microphone stream interrupted." in texts or "Reconnecting..." in texts or len(calls) > 1
-    if want == "survives":
-        # One call from mic on to the user's mic off, every captured byte delivered once.
+    if want in ("survives", "survives_with_gaps"):
+        # One call from mic on to the user's mic off. Only the long blackout
+        # allows bounded, whole-chunk capture gaps; replay/order checks stay on.
         if interrupted:
             problems.append("the call was interrupted: " + " | ".join(t for t in texts if t not in ("Listening", "Speaking")))
         if not texts or texts[-1] != "Mic off":
             problems.append(f"did not end with the user's mic off (last status: {texts[-1] if texts else None})")
-        need = scenario["mic_off_ms"] / 1000 - 1.0
+        need = scenario["mic_off_ms"] / 1000 - 1.0 - scenario.get("mic_gap_max_ms", 0) / 1000
         if first.get("mic_seconds", 0) < need:
             problems.append(f"host received {first.get('mic_seconds', 0)} s of microphone, expected at least {need:.1f} s")
     elif want == "survives_or_reconnects":
@@ -232,6 +237,7 @@ def run(out: Path, selection: str) -> None:
                             "last_status": r["statuses"][-1]["text"] if r["statuses"] else None,
                             "calls": len(r["host"]["calls"]),
                             "mic_seconds": [c["mic_seconds"] for c in r["host"]["calls"]],
+                            "mic_gap_samples": [c["mic_gap_samples"] for c in r["host"]["calls"]],
                             "mic_max_late_seconds": [c["mic_max_late_seconds"] for c in r["host"]["calls"]],
                             "owner_send_max_ms": max((p["owner_send_max_ms"] for p in r["probes"]), default=0),
                             "owner_lock_wait_ms": sum(p["owner_lock_wait_ms"] for p in r["probes"]),
