@@ -81,11 +81,16 @@ second where the owner's send time went (transport lock, socket, or neither).
 | `blackout-600ms` | 0.6 s total blackout while listening | same |
 | `blackout-2500ms` | 2.5 s total blackout during an answer | one call through mic off; up to 4 s of whole-chunk capture gaps; nothing twice or out of order |
 
-For `0.3.12-voice-steady`, only the long-blackout expectation changes: a 5 s
+Since `0.3.12-voice-steady` (retained in `0.3.13-voice-clear`), only the long-blackout expectation changes: a 5 s
 send allowance and newest-chunk dropping replace the former 1.8 s send limit
 and FIFO-overflow exit. It must now keep one call, not reconnect. Its delivered
 audio minimum subtracts the explicit 4 s gap budget; all six other scenarios
 still require their original audio minimum and no observed gaps.
+
+The Linux-port task seam checks the audio tasks' priority 7/core 0 and the
+owner's priority 6/core 1 requests, then creates real SDK tasks on its single
+simulated CPU. It does not reproduce ESP32 affinity, codec DMA or the measured
+on-device improvement.
 
 The codec seam now encodes an absolute index in each nonzero sample pair rather
 than a counter repeating every 0.34 s. The host distinguishes forward,

@@ -10,7 +10,7 @@ idf_component_register(
              freertos pthread mbedtls log json nvs_flash heap)
 # On the device BIT0.. reach bridge_voice.c through SoC headers the linux target
 # does not pull in. Supply the same SDK header; the source file is unchanged.
-set_source_files_properties("${app}/bridge_voice.c" PROPERTIES COMPILE_OPTIONS "-include;esp_bit_defs.h")
+set_source_files_properties("${app}/bridge_voice.c" PROPERTIES COMPILE_OPTIONS "-include;esp_bit_defs.h;-include;${CMAKE_CURRENT_LIST_DIR}/rig.h")
 # Duration probes at link seams; see rig_probe.c.
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_websocket_client_send_text"
     "-Wl,--wrap=xQueueTakeMutexRecursive" "-Wl,--wrap=lwip_select")

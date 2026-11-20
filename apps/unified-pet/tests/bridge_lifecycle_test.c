@@ -249,6 +249,13 @@ static int xTaskCreate(void(*fn)(void*),const char *name,unsigned stack,void *ar
     }else await(G_BEGIN);
     return pdTRUE;
 }
+/* Receive excerpts currently create no codec tasks. Never send an audio create
+ * through the SDK-task fixture above (8192/priority 5/real exit destructor). */
+static inline int xTaskCreatePinnedToCore(void(*fn)(void*),const char *name,unsigned stack,
+                                          void *arg,unsigned prio,TaskHandle_t *out,int core){
+    (void)fn;(void)name;(void)stack;(void)arg;(void)prio;(void)out;(void)core;
+    assert(!"audio task outside the focused lifecycle/receive seam");return 0;
+}
 static unsigned xEventGroupClearBits(EventGroupHandle_t g,unsigned bits){
     assert(g);unsigned old=g->bits;g->bits&=~bits;
     if(!sdk_thread&&bits==(STOPPED_BIT|CLOSE_FRAME_SENT_BIT|REQUESTED_STOP_BIT))atomic_fetch_add(&start_tail,1);

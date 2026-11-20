@@ -30,8 +30,16 @@
 #define BV_APPEND 4800
 #define BV_PACING_JITTER_US 5000
 /* Conversation mode: a continuous host stream for up to ten minutes. */
-#define BV_AUDIO_PRIORITY 5      /* microphone and speaker tasks */
-#define BV_AUDIO_CORE (-1)       /* unpinned */
+/* The microphone and speaker tasks only move 20 ms chunks between the codec and
+ * the two buffers (about 1% of a core each), but the codec's DMA holds just
+ * 60 ms: a task that is scheduled later than that leaves a hole in the sound
+ * (crackling) and loses microphone samples. At the socket reader's priority (5)
+ * on core 0 that happened in every bench call: 10-15 seconds per 25 s call with
+ * holes, writes up to 113 ms late, microphone at 95%. Above the voice owner (6),
+ * on the core the owner is not on, 22 of 22 calls had none and no write was more
+ * than 28 ms (working-files/voice-bench runs 15 and 16, 20 November 2026). */
+#define BV_AUDIO_PRIORITY 7
+#define BV_AUDIO_CORE 0
 #define BV_FRAMES 32             /* queued host messages; a short network burst must not end the call */
 #define BV_PREBUFFER 15360       /* 320 ms jitter buffer before (re)starting playback */
 #define BV_PRIME_WAIT_US 400000  /* a short burst before a gap is played, not held for the next one */
@@ -188,8 +196,8 @@ static atomic_bool restart_required;
 static struct { bool again,reached; unsigned failures; int64_t ended_at; } call_report;
 #if defined(PET_PRIVATE_MIC_DIAG)
 static atomic_uint bench_prebuffer_ms=320;
-/* Bench only: priority and core of the two audio tasks of following calls.
- * Defaults are the normal build's (BV_AUDIO_PRIORITY, unpinned). */
+/* Bench only: priority and core of the next call's two audio tasks.
+ * Consumed once at call entry; the normal defaults apply again afterwards. */
 static atomic_uint bench_audio_priority=BV_AUDIO_PRIORITY;
 static atomic_int bench_audio_core=BV_AUDIO_CORE;
 void bridge_voice_bench_audio(unsigned priority,int core){
@@ -1173,6 +1181,14 @@ void bridge_voice_reap_finished(void){
 static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_stopped)(void),
                      unsigned failures,unsigned reconnects,bool reached,int64_t retry_until){
     call_report.again=false;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    unsigned audio_priority=atomic_exchange(&bench_audio_priority,BV_AUDIO_PRIORITY);
+    int requested_core=atomic_exchange(&bench_audio_core,BV_AUDIO_CORE);
+    BaseType_t audio_core=requested_core<0?tskNO_AFFINITY:requested_core;
+#else
+    unsigned audio_priority=BV_AUDIO_PRIORITY;
+    BaseType_t audio_core=BV_AUDIO_CORE<0?tskNO_AFFINITY:BV_AUDIO_CORE;
+#endif
     if(atomic_load(&restart_required)){live_voice_bridge_status(LIVE_ERROR,"Voice cleanup incomplete. Connection held.");return;}
     bridge_voice_t *c=heap_caps_calloc(1,sizeof(*c),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(!c){live_voice_bridge_status(LIVE_ERROR,"Bridge memory unavailable.");return;}
@@ -1317,13 +1333,6 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
             c->tasks_start=esp_timer_get_time();
             c->tasks_before_n=bv_diag_snapshot(c,c->tasks_before);
             c->loop_start=c->mic_start;
-#endif
-#if defined(PET_PRIVATE_MIC_DIAG)
-            unsigned audio_priority=atomic_load(&bench_audio_priority);
-            BaseType_t audio_core=atomic_load(&bench_audio_core)<0?tskNO_AFFINITY:atomic_load(&bench_audio_core);
-#else
-            unsigned audio_priority=BV_AUDIO_PRIORITY;
-            BaseType_t audio_core=BV_AUDIO_CORE<0?tskNO_AFFINITY:BV_AUDIO_CORE;
 #endif
             if(xTaskCreatePinnedToCore(capture_task,"pet_bridge_mic",4096,c,audio_priority,NULL,audio_core)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
             c->audio_tasks|=BV_CAPTURE_DONE;

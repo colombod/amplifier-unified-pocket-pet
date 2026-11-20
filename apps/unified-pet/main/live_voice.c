@@ -240,7 +240,7 @@ static void handle_message(live_connection_t *c) {
   if(atomic_load(&c->closing))goto done;
   const cJSON *delta=cJSON_GetObjectItemCaseSensitive(root,"delta");size_t count=0;
   if(!cJSON_IsString(delta) || mbedtls_base64_decode(c->decoded,MESSAGE_CAP,&count,(const unsigned char *)delta->valuestring,strlen(delta->valuestring))!=0 || count%2) {
-   fail(c,"Invalid voice audio received.");goto done;
+   fail(c,"Invalid audio received.");goto done;
   }
   atomic_fetch_add(&c->received_bytes,count);
   int64_t received_at=esp_timer_get_time();unsigned gap=c->last_audio_at?(received_at-c->last_audio_at)/1000:0;

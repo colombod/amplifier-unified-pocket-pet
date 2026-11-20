@@ -6,6 +6,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+/* The Linux SDK port has one simulated CPU and no pinned-create API.
+ * Check and record the requested affinity, then use its real task scheduler.
+ * This seam does NOT qualify ESP32 dual-core scheduling or codec deadlines. */
+#ifndef tskNO_AFFINITY
+#define tskNO_AFFINITY 0x7fffffff
+#endif
+BaseType_t rig_create_pinned(TaskFunction_t fn,const char *name,uint32_t stack,void *arg,
+                            UBaseType_t priority,TaskHandle_t *out,BaseType_t core);
+#define xTaskCreatePinnedToCore rig_create_pinned
 
 /* Milliseconds since the device first showed "listening" (0 before that). */
 int64_t rig_since_listening_ms(void);

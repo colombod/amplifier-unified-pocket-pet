@@ -75,6 +75,17 @@ for name in ['take','give','quiet','health_end','note_exit','stopping','exit_sta
 # whole production capture-send block, including its break/failure and cursor
 # argument. append_audio owns timed admission + success-only cursor advancement.
 run_start,run_end=function('run_call')
+# Snapshot the actual per-call scheduling selection and the two creates,
+# including failure exits and ownership masks, not a reimplementation.
+a=unique(text,'    call_report.again=false;\n#if defined(PET_PRIVATE_MIC_DIAG)')+len('    call_report.again=false;\n')
+b=text.index('#endif',a)+len('#endif')
+create=unique(text,'            if(xTaskCreatePinnedToCore(capture_task,')
+end=text.index('            if(!take())',create)
+assert run_start<a<b<create<end<run_end
+for name,start,stop in [('audio_selection',a,b),('audio_creation',create,end)]:
+    excerpts[name]={'start':start,'end':stop,'sha256':digest(text[start:stop].encode())}
+parts.append('static void production_audio_create(bridge_voice_t *c){\n'
+             +located(a,b)+'\ndo{\n'+located(create,end)+'\n}while(0);\n}\n')
 header='while(esp_timer_get_time()<c->work&&!stopping(c)&&!atomic_load(&c->failed))'
 h=unique(text,header)
 a=unique(text,'if((phase==BR_CAPTURING||phase==BR_CONVERSING)&&esp_timer_get_time()>=next_audio)')
@@ -178,15 +189,15 @@ compile() {
 compile -o "$out/runtime"
 compile -DPET_PRIVATE_MIC_DIAG=1 -o "$out/runtime-micdiag"
 # The normal-source compile must not contain the private measurements/Wi-Fi calls.
-if nm "$out/runtime" | grep -E 'bv_diag_|bench_prebuffer|bridge_voice_bench_jitter|esp_wifi_'; then
+if nm "$out/runtime" | grep -E 'bv_diag_|bench_prebuffer|bench_audio_|bridge_voice_bench_(jitter|audio)|esp_wifi_'; then
     echo 'private symbol leaked into normal compile' >&2; exit 1
 fi
-if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw'; then
+if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw|voice audio'; then
     echo 'private string leaked into normal compile' >&2; exit 1
 fi
 echo 'NORMAL PRIVATE SYMBOL/STRING CHECK: PASS'
 failed=0
-for name in conversation-drop conversation-near-full speaker-room send-limits \
+for name in audio-default audio-create-failure conversation-drop conversation-near-full speaker-room send-limits \
     queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
     legacy realtime-0 realtime-25 realtime-75 \
     realtime-long-0 realtime-long-25 realtime-long-75 realtime-long-67 realtime-long-jitter \
@@ -213,7 +224,7 @@ do
     if "$out/runtime" "$name"; then rc=0; else rc=$?; failed=1; fi
     printf '%s %s\n' "$name" "$rc" >> "$out/case-results.txt"
 done
-for name in conversation-drop conversation-near-full speaker-room send-limits \
+for name in audio-default audio-create-failure audio-override conversation-drop conversation-near-full speaker-room send-limits \
     queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
     playback-gaps playback-buckets playback-arrivals playback-jitter playback-wifi \
     mic-play mic-stages mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \

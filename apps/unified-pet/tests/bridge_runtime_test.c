@@ -14,6 +14,9 @@
 #include "live_protocol.h"
 #include "mbedtls/base64.h"
 typedef int esp_err_t;
+typedef int BaseType_t;
+#define tskNO_AFFINITY 0x7fffffff
+#define pdPASS 1
 #define ESP_OK 0
 #define ESP_ERR_INVALID_STATE 5
 #define pdTRUE 1
@@ -207,6 +210,16 @@ static size_t xStreamBufferReceive(StreamBufferHandle_t s,void *p,size_t n,unsig
 }
 static void vTaskDelay(unsigned ms);
 static void vTaskDelete(void *p){(void)p;}
+static struct {void (*fn)(void *);const char *name;void *arg;unsigned priority;int core;} audio_creates[2];
+static unsigned audio_create_n,audio_fail_at;
+static int xTaskCreatePinnedToCore(void (*fn)(void *),const char *name,unsigned stack,
+                                  void *arg,unsigned priority,void *handle,int core){
+    assert(audio_create_n<2&&stack==4096&&!handle&&!model_lock_held);
+    unsigned i=audio_create_n++;
+    audio_creates[i].fn=fn;audio_creates[i].name=name;audio_creates[i].arg=arg;
+    audio_creates[i].priority=priority;audio_creates[i].core=core;
+    return audio_fail_at==audio_create_n?0:pdPASS;
+}
 static esp_err_t audio_stream_read(audio_session_t *a,void *p,unsigned n){
     (void)a;reads++;if(!a5_read(p,n))memset(p,1,n);
     return a5_enabled&&reads==a5_read_failure?ESP_ERR_INVALID_STATE:ESP_OK;
@@ -1247,6 +1260,45 @@ static void send_limits(void){
         bridge_voice_stop();assert(!append_audio(&context,960,&next)&&sends==1);
     }
 }
+static void check_audio_create(unsigned priority,int core,unsigned fail_at){
+    reset();audio_create_n=0;audio_fail_at=fail_at;
+    production_audio_create(&context);
+    assert(audio_create_n==(fail_at==1?1:2));
+    for(unsigned i=0;i<audio_create_n;i++){
+        assert(audio_creates[i].priority==priority&&audio_creates[i].core==core);
+        assert(audio_creates[i].arg==&context);
+        assert(audio_creates[i].fn==(i?play_task:capture_task));
+        assert(!strcmp(audio_creates[i].name,i?"pet_bridge_out":"pet_bridge_mic"));
+    }
+    assert(context.audio_tasks==(fail_at==1?0:fail_at==2?BV_CAPTURE_DONE:BV_CAPTURE_DONE|BV_PLAY_DONE));
+    assert(atomic_load(&context.failed)==(fail_at!=0));
+    if(fail_at)assert(atomic_load(&context.exit_reason)==BV_EXIT_AUDIO);
+}
+static void audio_scheduling(const char *name){
+    if(!strcmp(name,"audio-default"))check_audio_create(7,0,0);
+    else if(!strcmp(name,"audio-create-failure")){
+        check_audio_create(7,0,1);check_audio_create(7,0,2);
+    }
+#if defined(PET_PRIVATE_MIC_DIAG)
+    else if(!strcmp(name,"audio-override")){
+        const unsigned priorities[]={0,4,5,6,7,8,UINT32_MAX};
+        const int cores[]={-9,-1,0,1,2};
+        check_audio_create(7,0,0); /* no console command */
+        for(unsigned i=0;i<sizeof(priorities)/sizeof(*priorities);i++)
+            for(unsigned j=0;j<sizeof(cores)/sizeof(*cores);j++){
+                unsigned p=priorities[i]<5?5:priorities[i]>7?7:priorities[i];
+                int core=cores[j]<0?tskNO_AFFINITY:cores[j]?1:0;
+                bridge_voice_bench_audio(priorities[i],cores[j]);
+                check_audio_create(p,core,0);
+                check_audio_create(7,0,0); /* consumed by the NEXT call only */
+            }
+        bridge_voice_bench_audio(5,-1);
+        check_audio_create(5,tskNO_AFFINITY,2); /* failed create also consumes */
+        check_audio_create(7,0,0);
+    }
+#endif
+    else assert(!"unknown audio scheduling case");
+}
 int main(int argc,char **argv){
     setbuf(stdout,NULL);
     const char *name=argc==1?"legacy":argv[1];
@@ -1258,7 +1310,8 @@ int main(int argc,char **argv){
     else if(!strncmp(name,"mic-",4))mic_controls(name);
     else
 #endif
-    if(!strcmp(name,"conversation-drop"))conversation_drop(false);
+    if(!strncmp(name,"audio-",6))audio_scheduling(name);
+    else if(!strcmp(name,"conversation-drop"))conversation_drop(false);
     else if(!strcmp(name,"conversation-near-full"))conversation_drop(true);
     else if(!strncmp(name,"queue-",6))queue_case(name);
     else if(!strcmp(name,"speaker-room"))speaker_room();

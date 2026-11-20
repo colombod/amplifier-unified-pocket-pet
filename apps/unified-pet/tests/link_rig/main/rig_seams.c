@@ -7,6 +7,7 @@
  * digital silence the device substitutes while its speaker is audible, and can
  * distinguish forward gaps from repeated or reordered input. */
 #include <stdatomic.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,18 @@
 #include "rig.h"
 
 #define RIG_TOKEN "rigTOKENabcdefghijklmnopqrstuvwxyz012345678" /* shape-valid, not a secret */
+
+BaseType_t rig_create_pinned(TaskFunction_t fn,const char *name,uint32_t stack,void *arg,
+                            UBaseType_t priority,TaskHandle_t *out,BaseType_t core){
+    if(!strcmp(name,"pet_live"))assert(priority==6&&core==1&&stack==12288);
+    else{
+        assert(!strcmp(name,"pet_bridge_mic")||!strcmp(name,"pet_bridge_out"));
+        assert(priority==7&&core==0&&stack==4096);
+    }
+    printf("RIG task name=%s priority=%u requested_core=%d (single simulated CPU)\n",
+           name,(unsigned)priority,(int)core);
+    return xTaskCreate(fn,name,stack,arg,priority,out);
+}
 
 long rig_env(const char *name,long fallback){
     const char *v=getenv(name);

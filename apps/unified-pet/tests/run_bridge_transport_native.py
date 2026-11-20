@@ -184,6 +184,7 @@ esp_err_t esp_timer_delete(esp_timer_handle_t);
 #include <stdint.h>
 #include <pthread.h>
 typedef unsigned TickType_t;
+typedef int BaseType_t;
 typedef pthread_mutex_t portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED PTHREAD_MUTEX_INITIALIZER
 #define portENTER_CRITICAL(m) ((void)pthread_mutex_lock(m))

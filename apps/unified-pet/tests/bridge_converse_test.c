@@ -46,6 +46,8 @@
 #define SESSION_US 660000000LL /* live_voice.c BRIDGE_SESSION_LIMIT_MS from the accepted tap */
 
 typedef int esp_err_t;
+typedef int BaseType_t;
+#define tskNO_AFFINITY 0x7fffffff
 #define ESP_OK 0
 #define ESP_FAIL (-1)
 #define pdTRUE 1
@@ -149,7 +151,9 @@ static void *task_main(void *p){
     self=id;entities[id].fn(entities[id].arg);
     assert(!"task returned without vTaskDelete");return NULL;
 }
-static int xTaskCreate(void (*fn)(void*),const char *name,unsigned stack,void *arg,unsigned prio,void *handle){
+static int xTaskCreatePinnedToCore(void (*fn)(void*),const char *name,unsigned stack,void *arg,unsigned prio,void *handle,int core){
+    assert(prio==7&&core==0&&stack==4096&&!handle);
+    assert(!strcmp(name,"pet_bridge_mic")||!strcmp(name,"pet_bridge_out"));
     (void)name;(void)stack;(void)prio;(void)handle;
     if(task_fail_at&&++task_attempts==task_fail_at)return 0;
     assert(entity_n<MAX_ENTITIES);int id=(int)entity_n++;

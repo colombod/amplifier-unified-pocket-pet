@@ -633,6 +633,14 @@ fix ended 7 of 37 calls themselves; with it, 44 calls (25-100 s each, against a
 provider-free listener) ended only on mic off, including stalls of up to 2.7 s.
 The normal `0.3.12-voice-steady` build has not been qualified by a spoken call.
 
+In `0.3.13-voice-clear`, both codec audio tasks run at priority 7 pinned to
+core 0, while the voice owner remains at priority 6 on core 1.
+On-device bench comparisons at priority 5/core 0 had holes in all 6 calls
+(10–15 s of each 25 s), codec writes up to 113 ms late against 60 ms of DMA,
+and 95% microphone delivery; at priority 7/core 0, all 22 calls had no holes
+and no codec write more than 28 ms late.
+The normal `0.3.13-voice-clear` build has not yet been qualified by a spoken call.
+
 The draft gateway no longer sends a request while the pet's audio is known to be
 arriving late, catching up, or still queued toward the provider: it waits for the
 stream to recover and for a fresh quiet period, so trailing words are not cut off

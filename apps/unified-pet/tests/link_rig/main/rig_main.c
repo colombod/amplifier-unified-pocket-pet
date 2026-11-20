@@ -35,7 +35,7 @@ static void user(void *arg){
     rig_parent_stop();bridge_voice_stop();
     vTaskDelete(NULL);
 }
-/* The display task shares the owner's priority on the device. Optional load. */
+/* Optional display load; the voice owner now runs above it on the device. */
 static void display(void *arg){
     long busy_us=(long)(intptr_t)arg*100; /* percent of every 10 ms */
     for(;;){
@@ -61,5 +61,5 @@ void app_main(void){
     if(off>0)xTaskCreate(user,"rig_user",4096,(void*)(intptr_t)off,6,NULL);
     if(load>0)xTaskCreate(display,"rig_display",4096,(void*)(intptr_t)load,4,NULL);
     xTaskCreate(watchdog,"rig_watchdog",4096,(void*)(intptr_t)rig_env("RIG_WATCHDOG_MS",120000),24,NULL);
-    xTaskCreate(owner,"pet_live",12288,NULL,4,NULL); /* live_voice.c: pet_live, 12288, priority 4 */
+    xTaskCreatePinnedToCore(owner,"pet_live",12288,NULL,6,NULL,1); /* live_voice.c */
 }
