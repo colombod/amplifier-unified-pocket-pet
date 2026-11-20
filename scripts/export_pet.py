@@ -20,7 +20,7 @@ for row, (name, count) in enumerate(states):
             data += struct.pack("<H", ((r>>3)<<11)|((g>>2)<<5)|(b>>3))
     first += count
 (out/"tachikoma.rgb565").write_bytes(data)
-report = dict(pet_id="pet_6abe2e4dd1f48191bbbc9389b55e641e",source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),width=192,height=208,frames=first,asset_bytes=len(data),frame_bytes=192*208*2,source_decoded_rgba_bytes=1536*2288*4,states=manifest)
+report = dict(source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),width=192,height=208,frames=first,asset_bytes=len(data),frame_bytes=192*208*2,source_decoded_rgba_bytes=1536*2288*4,states=manifest)
 (out/"manifest.json").write_text(json.dumps(report, indent=2)+"\n")
 preview = Image.new("RGB", (240,284),(15,23,42))
 preview.paste(sheet.crop((0,0,192,208)),(24,30),sheet.crop((0,0,192,208)))
