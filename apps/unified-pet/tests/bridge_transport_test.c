@@ -993,7 +993,42 @@ static int cert_positive(const char *value){
     assert(outcome==BR_TRANSPORT_CERT_VERIFY);
     return 0;
 }
+#if defined(PET_PRIVATE_MIC_DIAG)
+static int bench_counters(void){
+    bridge_transport_t *t=new_fixture();pet_bench_transport_t result;
+    task=2;assert(xSemaphoreTakeRecursive(t->io,0)==pdTRUE);task=1;
+    release_lock_at=now+60000;
+    assert(fixture_io(t,false,1000)==6);
+    assert(bench_io[0].write_wait_count==1&&bench_io[0].write_wait_us_total==60000);
+    assert(bench_io[0].write_wait_us_max==60000&&!bench_io[0].write_us_total);
+    fixture_power_cycle(t);bridge_transport_bench(&result);
+    assert(result.io.write_wait_us_total==60000);
+    t=new_fixture(); /* constructor reset */
+    assert(!bench_io[0].write_wait_count);
+    base_poll_result=0;
+    assert(fixture_io(t,false,12)==0);
+    assert(bench_io[0].write_us_total==12000&&bench_io[0].write_us_max==12000);
+    assert(!bench_io[0].idle_read_polls); /* nested write polling not idle */
+    assert(fixture_io(t,true,7)==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
+    assert(bench_io[0].read_hold_count==1&&bench_io[0].read_hold_us_total==7000);
+    assert(bench_io[0].read_hold_us_max==7000&&!bench_io[0].idle_read_polls);
+    assert(esp_transport_poll_read(t->ssl,3)==0);
+    assert(bench_io[0].idle_read_polls==3);
+    bench_sdk=(TaskHandle_t)(uintptr_t)2;task=2;
+    assert(fixture_io(t,true,4)==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT);
+    task=1;
+    assert(bench_io[1].read_hold_us_total==4000&&bench_io[1].read_hold_count==1);
+    fixture_power_cycle(t);bridge_transport_bench(&result);
+    assert(result.io.read_hold_us_total==11000&&result.io.read_hold_us_max==7000);
+    assert(result.io.read_hold_count==2&&result.io.idle_read_polls==3);
+    puts("PASS bench-counters (synthetic clock/RTOS/TLS, actual transport wrappers)");
+    return 0;
+}
+#endif
 int main(int argc,char**argv){
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(argc==2&&!strcmp(argv[1],"bench-counters"))return bench_counters();
+#endif
     /* Default/legacy remains the original 32+110 suite. Run every positive RED
      * as a separate process/CASE so one assertion cannot mask the others. */
     if(argc==3&&!strcmp(argv[1],"cert-positive"))return cert_positive(argv[2]);

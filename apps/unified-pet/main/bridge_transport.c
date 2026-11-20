@@ -69,6 +69,30 @@ struct bridge_transport {
     unsigned timer_users; /* cutoff_mux only */
 };
 static _Atomic(bridge_transport_t*) chain;
+#if defined(PET_PRIVATE_MIC_DIAG)
+/* Constructor reset precedes either task's I/O. Slot 0: calling owner (also
+ * pre-start handshake); slot 1: SDK task (including automatic ping/pong).
+ * Exactly one writer per slot. Accessor only after successful disposal. */
+static pet_bench_io_t bench_io[2];
+static TaskHandle_t bench_sdk;
+static pet_bench_task_t bench_task;
+static pet_bench_io_t *bench_lane(void){
+    return &bench_io[xTaskGetCurrentTaskHandle()==bench_sdk?1:0];
+}
+void bridge_transport_bench(pet_bench_transport_t *out){
+    *out=(pet_bench_transport_t){.task=bench_task};
+    for(unsigned i=0;i<2;i++){
+        const pet_bench_io_t *s=&bench_io[i];pet_bench_io_t *d=&out->io;
+        d->write_wait_us_total+=s->write_wait_us_total;d->write_wait_count+=s->write_wait_count;
+        if(s->write_wait_us_max>d->write_wait_us_max)d->write_wait_us_max=s->write_wait_us_max;
+        d->write_us_total+=s->write_us_total;
+        if(s->write_us_max>d->write_us_max)d->write_us_max=s->write_us_max;
+        d->read_hold_us_total+=s->read_hold_us_total;d->read_hold_count+=s->read_hold_count;
+        if(s->read_hold_us_max>d->read_hold_us_max)d->read_hold_us_max=s->read_hold_us_max;
+        d->idle_read_polls+=s->idle_read_polls;
+    }
+}
+#endif
 static portMUX_TYPE cutoff_mux=portMUX_INITIALIZER_UNLOCKED;
 static bridge_transport_t *cutoff_owner;
 static uintptr_t cutoff_generation;
@@ -90,6 +114,9 @@ static void create_exit_key(void){exit_key_error=pthread_key_create(&exit_key,ta
 static void lifecycle_event(void *arg,esp_event_base_t base,int32_t id,void *data){
     (void)base;(void)data;bridge_transport_t *t=arg;
     if(id==WEBSOCKET_EVENT_BEGIN){
+#if defined(PET_PRIVATE_MIC_DIAG)
+        bench_sdk=xTaskGetCurrentTaskHandle();
+#endif
         if(pthread_setspecific(exit_key,t)){
             atomic_store(&t->hook_failed,true);bridge_transport_cancel(t);
         }
@@ -100,6 +127,9 @@ static void lifecycle_event(void *arg,esp_event_base_t base,int32_t id,void *dat
          * Self-destruction then happens on the SDK task; only its TCB destructor
          * above proves final access. No public stop/destroy wait is used. */
         while(!atomic_load(&t->owner_done))vTaskDelay(1);
+#if defined(PET_PRIVATE_MIC_DIAG)
+        pet_bench_task_final(&bench_task); /* before SDK destroys this task */
+#endif
         if(esp_websocket_client_destroy_on_exit(t->client)!=ESP_OK)
             atomic_store(&t->hook_failed,true);
     }
@@ -272,6 +302,9 @@ static int bounded_read(esp_transport_handle_t ssl,char *b,int n,int ms){
     int64_t d=call_deadline(t,ms);bool probe=ms==0;
     int held=take_io(t,d,probe);
     if(held<=0){observe_ws_read(t,false,true,0);return held<0?-1:ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;}
+#if defined(PET_PRIVATE_MIC_DIAG)
+    int64_t bench_begin=esp_timer_get_time();
+#endif
     int64_t saved=t->operation_deadline;bool saved_probe=t->operation_probe;
     if(saved){d=saved<d?saved:d;probe=probe&&saved_probe;}
     t->operation_deadline=d;t->operation_probe=probe;
@@ -284,18 +317,33 @@ static int bounded_read(esp_transport_handle_t ssl,char *b,int n,int ms){
     if(n>0)observe_ws_read(t,result>0,result<=0,read_started);
     if(result<0&&atomic_load(&t->upgraded))note_transport_end(t,read_started);
     t->operation_deadline=saved;t->operation_probe=saved_probe;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    pet_bench_io_t *s=bench_lane();
+    pet_bench_time(&s->read_hold_us_total,&s->read_hold_us_max,esp_timer_get_time()-bench_begin);
+    s->read_hold_count++;
+#endif
     give_io(t);return result;
 }
 static int bounded_write(esp_transport_handle_t ssl,const char *b,int n,int ms){
     bridge_transport_t *t=atomic_load(&chain);
     if(!t||ssl!=t->ssl||n<0||(!b&&n))return -1;
     int64_t d=call_deadline(t,ms);bool probe=ms==0;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    pet_bench_io_t *s=bench_lane();int64_t bench_begin=esp_timer_get_time();
+#endif
     int held=take_io(t,d,probe);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    pet_bench_time(&s->write_wait_us_total,&s->write_wait_us_max,esp_timer_get_time()-bench_begin);
+    s->write_wait_count++;
+#endif
     if(held<=0)return held;
     int64_t saved=t->operation_deadline;bool saved_probe=t->operation_probe;
     if(saved){d=saved<d?saved:d;probe=probe&&saved_probe;}
     t->operation_deadline=d;t->operation_probe=probe;
     int total=0,result;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    bench_begin=esp_timer_get_time();
+#endif
     for(;;){
         int wait=budget(t,d,probe);
         if(wait<0||!socket_valid_owned(t)){result=-1;break;}
@@ -310,6 +358,9 @@ static int bounded_write(esp_transport_handle_t ssl,const char *b,int n,int ms){
         if(total==n){result=total;break;}
         if(probe){result=0;break;}
     }
+#if defined(PET_PRIVATE_MIC_DIAG)
+    pet_bench_time(&s->write_us_total,&s->write_us_max,esp_timer_get_time()-bench_begin);
+#endif
     t->operation_deadline=saved;t->operation_probe=saved_probe;
     give_io(t);return result;
 }
@@ -346,6 +397,9 @@ static int bounded_poll(esp_transport_handle_t ssl,int ms,bool read){
              * retain their enclosing owner and normal remaining-time slices. */
             if(read&&!nested)wait=0;
             else if(wait>50)wait=50;
+#if defined(PET_PRIVATE_MIC_DIAG)
+            if(read&&!nested)bench_lane()->idle_read_polls++;
+#endif
             result=(read?t->poll_read:t->poll_write)(ssl,wait);
             /* Pinned ssl_read tests exactly -1 and 0. Never leak another
              * negative poll value through to its TLS branch. Preserve positive
@@ -595,6 +649,10 @@ bridge_transport_t *bridge_transport_new(const setup_bridge_t *cfg,const char *t
     bridge_transport_t *t=calloc(1,sizeof(*t));if(!t)return NULL;
     bridge_transport_t *none=NULL;
     if(!atomic_compare_exchange_strong(&chain,&none,t)){free(t);return NULL;}
+#if defined(PET_PRIVATE_MIC_DIAG)
+    memset(bench_io,0,sizeof(bench_io));bench_sdk=NULL;
+    memset(&bench_task,0,sizeof(bench_task));
+#endif
     t->cfg=*cfg;t->deadline=deadline;snprintf(t->ip,sizeof(t->ip),"%u.%u.%u.%u",cfg->ip[0],cfg->ip[1],cfg->ip[2],cfg->ip[3]);
     /* Pinned SSL read/write call the transport's poll hooks on this same task.
      * Keep I/O serialized against other tasks, but permit that nested polling. */

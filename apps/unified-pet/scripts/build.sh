@@ -97,23 +97,32 @@ fi
 assets_python=${PET_ASSET_PYTHON:-/opt/pet-assets/bin/python}
 "$assets_python" -c 'import PIL; assert PIL.__version__ == "11.3.0", "Requires Pillow 11.3.0"'
 "$assets_python" scripts/export_pet.py
+build="$app/build"
+config="$app/sdkconfig"
+defaults="$app/sdkconfig.defaults"
+if [ "$diag" = 1 ]; then
+  build="$app/build-bench"
+  config="$app/sdkconfig.bench"
+  defaults="$defaults;$app/sdkconfig.bench.defaults"
+fi
 if [ "${PET_OFFLINE_CACHE:-0}" = 1 ]; then
-  idf.py -B "$app/build" -D "SDKCONFIG=$app/sdkconfig" \
+  idf.py -B "$build" -D "SDKCONFIG=$config" \
     -D "PET_PRIVATE_MIC_DIAG=$diag" \
-    -D "SDKCONFIG_DEFAULTS=$app/sdkconfig.defaults" \
+    -D "SDKCONFIG_DEFAULTS=$defaults" \
     -D "EXTRA_COMPONENT_DIRS=/cache/offline_components;$app/scripts/offline-components" \
     -D "CMAKE_PROJECT_INCLUDE=$app/scripts/offline-deps.cmake" \
     -D IDF_TARGET=esp32s3 reconfigure
 fi
-idf.py -B "$app/build" -D "SDKCONFIG=$app/sdkconfig" -D "PET_PRIVATE_MIC_DIAG=$diag" build
+idf.py -B "$build" -D "SDKCONFIG=$config" -D "PET_PRIVATE_MIC_DIAG=$diag" build
 # A generated sdkconfig left by an earlier build takes precedence over changed
 # sdkconfig.defaults. Never report an image that silently lacks a checked-in
 # setting: remove the stale sdkconfig (and build directory) and build again.
-python3 - <<'PY'
+python3 - "$config" "$defaults" <<'PY'
 from pathlib import Path
-have=set(Path("sdkconfig").read_text(encoding="utf-8").splitlines())
+import sys
+have=set(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines())
 missing=[]
-for line in Path("sdkconfig.defaults").read_text(encoding="utf-8").splitlines():
+for line in "\n".join(Path(p).read_text(encoding="utf-8") for p in sys.argv[2].split(";")).splitlines():
     if not line.startswith("CONFIG_"):
         continue
     key,value=line.split("=",1)

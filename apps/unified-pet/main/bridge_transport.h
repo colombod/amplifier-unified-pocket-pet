@@ -3,6 +3,11 @@
 #include "nvs.h"
 #include "cJSON.h"
 #include "setup_bridge.h"
+#if defined(PET_PRIVATE_MIC_DIAG)
+#include "bench_diag.h"
+/* Only after successful disposal, before constructing the next chain. */
+void bridge_transport_bench(pet_bench_transport_t *out);
+#endif
 typedef struct bridge_transport bridge_transport_t;
 typedef enum {
     BR_TRANSPORT_NONE,

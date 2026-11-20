@@ -32,7 +32,7 @@ synthetic. Not the complete esp_websocket_client task or real TLS qualification.
 import argparse,hashlib,json,os,subprocess,sys
 from pathlib import Path
 case_names=(
-    'legacy','tx-ready60','tx-payload-stall60','tx-partial-stall60','rx-header-gap60',
+    'legacy','bench-counters','tx-ready60','tx-payload-stall60','tx-partial-stall60','rx-header-gap60',
     'tx-caller10','rx-caller10','tx-caller0','rx-caller0',
     'tx-deadline20','rx-deadline20','tx-cancel20','rx-cancel20',
     'idle-rx-start-tx','nested-tls-exclusion','nested-deadline-restore',
@@ -49,6 +49,7 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('output',type=Path)
 parser.add_argument('case',nargs='?',default='legacy',choices=case_names)
 parser.add_argument('--tick-hz',type=int,choices=(1000,100),default=1000)
+parser.add_argument('--micdiag',action='store_true')
 args=parser.parse_args()
 sdk=Path(os.environ['IDF_PATH'])
 ssl_source=sdk/'components/tcp_transport/transport_ssl.c'
@@ -191,11 +192,20 @@ typedef pthread_mutex_t portMUX_TYPE;
 #define configTICK_RATE_HZ 1000
 #endif
 #define pdTRUE 1
+#define pdFALSE 0
+#define configMAX_TASK_NAME_LEN 16
+#define tskNO_AFFINITY 0x7fffffff
 #define pdMS_TO_TICKS(x) ((TickType_t)((uint64_t)(x)*configTICK_RATE_HZ/1000))
 ''',
 'freertos/task.h':'''#pragma once
 #include "freertos/FreeRTOS.h"
 typedef void *TaskHandle_t;
+typedef struct {const char *pcTaskName;unsigned xTaskNumber,uxCurrentPriority,ulRunTimeCounter;int xCoreID;} TaskStatus_t;
+#define eInvalid 0
+static inline void vTaskGetInfo(void *h,TaskStatus_t *s,int stack,int state){
+    (void)h;(void)stack;(void)state;
+    *s=(TaskStatus_t){.pcTaskName="fixture",.xTaskNumber=1};
+}
 TaskHandle_t xTaskGetCurrentTaskHandle(void);
 void vTaskDelay(TickType_t);
 ''',
@@ -247,7 +257,7 @@ esp_err_t esp_websocket_register_events(esp_websocket_client_handle_t,int,esp_ev
 '''
 }
 for name,text in headers.items():(inc/name).write_text(text)
-files=[Path('main/bridge_transport.c'),Path('main/bridge_transport.h'),Path('main/setup_bridge.h'),Path('tests/bridge_transport_test.c'),Path(__file__),sdk/'components/tcp_transport/transport.c',ws_source,ssl_source,sdk/'components/tcp_transport/include/esp_transport.h',sdk/'components/tcp_transport/private_include/esp_transport_internal.h',sdk/'components/esp-tls/esp_tls_errors.h',generated]
+files=[Path('main/bench_diag.h'),Path('main/bridge_transport.c'),Path('main/bridge_transport.h'),Path('main/setup_bridge.h'),Path('tests/bridge_transport_test.c'),Path(__file__),sdk/'components/tcp_transport/transport.c',ws_source,ssl_source,sdk/'components/tcp_transport/include/esp_transport.h',sdk/'components/tcp_transport/private_include/esp_transport_internal.h',sdk/'components/esp-tls/esp_tls_errors.h',generated]
 files.extend(inc/name for name in headers)
 files.extend(pins)
 mutant=os.environ.get('PET_CERT_TEST_MUTANT','')
@@ -437,6 +447,7 @@ cc=['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-g','
 # Native 64-bit builds expose vendor signed-size warnings not enabled by its
 # SDK build. Scope the exception to unchanged SDK objects, never the app/tests.
 base=cc[:cc.index('tests/bridge_transport_test.c')]
+if args.micdiag:base.append('-DPET_PRIVATE_MIC_DIAG=1')
 base.append('-I'+str(sdk/'components/esp-tls'))
 if mutant:base.append('-DBRIDGE_TEST_TRANSPORT_MUTANT=1')
 base.append(f'-DconfigTICK_RATE_HZ={args.tick_hz}')

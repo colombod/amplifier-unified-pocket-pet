@@ -16,7 +16,7 @@ inputs=[
     Path('main/bridge_voice.c'),Path('main/audio_test.c'),
     Path('main/bridge_protocol.c'),Path('main/bridge_protocol.h'),
     Path('main/live_protocol.h'),Path('tests/bridge_runtime_test.c'),
-    Path('tests/run_bridge_native.sh'),
+    Path('tests/run_bridge_native.sh'),Path('main/bench_diag.h'),
 ]
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -110,13 +110,31 @@ a=unique(audio,'static portMUX_TYPE amp_mux');b=unique(audio,'esp_err_t audio_ha
 body=audio[a:b];hashes={'amp_latch':digest(body.encode())}
 (out/'bridge-amp-production.inc').write_text(body)
 (out/'amp-bodies.json').write_text(json.dumps({'source':'main/audio_test.c','sha256':digest(audio.encode()),'bodies':hashes},indent=2)+'\n')
+(out/'freertos').mkdir()
+(out/'freertos/FreeRTOS.h').write_text('#pragma once\n#define configMAX_TASK_NAME_LEN 16\n#define tskNO_AFFINITY 0x7fffffff\ntypedef unsigned UBaseType_t;\n')
+(out/'freertos/task.h').write_text('''#pragma once
+typedef struct {const char *pcTaskName;unsigned xTaskNumber,uxCurrentPriority,ulRunTimeCounter;int xCoreID;} TaskStatus_t;
+static unsigned bench_fixture_count;
+static TaskStatus_t bench_fixture_tasks[96];
+#define eInvalid 0
+static inline void vTaskGetInfo(void *h,TaskStatus_t *s,int stack,int state){
+    (void)h;(void)stack;(void)state;
+    *s=(TaskStatus_t){.pcTaskName="fixture",.xTaskNumber=1,.xCoreID=1};
+}
+static inline unsigned uxTaskGetSystemState(TaskStatus_t *s,unsigned n,void *total){
+    (void)total;
+    if(n<bench_fixture_count)return 0;
+    memcpy(s,bench_fixture_tasks,bench_fixture_count*sizeof(*s));return bench_fixture_count;
+}
+''')
 for p,data in snapshots.items():
     assert Path(p).read_bytes()==data,('input changed during extraction',p)
 (out/'input-hashes.json').write_text(json.dumps({
     'inputs':{p:digest(data) for p,data in snapshots.items()},
     'generated':{str(p.resolve()):digest(p.read_bytes()) for p in [
         out/'bridge-runtime-production.inc',out/'bridge-amp-production.inc',
-        out/'production-bodies.json',out/'amp-bodies.json']},
+        out/'production-bodies.json',out/'amp-bodies.json',
+        out/'freertos/FreeRTOS.h',out/'freertos/task.h']},
 },indent=2)+'\n')
 PY
 
@@ -179,8 +197,8 @@ do
     if "$out/runtime" "$name"; then rc=0; else rc=$?; failed=1; fi
     printf '%s %s\n' "$name" "$rc" >> "$out/case-results.txt"
 done
-for name in mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
-    capture-near-full capture-read-failure cleanup-audio-final cleanup-timeout cleanup-transport-timeout
+for name in mic-play mic-stages mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
+    capture-near-full capture-read-failure cleanup-cpu cleanup-audio-final cleanup-timeout cleanup-transport-timeout
 do
     if "$out/runtime-micdiag" "$name"; then rc=0; else rc=$?; failed=1; fi
     printf '%s %s\n' "$name" "$rc" >> "$out/micdiag-case-results.txt"

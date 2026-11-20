@@ -251,6 +251,18 @@ static void console(void *arg) {
                 if(!strcmp(line,"tailnet start"))report(tailnet_spike_start());
                 else if(!strcmp(line,"tailnet cancel")){tailnet_spike_cancel();report(ESP_OK);}
                 else if(!strcmp(line,"tailnet status"))report(ESP_OK);
+#if defined(PET_PRIVATE_MIC_DIAG)
+                else if(!strcmp(line,"voice on")){
+                    live_voice_start();
+                    static const char ack[]="pet-bench-v1 voice on\n";
+                    usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
+                }
+                else if(!strcmp(line,"voice off")){
+                    live_voice_stop();
+                    static const char ack[]="pet-bench-v1 voice off\n";
+                    usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
+                }
+#endif
             }
             memset(line,0,sizeof(line));n=0;discard=false;
         } else if((unsigned char)c<32||(unsigned char)c>126||n>=sizeof(line)-1)discard=true;

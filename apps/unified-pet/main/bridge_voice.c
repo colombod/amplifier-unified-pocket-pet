@@ -77,7 +77,13 @@ enum { BV_END_OFF, BV_END_ERROR, BV_END_RETRY };
 typedef struct {
     unsigned read,read_errors,read_max_us,startup,gated,admitted,queue_peak;
 } bv_diag_capture_t;
-typedef struct {unsigned popped,completed;} bv_diag_owner_t;
+typedef struct {
+    unsigned popped,completed,send_count,send_us_max,frame_count,frame_us_max;
+    uint64_t send_us_total,frame_us_total;
+    unsigned loop_us_max,frames_waiting_peak,playback_peak;
+} bv_diag_owner_t;
+typedef struct {unsigned play_bytes,play_skipped,play_write_us_max;} bv_diag_play_t;
+#define BV_DIAG_TASKS 96u
 static int bv_diag_bin(int64_t start,int64_t stamp,bool *clipped){
     int64_t age=stamp-start;
     if(age<0)return -1;
@@ -131,9 +137,15 @@ typedef struct {
     live_message_t assembly;
 #if defined(PET_PRIVATE_MIC_DIAG)
     int64_t mic_start;
-    bool mic_started,mic_clipped,owner_clipped;
+    bool mic_started,mic_clipped,owner_clipped,play_clipped;
     bv_diag_capture_t mic_bins[BV_DIAG_BINS];
     bv_diag_owner_t owner_bins[BV_DIAG_BINS];
+    bv_diag_play_t play_bins[BV_DIAG_BINS];
+    int64_t loop_start,tasks_start;
+    TaskStatus_t *task_scratch;
+    pet_bench_task_t *tasks_before,*tasks_after;
+    unsigned tasks_before_n;
+    pet_bench_task_t mic_task,play_task;
 #endif
 } bridge_voice_t;
 static SemaphoreHandle_t guard;
@@ -150,6 +162,36 @@ static inline bv_diag_owner_t *bv_diag_owner_bin(bridge_voice_t *c){
     if(!c->mic_started)return NULL;
     int i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->owner_clipped);
     return i<0?NULL:&c->owner_bins[i];
+}
+static void bv_diag_peaks(bridge_voice_t *c,bv_diag_owner_t *b){
+    unsigned n=uxQueueMessagesWaiting(c->frames);
+    if(n>b->frames_waiting_peak)b->frames_waiting_peak=n;
+    n=xStreamBufferBytesAvailable(c->playback);
+    if(n>b->playback_peak)b->playback_peak=n;
+}
+static void bv_diag_loop(bridge_voice_t *c){
+    int64_t now=esp_timer_get_time();
+    bv_diag_owner_t *b=bv_diag_owner_bin(c);
+    if(b){
+        if(c->loop_start&&(uint64_t)(now-c->loop_start)>b->loop_us_max)b->loop_us_max=now-c->loop_start;
+        bv_diag_peaks(c,b);
+    }
+    c->loop_start=now;
+}
+static void bv_diag_frame(bridge_voice_t *c,int64_t begin){
+    bv_diag_owner_t *b=bv_diag_owner_bin(c);
+    if(b){
+        uint64_t total=b->frame_us_total,max=b->frame_us_max;
+        pet_bench_time(&total,&max,esp_timer_get_time()-begin);
+        b->frame_us_total=total;b->frame_us_max=max;b->frame_count++;
+        bv_diag_peaks(c,b);
+    }
+}
+static unsigned bv_diag_snapshot(bridge_voice_t *c,pet_bench_task_t *out){
+    if(!c->task_scratch||!out)return 0;
+    UBaseType_t n=uxTaskGetSystemState(c->task_scratch,BV_DIAG_TASKS,NULL);
+    for(unsigned i=0;i<n;i++)pet_bench_task_copy(&out[i],&c->task_scratch[i]);
+    return n;
 }
 #endif
 static bool take(void){return guard&&xSemaphoreTake(guard,pdMS_TO_TICKS(100))==pdTRUE;}
@@ -285,6 +327,9 @@ static void capture_task(void *arg){
 #endif
         if(admitted!=sizeof(pcm)){failure(c,"overflow");break;}
     }
+#if defined(PET_PRIVATE_MIC_DIAG)
+    pet_bench_task_final(&c->mic_task);
+#endif
     setup_bridge_wipe(pcm,sizeof(pcm));xEventGroupSetBits(c->events,BV_IDLE|BV_CAPTURE_DONE);
     portENTER_CRITICAL(&completion_mux);
     atomic_store_explicit(&c->capture_exited,true,memory_order_release);
@@ -331,10 +376,31 @@ static void play_task(void *arg){
             if(live_pcm_audible(pcm,n))
                 atomic_store(&c->speaker_until,(uint32_t)(esp_timer_get_time()/1000)+BV_SPEAKER_HOLD_MS);
             /* Only digital silence is ever skipped, and only while behind. */
-            else if(xStreamBufferBytesAvailable(c->playback)>BV_CATCHUP)continue;
+            else if(xStreamBufferBytesAvailable(c->playback)>BV_CATCHUP){
+#if defined(PET_PRIVATE_MIC_DIAG)
+                int i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->play_clipped);
+                if(i>=0)c->play_bins[i].play_skipped+=n;
+#endif
+                continue;
+            }
         }
+#if defined(PET_PRIVATE_MIC_DIAG)
+        int64_t write_begin=esp_timer_get_time();
+        esp_err_t write_result=audio_stream_write(c->audio,pcm,n);
+        int i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->play_clipped);
+        if(i>=0){
+            bv_diag_play_t *b=&c->play_bins[i];b->play_bytes+=n;
+            unsigned us=esp_timer_get_time()-write_begin;
+            if(us>b->play_write_us_max)b->play_write_us_max=us;
+        }
+        if(write_result!=ESP_OK){note_exit(c,BV_EXIT_SPEAKER);failure(c,"reply_unavailable");break;}
+#else
         if(audio_stream_write(c->audio,pcm,n)!=ESP_OK){note_exit(c,BV_EXIT_SPEAKER);failure(c,"reply_unavailable");break;}
+#endif
     }
+#if defined(PET_PRIVATE_MIC_DIAG)
+    pet_bench_task_final(&c->play_task);
+#endif
     setup_bridge_wipe(pcm,sizeof(pcm));xEventGroupSetBits(c->events,BV_PLAY_DONE);
     portENTER_CRITICAL(&completion_mux);
     atomic_store_explicit(&c->play_exited,true,memory_order_release);
@@ -468,10 +534,19 @@ static bool append_audio(bridge_voice_t *c,size_t n,int64_t *next_audio){
         if(room_ms>BV_SEND_MS+BV_SEND_ROOM_MS)limit=room_ms-BV_SEND_ROOM_MS;
     }
     int64_t admitted_at=0;
-    if(!send_frame_timed(c,c->append_json,limit,&admitted_at))return false;
 #if defined(PET_PRIVATE_MIC_DIAG)
+    int64_t send_begin=esp_timer_get_time();
+    bool sent=send_frame_timed(c,c->append_json,limit,&admitted_at);
     bv_diag_owner_t *b=bv_diag_owner_bin(c);
+    if(b){
+        uint64_t max=b->send_us_max;
+        pet_bench_time(&b->send_us_total,&max,esp_timer_get_time()-send_begin);
+        b->send_us_max=max;b->send_count++;
+    }
+    if(!sent)return false;
     if(b)b->completed+=n; /* raw PCM bytes in fully returned SDK sends, not peer receipts */
+#else
+    if(!send_frame_timed(c,c->append_json,limit,&admitted_at))return false;
 #endif
     pace_sent_audio(next_audio,admitted_at,n);
     /* The pacing above never sends faster than real time and forgives only 5 ms
@@ -720,16 +795,18 @@ static bool bv_diag_write(const char *line,int n,size_t cap,int64_t until){
     return n>0&&(size_t)n<cap&&left>0&&
         usb_serial_jtag_write_bytes(line,(size_t)n,pdMS_TO_TICKS((unsigned)(left/1000)))==n;
 }
-static void bv_diag_report(const bridge_voice_t *c){
+static void bv_diag_report(bridge_voice_t *c){
     if(!c->mic_started)return;
     /* No model lock; both audio tasks and the transport have settled. One
      * bounded best-effort write window on the existing USB console. The
      * operator must discard a report without its trailer. */
-    int64_t until=esp_timer_get_time()+250000;
+    int64_t until=esp_timer_get_time()+2000000;
+    unsigned count=c->tasks_before_n?bv_diag_snapshot(c,c->tasks_after):0,lost=0;
+    int64_t elapsed=esp_timer_get_time()-c->tasks_start;
     int64_t terminal=c->ended_at-c->mic_start;
     unsigned ms=terminal>0?(unsigned)(terminal/1000):0;
     unsigned residual=(unsigned)xStreamBufferBytesAvailable(c->capture);
-    char line[144];
+    char line[512];
     int n=snprintf(line,sizeof(line),"pet-mic-v1 begin %u %u %u %u %u\n",
         BV_DIAG_BINS,ms,(unsigned)(c->mic_clipped||c->owner_clipped),residual,atomic_load(&c->exit_reason));
     if(!bv_diag_write(line,n,sizeof(line),until))return;
@@ -741,7 +818,69 @@ static void bv_diag_report(const bridge_voice_t *c){
         if(!bv_diag_write(line,n,sizeof(line),until))return;
     }
     static const char end[]="pet-mic-v1 end\n";
-    (void)bv_diag_write(end,sizeof(end)-1,sizeof(end),until);
+    if(!bv_diag_write(end,sizeof(end)-1,sizeof(end),until))return;
+    /* Positional, decimal, times in microseconds unless named ms. No content:
+     * pet-bench-v1 begin <bins> <clipped>
+     * pet-bench-v1 bin <i> <send_count> <send_us_total> <send_us_max>
+     *   <frame_count> <frame_us_total> <frame_us_max> <loop_us_max>
+     *   <frames_waiting_peak> <playback_peak> <play_bytes> <play_skipped> <play_write_us_max>
+     * pet-bench-v1 transport <write_wait_us_total> <write_wait_us_max> <write_wait_count>
+     *   <write_us_total> <write_us_max> <read_hold_us_total> <read_hold_us_max>
+     *   <read_hold_count> <idle_read_polls>
+     * pet-bench-v1 task <name> <core|-1> <priority> <delta_us>
+     * pet-bench-v1 tasks_status <before_count> <after_count> <lost_count>
+     * pet-bench-v1 tasks_total <elapsed_us>
+     * pet-bench-v1 end
+     * Final own-task records include tasks deleted before the end snapshot.
+     * Other vanished tasks are counted as lost, never assigned a fake delta.
+     * Modular uint32 runtime deltas are valid for this <10 minute window. */
+    n=snprintf(line,sizeof(line),"pet-bench-v1 begin %u %u\n",BV_DIAG_BINS,
+        (unsigned)(c->mic_clipped||c->owner_clipped||c->play_clipped));
+    if(!bv_diag_write(line,n,sizeof(line),until))return;
+    for(unsigned i=0;i<BV_DIAG_BINS;i++){
+        const bv_diag_owner_t *o=&c->owner_bins[i];const bv_diag_play_t *p=&c->play_bins[i];
+        n=snprintf(line,sizeof(line),"pet-bench-v1 bin %u %u %llu %u %u %llu %u %u %u %u %u %u %u\n",
+            i,o->send_count,(unsigned long long)o->send_us_total,o->send_us_max,
+            o->frame_count,(unsigned long long)o->frame_us_total,o->frame_us_max,o->loop_us_max,
+            o->frames_waiting_peak,o->playback_peak,p->play_bytes,p->play_skipped,p->play_write_us_max);
+        if(!bv_diag_write(line,n,sizeof(line),until))return;
+    }
+    pet_bench_transport_t t;bridge_transport_bench(&t);
+    const pet_bench_io_t *s=&t.io;
+    n=snprintf(line,sizeof(line),"pet-bench-v1 transport %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
+        (unsigned long long)s->write_wait_us_total,(unsigned long long)s->write_wait_us_max,
+        (unsigned long long)s->write_wait_count,(unsigned long long)s->write_us_total,
+        (unsigned long long)s->write_us_max,(unsigned long long)s->read_hold_us_total,
+        (unsigned long long)s->read_hold_us_max,(unsigned long long)s->read_hold_count,
+        (unsigned long long)s->idle_read_polls);
+    if(!bv_diag_write(line,n,sizeof(line),until))return;
+    pet_bench_task_t retired[]={c->mic_task,c->play_task,t.task};
+    unsigned after=count;
+    for(unsigned i=0;i<3;i++){
+        if(!retired[i].number||!c->tasks_after||!c->tasks_before_n||!after)continue;
+        bool found=false;
+        for(unsigned j=0;j<count;j++)if(c->tasks_after[j].number==retired[i].number)found=true;
+        if(!found&&count<BV_DIAG_TASKS)c->tasks_after[count++]=retired[i];
+    }
+    for(unsigned i=0;i<c->tasks_before_n;i++){
+        bool found=false;
+        for(unsigned j=0;j<count;j++)if(c->tasks_before[i].number==c->tasks_after[j].number)found=true;
+        if(!found)lost++;
+    }
+    for(unsigned i=0;i<count;i++){
+        const pet_bench_task_t *task=&c->tasks_after[i];uint32_t base=0;
+        for(unsigned j=0;j<c->tasks_before_n;j++)
+            if(c->tasks_before[j].number==task->number)base=c->tasks_before[j].runtime;
+        n=snprintf(line,sizeof(line),"pet-bench-v1 task %s %d %u %lu\n",
+            task->name,task->core,task->priority,(unsigned long)(uint32_t)(task->runtime-base));
+        if(!bv_diag_write(line,n,sizeof(line),until))return;
+    }
+    n=snprintf(line,sizeof(line),"pet-bench-v1 tasks_status %u %u %u\n",c->tasks_before_n,after,lost);
+    if(!bv_diag_write(line,n,sizeof(line),until))return;
+    n=snprintf(line,sizeof(line),"pet-bench-v1 tasks_total %llu\n",(unsigned long long)(elapsed>0?elapsed:0));
+    if(!bv_diag_write(line,n,sizeof(line),until))return;
+    static const char bench_end[]="pet-bench-v1 end\n";
+    (void)bv_diag_write(bench_end,sizeof(bench_end)-1,sizeof(bench_end),until);
 }
 #endif
 static void cleanup(bridge_voice_t *c,bool wait){
@@ -889,6 +1028,9 @@ static void cleanup(bridge_voice_t *c,bool wait){
     if(c->append_pcm){setup_bridge_wipe(c->append_pcm,BV_APPEND);free(c->append_pcm);}
     if(c->append_json){setup_bridge_wipe(c->append_json,7000);free(c->append_json);}
     if(c->decoded){setup_bridge_wipe(c->decoded,BV_APPEND);free(c->decoded);}
+#if defined(PET_PRIVATE_MIC_DIAG)
+    free(c->task_scratch);free(c->tasks_before);free(c->tasks_after);
+#endif
     setup_bridge_wipe(c,sizeof(*c));free(c);
     live_voice_bridge_status(again?LIVE_RECONNECTING:final_error?LIVE_ERROR:LIVE_OFF,final.status);
 }
@@ -925,6 +1067,12 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
     c->append_pcm=heap_caps_malloc(BV_APPEND,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     c->append_json=heap_caps_malloc(7000,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     c->decoded=heap_caps_malloc(BV_APPEND,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    /* Optional diagnostic storage: allocation failure never changes call admission. */
+    c->task_scratch=heap_caps_malloc(BV_DIAG_TASKS*sizeof(*c->task_scratch),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    c->tasks_before=heap_caps_malloc(BV_DIAG_TASKS*sizeof(*c->tasks_before),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    c->tasks_after=heap_caps_malloc(BV_DIAG_TASKS*sizeof(*c->tasks_after),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+#endif
     if(!c->frames||!c->events||!c->capture_memory||!c->playback_memory||!c->assembly_memory||!c->append_pcm||!c->append_json||!c->decoded)goto setup_failed;
     c->capture=xStreamBufferCreateStatic(BV_MIC+1,1,c->capture_memory,&c->capture_meta);
     c->playback=xStreamBufferCreateStatic(BV_SPEAKER+1,1,c->playback_memory,&c->playback_meta);
@@ -967,12 +1115,26 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
     }
     int64_t next_audio=0,begin_by=esp_timer_get_time()+BV_BEGIN_US;
     while(esp_timer_get_time()<c->work&&!stopping(c)&&!atomic_load(&c->failed)){
+#if defined(PET_PRIVATE_MIC_DIAG)
+        bv_diag_loop(c);
+#endif
         bv_frame_t frame;
         if(xQueueReceive(c->frames,&frame,pdMS_TO_TICKS(5))==pdTRUE){
+#if defined(PET_PRIVATE_MIC_DIAG)
+            int64_t frame_begin=esp_timer_get_time();
+#endif
             char *message=frame.text;
             bridge_event_t event;
-            if(!bridge_parse(message,strlen(message),&event)){setup_bridge_wipe(message,strlen(message));free(message);protocol_failed(c);failure(c,"invalid_preview");break;}
-            if(!take()){c->tail_incomplete=true;note_exit(c,BV_EXIT_GUARD);bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);break;}
+            if(!bridge_parse(message,strlen(message),&event)){setup_bridge_wipe(message,strlen(message));free(message);
+#if defined(PET_PRIVATE_MIC_DIAG)
+                bv_diag_frame(c,frame_begin);
+#endif
+                protocol_failed(c);failure(c,"invalid_preview");break;}
+            if(!take()){c->tail_incomplete=true;note_exit(c,BV_EXIT_GUARD);bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);
+#if defined(PET_PRIVATE_MIC_DIAG)
+                bv_diag_frame(c,frame_begin);
+#endif
+                break;}
             observe_converse_send(c,&event);
             if(event.kind==BR_EV_ERROR&&!c->terminal_code[0])
                 snprintf(c->terminal_code,sizeof(c->terminal_code),"%s",event.code);
@@ -995,6 +1157,9 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
                 if(e||!atomic_load(&c->play_gate)||atomic_load(&c->stop)||xStreamBufferSend(c->playback,c->decoded,bytes,0)!=bytes){note_exit(c,BV_EXIT_SPEAKER);atomic_store(&c->failed,true);}
                 else c->received_pcm+=(unsigned)bytes;}
             give();bridge_event_clear(&event);setup_bridge_wipe(message,strlen(message));free(message);
+#if defined(PET_PRIVATE_MIC_DIAG)
+            bv_diag_frame(c,frame_begin);
+#endif
         }
         if(transport_lost(c)){note_exit(c,BV_EXIT_DISCONNECTED);failure(c,"reply_unavailable");break;}
         unsigned command=atomic_exchange(&c->command,0);
@@ -1013,6 +1178,9 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
 #if defined(PET_PRIVATE_MIC_DIAG)
             c->mic_start=esp_timer_get_time();
             c->mic_started=true;
+            c->tasks_start=esp_timer_get_time();
+            c->tasks_before_n=bv_diag_snapshot(c,c->tasks_before);
+            c->loop_start=c->mic_start;
 #endif
             if(xTaskCreate(capture_task,"pet_bridge_mic",4096,c,5,NULL)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
             c->audio_tasks|=BV_CAPTURE_DONE;

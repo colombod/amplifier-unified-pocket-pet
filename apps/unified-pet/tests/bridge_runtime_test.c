@@ -87,16 +87,25 @@ static enum a5_event a5_event;
 static int64_t a5_event_at;
 static unsigned a5_event_sends;
 #if defined(PET_PRIVATE_MIC_DIAG)
+#include "bench_diag.h"
+static void bridge_transport_bench(pet_bench_transport_t *out){*out=(pet_bench_transport_t){0};}
 static unsigned mic_period, mic_service_every, mic_last_read, mic_lines;
+static unsigned bench_write_us;
 static bool mic_owner_tick;
 static int64_t mic_cursor;
-static char mic_header[144], mic_trailer[144];
+static char mic_header[512], mic_trailer[512];
+static char bench_task_lines[2][512];
+static unsigned bench_task_count;
 static int usb_serial_jtag_write_bytes(const void *p,size_t n,unsigned timeout){
-    assert(cleanup_mode&&!model_lock_held&&codec_closes==1&&!deleted_streams&&timeout<=250);
+    assert(cleanup_mode&&!model_lock_held&&codec_closes==1&&!deleted_streams&&timeout<=2000);
     assert(n<sizeof(mic_header));
     char *dst=mic_lines++?mic_trailer:mic_header;
     memcpy(dst,p,n);dst[n]=0;
-    assert(!strncmp(dst,"pet-mic-v1 ",11));
+    assert(!strncmp(dst,"pet-mic-v1 ",11)||!strncmp(dst,"pet-bench-v1 ",13));
+    if(!strncmp(dst,"pet-bench-v1 task ",18)){
+        assert(bench_task_count<2);
+        strcpy(bench_task_lines[bench_task_count++],dst);
+    }
     return (int)n;
 }
 #endif
@@ -176,7 +185,13 @@ static esp_err_t audio_stream_read(audio_session_t *a,void *p,unsigned n){
     (void)a;reads++;if(!a5_read(p,n))memset(p,1,n);
     return a5_enabled&&reads==a5_read_failure?ESP_ERR_INVALID_STATE:ESP_OK;
 }
-static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){(void)a;assert(played+n<=sizeof(played_bytes));memcpy(played_bytes+played,p,n);writes++;played+=n;return ESP_OK;}
+static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){
+    (void)a;assert(played+n<=sizeof(played_bytes));memcpy(played_bytes+played,p,n);writes++;played+=n;
+#if defined(PET_PRIVATE_MIC_DIAG)
+    now+=bench_write_us;
+#endif
+    return ESP_OK;
+}
 static bool bridge_transport_upgraded(bridge_transport_t *t){return t&&t->upgraded&&!t->cancelled;}
 static bool bridge_transport_take_data(bridge_transport_t *t,bool *after,int64_t *at){(void)t;*after=false;*at=now;return true;}
 static int64_t bridge_transport_end_at(bridge_transport_t *t){(void)t;return 0;}
@@ -263,6 +278,8 @@ static void reset(void){
     a5_event=A5_EVENT_NONE;a5_event_at=0;a5_event_sends=0;a5_mic=&mic;
 #if defined(PET_PRIVATE_MIC_DIAG)
     mic_period=mic_service_every=mic_last_read=mic_lines=0;
+    bench_write_us=0;
+    bench_fixture_count=bench_task_count=0;
     mic_cursor=0;mic_owner_tick=false;
     mic_header[0]=mic_trailer[0]=0;
 #endif
@@ -875,6 +892,19 @@ static void cleanup_case(const char *name){
 #if defined(PET_PRIVATE_MIC_DIAG)
     c->mic_start=now;c->mic_started=true;
     c->capture->before=c->capture->after=STREAM_CANARY;c->capture->n=960;
+    if(!strcmp(name,"cleanup-cpu")){
+        c->task_scratch=calloc(BV_DIAG_TASKS,sizeof(*c->task_scratch));
+        c->tasks_before=calloc(BV_DIAG_TASKS,sizeof(*c->tasks_before));
+        c->tasks_after=calloc(BV_DIAG_TASKS,sizeof(*c->tasks_after));
+        assert(c->task_scratch&&c->tasks_before&&c->tasks_after);
+        bench_fixture_count=1;
+        bench_fixture_tasks[0]=(TaskStatus_t){.pcTaskName="owner",.xTaskNumber=7,
+            .xCoreID=tskNO_AFFINITY,.uxCurrentPriority=5,.ulRunTimeCounter=UINT32_MAX-999};
+        c->tasks_before_n=bv_diag_snapshot(c,c->tasks_before);
+        c->tasks_start=now-2000;
+        bench_fixture_tasks[0].ulRunTimeCounter=1000; /* wraps -> 2000 us */
+        c->mic_task=(pet_bench_task_t){.name="retired",.number=8,.core=1,.priority=5,.runtime=400};
+    }
 #endif
     bool retained=false;
     if(!strcmp(name,"cleanup-unknown")){c->model.confirmed=true;c->model.phase=BR_SENDING;}
@@ -919,8 +949,13 @@ static void cleanup_case(const char *name){
     }
     assert(current==NULL&&codec_closes==1&&deleted_queues==1&&deleted_streams==2&&deleted_groups==1&&!received_n);
 #if defined(PET_PRIVATE_MIC_DIAG)
-    assert(mic_lines==34&&!strcmp(mic_header,"pet-mic-v1 begin 32 0 0 960 0\n"));
-    assert(!strcmp(mic_trailer,"pet-mic-v1 end\n"));
+    assert(mic_lines==(!strcmp(name,"cleanup-cpu")?73u:71u)&&!strcmp(mic_header,"pet-mic-v1 begin 32 0 0 960 0\n"));
+    assert(!strcmp(mic_trailer,"pet-bench-v1 end\n"));
+    if(!strcmp(name,"cleanup-cpu")){
+        assert(bench_task_count==2);
+        assert(!strcmp(bench_task_lines[0],"pet-bench-v1 task owner -1 5 2000\n"));
+        assert(!strcmp(bench_task_lines[1],"pet-bench-v1 task retired 1 5 400\n"));
+    }
 #endif
     assert(!atomic_load(&restart_required)&&!terminal_view.can_send&&!terminal_view.can_stop);
     bridge_view_t view;assert(bridge_voice_snapshot(&view));
@@ -963,7 +998,28 @@ static void mic_profile(const char *name){
     }
 }
 static void mic_controls(const char *name){
-    if(!strcmp(name,"mic-stop")){
+    if(!strcmp(name,"mic-play")){
+        reset();context.mic_start=now;context.mic_started=true;
+        atomic_store(&context.play_gate,true);atomic_store(&context.drain,true);
+        atomic_store(&context.converse,true);
+        speaker.n=30000;memset(speaker.data,0,speaker.n);
+        end_on_delay=true;bench_write_us=2300;
+        play_task(&context);
+        assert(context.play_bins[0].play_skipped==5760);
+        assert(context.play_bins[0].play_bytes==24240&&played==24240);
+        assert(context.play_bins[0].play_write_us_max==2300);
+    }else if(!strcmp(name,"mic-stages")){
+        a5_begin(75);a5_seed(960);int64_t next=0;
+        a5_until=now+5000;production_capture_owner(&context,&next);
+        bv_diag_owner_t *b=&context.owner_bins[0];
+        assert(b->send_count==1&&b->send_us_total==75000&&b->send_us_max==75000);
+        context.loop_start=now-125000;
+        bv_diag_loop(&context);
+        assert(b->loop_us_max==125000);
+        bv_diag_frame(&context,now-12000);
+        bv_diag_frame(&context,now-4000);
+        assert(b->frame_count==2&&b->frame_us_total==16000&&b->frame_us_max==12000);
+    }else if(!strcmp(name,"mic-stop")){
         a5_capture_inflight(A5_EVENT_STOP);
         assert(context.mic_bins[0].read==10560&&context.mic_bins[0].startup==9600);
         assert(context.mic_bins[0].gated==960&&!context.mic_bins[0].admitted);
