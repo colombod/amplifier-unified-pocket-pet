@@ -635,10 +635,12 @@ The normal `0.3.12-voice-steady` build has not been qualified by a spoken call.
 
 In `0.3.13-voice-clear`, both codec audio tasks run at priority 7 pinned to
 core 0, while the voice owner remains at priority 6 on core 1.
-On-device bench comparisons at priority 5/core 0 had holes in all 6 calls
-(10–15 s of each 25 s), codec writes up to 113 ms late against 60 ms of DMA,
-and 95% microphone delivery; at priority 7/core 0, all 22 calls had no holes
-and no codec write more than 28 ms late.
+On-device bench comparisons at priority 5/core 0 had holes in 7 of 8 calls
+(10–15 s of each 25 s), codec writes up to 117 ms late against 60 ms of DMA,
+and 95% microphone delivery; at priority 7/core 0, no codec write in 19 calls
+was more than 28 ms late. Two of those calls still had brief gaps (0.14 s, and
+three totalling 1.1 s) when reply audio arrived more than about 0.34 s late on
+a weak Wi-Fi link (-73 to -81 dBm); the 320 ms playback prebuffer is unchanged.
 The normal `0.3.13-voice-clear` build has not yet been qualified by a spoken call.
 
 The draft gateway no longer sends a request while the pet's audio is known to be

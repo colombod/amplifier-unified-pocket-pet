@@ -34,10 +34,11 @@
  * the two buffers (about 1% of a core each), but the codec's DMA holds just
  * 60 ms: a task that is scheduled later than that leaves a hole in the sound
  * (crackling) and loses microphone samples. At the socket reader's priority (5)
- * on core 0 that happened in every bench call: 10-15 seconds per 25 s call with
- * holes, writes up to 113 ms late, microphone at 95%. Above the voice owner (6),
- * on the core the owner is not on, 22 of 22 calls had none and no write was more
- * than 28 ms (working-files/voice-bench runs 15 and 16, 20 November 2026). */
+ * on core 0 that happened in 7 of 8 bench calls: 10-15 seconds per 25 s call
+ * with holes, writes up to 117 ms late, microphone at 95%. Above the voice owner
+ * (6), on the core the owner is not on, no write in 19 calls was later than
+ * 28 ms; what gaps remained (2 calls) were network underruns of the playback
+ * buffer (working-files/voice-bench runs 15-17, 20 November 2026). */
 #define BV_AUDIO_PRIORITY 7
 #define BV_AUDIO_CORE 0
 #define BV_FRAMES 32             /* queued host messages; a short network burst must not end the call */
