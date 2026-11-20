@@ -517,6 +517,14 @@ void live_voice_reap_finished(void) {
  }
  xSemaphoreGive(status_lock);
 }
+#if defined(PET_PRIVATE_MIC_DIAG)
+/* Bench only. The codec's volume and gain calls use the FPU, and this chip
+ * pins a task to its current core at its first FPU use, so an unpinned voice
+ * owner ends up on either core for the whole call. -1 keeps that behaviour;
+ * 0 or 1 creates the owner already pinned, to compare the two placements. */
+static atomic_int bench_voice_core=-1;
+void live_voice_bench_core(int core){atomic_store(&bench_voice_core,core<0?-1:core?1:0);}
+#endif
 void live_voice_start(void) {
  if(!tailnet_spike_audio_acquire())return;
  audio_test_status_t audio;audio_test_snapshot(&audio);
@@ -526,7 +534,13 @@ void live_voice_start(void) {
  audio_stream_prepare(); /* under the same Start/Stop arbitration lock */
  strlcpy(status.message,"Preparing voice...",sizeof(status.message));atomic_store(&stop_requested,false);
  session_deadline_us=esp_timer_get_time()+(int64_t)VOICE_SESSION_LIMIT_MS*1000;
+#if defined(PET_PRIVATE_MIC_DIAG)
+ int bench_core=atomic_load(&bench_voice_core);
+ if((bench_core<0?xTaskCreate(worker,"pet_live",12288,NULL,4,&worker_task):
+     xTaskCreatePinnedToCore(worker,"pet_live",12288,NULL,4,&worker_task,bench_core))!=pdPASS) {
+#else
  if(xTaskCreate(worker,"pet_live",12288,NULL,4,&worker_task)!=pdPASS) {
+#endif
   worker_task=NULL;worker_finished=false;status.active=false;status.state=LIVE_ERROR;
   session_deadline_us=0;
   strlcpy(status.message,"Cannot start voice worker.",sizeof(status.message));

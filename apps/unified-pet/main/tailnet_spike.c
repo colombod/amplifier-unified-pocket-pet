@@ -257,6 +257,11 @@ static void console(void *arg) {
                     static const char ack[]="pet-bench-v1 voice on\n";
                     usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
                 }
+                else if(!strcmp(line,"voice core 0")||!strcmp(line,"voice core 1")||!strcmp(line,"voice core any")){
+                    live_voice_bench_core(line[11]=='a'?-1:line[11]-'0');
+                    static const char ack[]="pet-bench-v1 voice core\n";
+                    usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
+                }
                 else if(!strcmp(line,"voice off")){
                     live_voice_stop();
                     static const char ack[]="pet-bench-v1 voice off\n";

@@ -14,6 +14,10 @@ void live_voice_init(void);
  * 15 November 2026); mic off always ends that at once. */
 void live_voice_start(void);
 void live_voice_stop(void);
+#if defined(PET_PRIVATE_MIC_DIAG)
+/* Bench only: core for the next call's owner task; negative leaves it unpinned. */
+void live_voice_bench_core(int core);
+#endif
 /* Reclaim only a finished, suspended worker before releasing shared admission. */
 void live_voice_reap_finished(void);
 void live_voice_snapshot(live_status_t *out);
