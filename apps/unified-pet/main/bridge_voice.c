@@ -30,6 +30,8 @@
 #define BV_APPEND 4800
 #define BV_PACING_JITTER_US 5000
 /* Conversation mode: a continuous host stream for up to ten minutes. */
+#define BV_AUDIO_PRIORITY 5      /* microphone and speaker tasks */
+#define BV_AUDIO_CORE (-1)       /* unpinned */
 #define BV_FRAMES 32             /* queued host messages; a short network burst must not end the call */
 #define BV_PREBUFFER 15360       /* 320 ms jitter buffer before (re)starting playback */
 #define BV_PRIME_WAIT_US 400000  /* a short burst before a gap is played, not held for the next one */
@@ -186,6 +188,14 @@ static atomic_bool restart_required;
 static struct { bool again,reached; unsigned failures; int64_t ended_at; } call_report;
 #if defined(PET_PRIVATE_MIC_DIAG)
 static atomic_uint bench_prebuffer_ms=320;
+/* Bench only: priority and core of the two audio tasks of following calls.
+ * Defaults are the normal build's (BV_AUDIO_PRIORITY, unpinned). */
+static atomic_uint bench_audio_priority=BV_AUDIO_PRIORITY;
+static atomic_int bench_audio_core=BV_AUDIO_CORE;
+void bridge_voice_bench_audio(unsigned priority,int core){
+    atomic_store(&bench_audio_priority,priority<5?5:priority>7?7:priority);
+    atomic_store(&bench_audio_core,core<0?-1:core?1:0);
+}
 bool bridge_voice_bench_jitter(unsigned ms){
     if(ms!=320&&ms!=480&&ms!=640&&ms!=800&&ms!=960&&ms!=1280)return false;
     atomic_store(&bench_prebuffer_ms,ms);return true;
@@ -1308,9 +1318,16 @@ static void run_call(const setup_bridge_t *cfg,int64_t deadline,bool (*parent_st
             c->tasks_before_n=bv_diag_snapshot(c,c->tasks_before);
             c->loop_start=c->mic_start;
 #endif
-            if(xTaskCreate(capture_task,"pet_bridge_mic",4096,c,5,NULL)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
+#if defined(PET_PRIVATE_MIC_DIAG)
+            unsigned audio_priority=atomic_load(&bench_audio_priority);
+            BaseType_t audio_core=atomic_load(&bench_audio_core)<0?tskNO_AFFINITY:atomic_load(&bench_audio_core);
+#else
+            unsigned audio_priority=BV_AUDIO_PRIORITY;
+            BaseType_t audio_core=BV_AUDIO_CORE<0?tskNO_AFFINITY:BV_AUDIO_CORE;
+#endif
+            if(xTaskCreatePinnedToCore(capture_task,"pet_bridge_mic",4096,c,audio_priority,NULL,audio_core)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
             c->audio_tasks|=BV_CAPTURE_DONE;
-            if(xTaskCreate(play_task,"pet_bridge_out",4096,c,5,NULL)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
+            if(xTaskCreatePinnedToCore(play_task,"pet_bridge_out",4096,c,audio_priority,NULL,audio_core)!=pdPASS){note_exit(c,BV_EXIT_AUDIO);failure(c,"reply_unavailable");break;}
             c->audio_tasks|=BV_PLAY_DONE;c->began_at=esp_timer_get_time();
             if(!take()){note_exit(c,BV_EXIT_GUARD);failure(c,"reply_unavailable");break;}
             if(stopping(c)||atomic_load(&c->failed)){give();quiet(c);break;}
