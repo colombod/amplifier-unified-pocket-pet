@@ -74,6 +74,7 @@ Testing
 - The link rig and the native suites replace the CPU, scheduler, codec, display and
   radio. They cannot show any of the faults above. Reproduce on the pet first.
 - Test the first call after a restart explicitly: it has been the failing one.
-- `tests/isolation_test.py` has one historical failure (a missing
-  `.superpowers/sdd/.gitignore`); any other failure is new.
+- `tests/isolation_test.py` fails on a missing `.superpowers/sdd/.gitignore` and
+  stops there; its pinned hashes of both AGENTS.md files were already stale before
+  this work. Its three other tests pass and must keep passing.
 - One SDK build at a time, pinned local image, no network.
