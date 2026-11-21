@@ -7,7 +7,9 @@ description: Check that the pet gateway still matches an Amplifier Unified relea
 
 Unified answers a paired device only for an explicit allow-list of requests, and
 that list changes between releases. A request outside it gets 403, which the pet
-speaks as "That conversation is busy". Last release checked: Unified 0.114.5.
+speaks as "That conversation is busy". Last releases checked: Unified 0.114.5 and 0.116.0 (device-facing files identical
+in both, read-only check passes on both). The one request answered so far was on
+the release before 0.114.5; no send has been exercised on either since.
 
 ## The gateway's requests
 

@@ -85,9 +85,9 @@ to root/app native and Node suites. Preserve vendor security fixes read-only.
 - Offline core test target (not a claim that it currently passes): `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/tests -t bridge -v`
 - Hardware and physical calls remain separately gated.
 
-### What Unified allows a paired device, checked against Unified 0.114.5
+### What Unified allows a paired device, checked against Unified 0.114.5 and 0.116.0
 
-Recheck `amplifier_web/device_pairing.py` `permits_companion` in the Unified release you target before changing any request; anything else answers 403.
+Recheck `amplifier_web/device_pairing.py` `permits_companion` in the Unified release you target before changing any request; anything else answers 403. Unified can update itself and restart (0.114.5 to 0.116.0 on 21 November 2026, device-facing files unchanged): find the running release before a test.
 
 - Session listing is `GET /api/sessions?view=observation` only. `GET /api/companion` answered 200 until Unified changed and 403 afterwards; every spoken request was then refused.
 - Also allowed, in exactly these shapes: `POST /api/clients/attach` (`kind: native`, `protocolVersion: 1`), `GET /api/conversation/detail?part=messages`, `POST /api/sessions/<id>/commands` with `conversation.send` (`via: chat`, `preserveDraft: true`, `attachmentIds: []`).

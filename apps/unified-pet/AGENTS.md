@@ -53,9 +53,15 @@ Wi-Fi
   flash) the one the pet was on rejects the first attempt within milliseconds and
   the stack silently joins a weaker one: about every second restart on the test
   network, at -75 to -91 dBm, where calls starve. Sorting by signal alone does not
-  fix it (9 of 18 restarts). `network.c` now holds a CANDIDATE that scans, pins the
-  strongest and retries it: 10 of 10 restarts, but it used every retry, and it has
-  not been through the full suites. The pet does not roam after joining.
+  fix it (9 of 18 restarts). `network.c` scans, pins the strongest and retries it:
+  53 of 53 restarts joined the strongest, each time on the third attempt, about 13 s
+  after boot (the first is turned away, the second fails without reaching the access
+  point). Five pinned attempts are allowed; the two spare ones have never been used
+  or tested. The pet does not roam after joining.
+- After a restart, a dead link, a killed listener or a dropped access point in the
+  middle of a call, the next call was clean every time (20 restarts and 3 of each
+  fault on the bench build 0.3.17, provider-free listener). Not tested: the real
+  gateway killed during a call, and a redial that succeeds while the mic stays on.
 - Check signal strength before blaming firmware, gateway or Unified.
 
 Console and bench build
@@ -64,7 +70,8 @@ Console and bench build
   resets it; so does esptool, by design.
 - The normal build has no console: only a person can start a call on it. Build with
   `PET_PRIVATE_MIC_DIAG=1` for the bench: `voice on|off`, `voice last 0..2` (reports
-  of the last three calls, kept until reboot), `voice scan`, and per-call switches.
+  of the last three calls, kept until reboot), `voice scan`, `voice drop` (leave the
+  access point), and per-call switches.
   Reports are counts and timings only. The bench build's sdkconfig lives in
   `build-bench/`; the root `.gitignore` is hash-pinned by the isolation test.
 - The normal binary must contain no bench strings; `tests/run_bridge_native.sh` and
