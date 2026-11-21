@@ -22,6 +22,18 @@ The upstream product goal is a portable voice manager across Amplifier Unified w
 
 Validate builds and hardware separately. Building is not proof that display, touch, microphone, speaker or live API access works. Back up existing board flash before replacing firmware; do not flash merely to test environment setup. Ask for deployment approval only after a concrete build and recovery plan exist.
 
+## Project skills
+
+Procedures for this project live in `.amplifier/skills/` and ship with the repository. Load the one that matches before working that way; register the folder first if your session does not list them (`load_skill(source="<this checkout>/.amplifier/skills")`).
+
+| Skill | Use it when |
+| --- | --- |
+| `pet-voice-triage` | a spoken call failed or sounded wrong: find the cause from recorded counters before changing code |
+| `pet-device-bench` | a firmware question needs a measurement on the physical pet, from USB, with nobody pressing the mic |
+| `pet-unified-compat` | Unified was updated, another Unified release is targeted, or the gateway is refused |
+
+Keep them true: when a procedure or a measured fact changes, change the skill in the same commit.
+
 ## Tracking and upstream boundaries
 
 Use Beads (`bd`) for durable tracking in repositories that include it. Read `.agents/skills/beads/SKILL.md` or `~/.agents/skills/beads/SKILL.md`, then run `bd prime` when context is missing. Use `bd ready`, `bd show`, `bd update --claim` and `bd close` for issue operations. Use `bd remember` for persistent memory; do not create Markdown TODO queues or ad hoc memory files. No active Beads database was present at this firmware handoff. Preserve existing GitHub spike references as historical evidence; do not close them because an isolated device test passes.
