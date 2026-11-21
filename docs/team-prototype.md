@@ -688,8 +688,11 @@ The normal `0.3.14-strong-ap` build has not been qualified by a spoken call.
 The draft gateway no longer sends a request while the pet's audio is known to be
 arriving late, catching up, or still queued toward the provider: it waits for the
 stream to recover and for a fresh quiet period, so trailing words are not cut off
-the request. If the stream does not recover within six seconds in total, nothing
-is sent, the pet shows **Not sent** and the call ends; say it again in a new
+the request. The usual limit is six seconds of cumulative input wait. A single
+long stall gets at most two extra seconds if input is arriving again and at
+least a second of measured backlog has drained. That extension never authorizes
+a send on its own: the input still has to catch up and settle. If it does not,
+nothing is sent, the pet shows **Not sent** and the call ends; say it again in a new
 call. This is an arrival-time estimate. It cannot prove that the provider has
 finished transcribing, so check the Unified conversation for consequential
 requests. With audio arriving on time it adds no delay.

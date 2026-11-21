@@ -134,6 +134,7 @@ CONVERSE_INPUT_LAG_S = 0.3
 CONVERSE_INPUT_GAIN_S = 0.025
 CONVERSE_INPUT_CHECK_S = 0.1
 CONVERSE_INPUT_MAX_S = 6.0  # cumulative detected input wait per request, not per stall
+CONVERSE_INPUT_DRAIN_GRACE_S = 2.0  # once only for a demonstrably draining long stall
 POLL_INTERVAL_S = 1.0
 POLL_MAX_S = 60.0
 ACK_WAIT_S = 10.0

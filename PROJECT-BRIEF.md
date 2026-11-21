@@ -139,6 +139,15 @@ overload can still lose speech. This is a specific loss mechanism, **not**
 proof of the last call's cause, microphone operation, or spoken acceptance.
 It changes no storage layout, credentials, or phone setup.
 
+The firmware alone did not fix delivery: replaying the candidate's 2.5 s
+blackout timings through the previous gateway gave `not_sent` while delayed
+audio was still arriving. With the paired gateway change, a single long,
+demonstrably draining stall can receive up to two additional seconds before
+refusal. The exact same arrival trace with scripted transcript and HTTP
+then submitted the complete phrase once (13.633 s into the replay); a
+stopped recovery still refused. This is a joined offline regression, not a
+human-heard reply or a qualified Unified release.
+
 One integration owner ships one tested firmware/gateway/Unified combination
 from the product repository. Never bulk-promote experimental branches or private
 history. Recover existing tools into the product when a teammate needs them.

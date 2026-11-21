@@ -1531,6 +1531,43 @@ class RealConversationFlowTest(flow.FlowCase):
         await fs.finish()
         self.assertEqual(len(self.client.posts), 1)
 
+    async def _long_link_recovery(self, stops_during_recovery=False):
+        fs = await self.begin_conversation()
+
+        async def audio(frames, interval):
+            for _ in range(frames):
+                await fs.feed(old.audio_frame(2400))
+                await self.clock.advance(interval)
+
+        await audio(5, 0.1)
+        await fs.push(old.delta("prefix", "check my ", 0, 400))
+        await fs.push(old.delegation("buffered"))
+        await self.clock.advance(3.4)
+        await audio(50, 0.05)  # device drains buffered PCM at 2x real time
+        self.assertEqual(self.client.posts, [])
+        await fs.push(old.delta("tail", "waiting conversations", 400, 3800))
+        await audio(15, 0.05)
+        if stops_during_recovery:
+            await self.clock.advance(10)
+            result = await fs.finish()
+            self.assertEqual((result.requests_sent, result.refused_input_late), (0, 1))
+            self.assertEqual(result.input_wait_ms, 8000)
+        else:
+            await audio(3, 0.05)
+            self.assertEqual(self.client.posts, [])
+            await audio(23, 0.1)
+            self.assertEqual([json.loads(p["body"])["args"]["text"] for p in self.client.posts],
+                             ["check my waiting conversations"])
+            await fs.feed('{"type":"pet.stop"}')
+            await fs.finish()
+            self.assertEqual(len(self.client.posts), 1)
+
+    async def test_long_recovered_capture_waits_for_complete_words(self):
+        await self._long_link_recovery()
+
+    async def test_stopped_recovery_cannot_renew_grace_or_submit_prefix(self):
+        await self._long_link_recovery(stops_during_recovery=True)
+
     async def test_real_terminal_unspoken_reply_still_closes_before_next_request(self):
         self.client.reply_text = "x" * 4001
         fs = await self.begin_conversation()
@@ -2231,9 +2268,12 @@ class RealConversationFlowTest(flow.FlowCase):
         self.store.save_attachment(replace(attached, host_instance_id=INSTANCE_2))
         await self.request(fs, 2)
         self.assertEqual(len(self.client.posts), 1)
-        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "busy")
+        # The attachment changed: the second request was not sent. There is
+        # no evidence the original or the replacement conversation is busy.
+        self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "not_sent")
         await fs.feed('{"type":"pet.stop"}')
-        await fs.finish()
+        outcome = await fs.finish()
+        self.assertEqual((outcome.requests_accepted, outcome.refused_preflight), (1, 1))
 
     async def test_real_attachment_mismatch_at_confirm_sends_nothing(self):
         real = self.ops.preflight

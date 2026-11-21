@@ -32,7 +32,7 @@ the call, toggle the mic or reboot.
 | Stays on Listening, nothing happens | microphone under about 90% of the call length | Starved microphone. Check signal first (weak access point after an unclean restart), then the pet report for late sends. |
 | Stays on Listening, nothing happens | microphone near 100%, `transcript_segments` 0 | Nothing was recognised. Not explained yet: record call time, signal and whether the person spoke. |
 | Answer comes from the voice model, not Unified | `transcript_segments` > 0, `delegations` 0 | The question did not need Unified. Test with one that does ("what is this chat's title"). |
-| Mic turns itself off, "Not sent" | `refused_input_late` 1, `conversation_end` `not_sent` | The gateway waited 6 s for late microphone audio and gave up. Same cause as a starved microphone. |
+| Mic turns itself off, "Not sent" | `refused_input_late` 1, `conversation_end` `not_sent` | Input did not settle before the send deadline. It is normally 6 s; the new gateway can allow one extra 2 s for an observed draining backlog. Nothing was submitted. This counter does not identify the cause of late input. |
 | Long silence, then an answer | `requests_accepted` 1, POST took tens of seconds | Unified was starting a dormant conversation. With the progress-line gateway `progress_rendered` should be above 0. |
 | Reconnecting, call ended by itself | pet report `exit_reason` 2, or `conversation_end` `device_lost` | Microphone buffer overflow (old firmware) or a stall longer than about 5 s. Check signal and the report's `send_us_max`. |
 | Crackling | pet report `play_write_us_max` above 60000 | The speaker task ran late (codec DMA is 60 ms). Check audio task priority and core. |

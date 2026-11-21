@@ -1513,6 +1513,9 @@ class PetSession:
         self._input_catchup_until = -math.inf
         self._input_wait_t: float | None = None
         self._input_wait_s = 0.0
+        self._input_wait_limit = gs.CONVERSE_INPUT_MAX_S
+        self._input_peak_lag = 0.0
+        self._input_last_frame = -math.inf
         self._input_quiet_t = -math.inf
         self._provider_audio_until = -math.inf  # completion-derived input pacing
         self._dropped_in = 0
@@ -2390,8 +2393,8 @@ class PetSession:
             limit = min(ready, now + gs.CONVERSE_INPUT_CHECK_S)
             if self._input_wait_t is not None:
                 ready = now + gs.CONVERSE_INPUT_CHECK_S
-                limit = self._input_wait_t + gs.CONVERSE_INPUT_MAX_S - self._input_wait_s
-            elif self._input_wait_s + _EPS >= gs.CONVERSE_INPUT_MAX_S:
+                limit = self._input_wait_t + self._input_wait_limit - self._input_wait_s
+            elif self._input_wait_s + _EPS >= self._input_wait_limit:
                 limit = now
         delay = min(ready, limit) - self._clock.now()
         if delay <= _EPS:
@@ -3103,10 +3106,14 @@ class PetSession:
             self._fail("unstable_transcript")
 
     # -- running conversation (selected only by pet.converse.begin) --------------------
+    def _input_lag(self, now: float) -> float:
+        if self._input_offset is None:
+            return 0.0
+        return now - (self._input_offset + self._input_bytes / gs.AUDIO_BYTES_PER_S)
+
     def _input_behind(self, now: float) -> bool:
         return self._input_offset is not None and (
-            now - (self._input_offset + self._input_bytes / gs.AUDIO_BYTES_PER_S)
-            > gs.CONVERSE_INPUT_LAG_S + _EPS
+            self._input_lag(now) > gs.CONVERSE_INPUT_LAG_S + _EPS
             or now + _EPS < self._input_catchup_until
         )
 
@@ -3121,6 +3128,7 @@ class PetSession:
         measurable here; even a caught-up stream and empty outbox are not EOS.
         """
         now = self._clock.now()
+        self._input_last_frame = now
         self._input_bytes += size
         offset = now - self._input_bytes / gs.AUDIO_BYTES_PER_S
         self._input_offset = offset if self._input_offset is None else min(
@@ -3146,6 +3154,7 @@ class PetSession:
         # not yet forwarded must not be mistaken for an empty provider outbox.
         queued = any(e[0] == "device" and e[1].kind == "audio" for e in self._inbox)
         if self._input_behind(now) or self._pout.pending_audio or queued:
+            self._input_peak_lag = max(self._input_peak_lag, self._input_lag(now))
             if self._input_wait_t is None:
                 self._input_wait_t = now
         elif self._input_wait_t is not None:
@@ -3153,6 +3162,7 @@ class PetSession:
             self._input_wait_total += now - self._input_wait_t
             self._input_quiet_t = now
             self._input_wait_t = None
+            self._input_peak_lag = 0.0
 
     def _on_audio_sent(self, pcm: bytes) -> None:
         # Observe only completed paced device sends, not provider arrival time:
@@ -3204,6 +3214,8 @@ class PetSession:
         self._sealing = False
         self._input_wait_t = None
         self._input_wait_s = 0.0
+        self._input_wait_limit = gs.CONVERSE_INPUT_MAX_S
+        self._input_peak_lag = 0.0
         self._input_quiet_t = -math.inf
         self._speak_pending = False
         self._reply_text = None
@@ -3327,7 +3339,19 @@ class PetSession:
         waiting = self._input_wait_s + (
             0.0 if self._input_wait_t is None else now - self._input_wait_t
         )
-        if waiting + _EPS >= gs.CONVERSE_INPUT_MAX_S:
+        if (waiting + _EPS >= gs.CONVERSE_INPUT_MAX_S
+                and self._input_wait_limit == gs.CONVERSE_INPUT_MAX_S
+                and self._input_wait_t is not None
+                and now - self._input_wait_t >= gs.CONVERSE_INPUT_MAX_S - 0.5
+                and now - self._input_last_frame <= gs.CONVERSE_INPUT_LAG_S
+                and self._input_peak_lag - self._input_lag(now) >= 1.0):
+            # One continuous stall, with recent PCM and at least a second of
+            # measured backlog drained. Give it time to finish. This never
+            # admits a request: the original catch-up, queue and fresh quiet
+            # checks must still pass. A dead, slow or flapping link gets no
+            # renewable budget.
+            self._input_wait_limit += gs.CONVERSE_INPUT_DRAIN_GRACE_S
+        if waiting + _EPS >= self._input_wait_limit:
             self._known_unsent("input_late")
             self._emit(gs.build_converse_notice("not_sent"))
             self._converse_end = "not_sent"
