@@ -1,8 +1,10 @@
 # Pocket assistant team prototype
 
 This guide describes an **early, maintainer-assisted prototype**, not a turnkey
-release. One pet has completed two multi-exchange calls through an Amplifier
-Unified front-door chat on a home LAN. A teammate has not yet been walked through
+release. Build 11 completed multi-exchange calls through an Amplifier
+Unified front-door chat on a home LAN. That historical result does not qualify
+the installed `0.3.18-private-micdiag` pilot or its uninstalled normal twin.
+A teammate has not yet been walked through
 a fresh board and server setup. Firmware installation, TLS setup, the independent
 service and reconnect must be verified for the particular package being used.
 
@@ -22,8 +24,9 @@ conversation for consequential details.
 **Before pairing:** on the Unified host, from the product checkout, run
 `"$UNIFIED_PYTHON" -I -B bridge/tools/check_unified.py`, where `UNIFIED_PYTHON`
 is the absolute path of the Python interpreter used by your Unified installation.
-It checks the candidate target (0.116.0) and asks that package's actual companion
-policy about the gateway's attach, list, read and send request shapes, entirely
+It recognizes the two packages inspected during recovery (0.116.0 and the pilot
+host's 0.117.0). It asks the installed package's actual companion policy about
+the gateway's attach, list, read and send request shapes, entirely
 in memory. No token, board, service stop, provider call or real send is involved.
 An unknown version is reported as unqualified, not as a broken installation.
 A pass is not proof of pairing, a spoken reply or compatibility with another release.

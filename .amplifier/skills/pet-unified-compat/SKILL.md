@@ -9,8 +9,10 @@ Unified answers a paired device only for an explicit allow-list of requests, and
 that list changes between releases. Older gateways misreported a denied listing
 as "busy"; see the current conversation-mode behavior in `AGENTS.md`.
 Unified 0.114.5 and 0.116.0 had matching inspected device-facing files and
-passed the read-only check. The November 15–16 exchanges and one later
-November 20 answer predate 0.114.5. Neither newer version has a demonstrated
+passed the read-only check. At the pilot switch, 0.117.0's in-memory
+companion policy also allowed the four request shapes below. That is not a
+live credential, handler, context or voice test. The November 15–16 exchanges and one later
+November 20 answer predate 0.114.5. None of those newer versions has a demonstrated
 end-to-end spoken send and reply in the retained record.
 
 ## The gateway's requests

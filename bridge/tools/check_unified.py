@@ -16,7 +16,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-TARGET = "0.116.0"  # candidate target, not a voice-qualified release
+# Admission to this read-only package check is not a release compatibility pin.
+POLICY_CHECKED_VERSIONS = ("0.116.0", "0.117.0")
 SESSION = "pocket-check"
 COMMAND = "11111111-1111-4111-8111-111111111111"
 
@@ -61,8 +62,9 @@ def main():
     except metadata.PackageNotFoundError:
         print("No amplifier-unified distribution in this interpreter. Use your Unified service's Python.")
         return 2
-    if dist.version != TARGET:
-        print(f"Not the candidate target ({TARGET}); this installation has not been checked.")
+    if dist.version not in POLICY_CHECKED_VERSIONS:
+        print("Not a policy-checked version (expected "
+              + " or ".join(POLICY_CHECKED_VERSIONS) + "); this installation is unqualified.")
         return 1
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     try:
@@ -70,14 +72,14 @@ def main():
 
         policy_file = Path(device_pairing.__file__).resolve(strict=True)
         expected = Path(dist.locate_file("amplifier_web/device_pairing.py")).resolve(strict=True)
-        if __version__ != TARGET or policy_file != expected:
+        if __version__ != dist.version or policy_file != expected:
             print("Imported Unified package does not match the target distribution.")
             return 1
         result = asyncio.run(policy_results(device_pairing.permits_companion))
     except (ImportError, AttributeError, TypeError, ValueError, OSError, RuntimeError):
         print("Cannot check the installed companion policy. No request was sent.")
         return 1
-    print(f"Unified {TARGET} — local package policy only")
+    print(f"Unified {dist.version} — local package policy only")
     for label, allowed in result:
         print(f"  {label}: {'allowed' if allowed else 'refused'}")
     if not all(allowed for _, allowed in result):
