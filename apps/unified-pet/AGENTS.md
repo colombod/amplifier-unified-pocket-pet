@@ -29,3 +29,51 @@ over an impaired link (network-less container with a tap device); rerun it when
 Run `python3 tests/isolation_test.py --baseline
 <private-baseline>` before completion. Builds are not physical qualification;
 microphone/repeatability work and authenticated Unified integration are separate.
+
+## Measured on the device (November 2026): do not relearn these
+
+Each line was shown on the physical pet by a before/after comparison in one build.
+Change one only with a new device measurement.
+
+Scheduling and audio
+- The voice owner (`pet_live`) runs pinned to core 1 at priority 6. Unpinned at the
+  display task's priority (LVGL, 4, about 75% of a core) it fell behind real time
+  and calls ended themselves. This chip pins a task to its current core at its first
+  FPU use, and the codec's volume/gain calls use the FPU: "unpinned" is a random core.
+- The microphone and speaker tasks run at priority 7 on core 0. The codec's DMA
+  holds 60 ms; at priority 5 writes came up to 117 ms late, which is crackling in
+  playback and lost microphone audio.
+- In a conversation a full microphone buffer drops its newest audio and the call
+  continues; a send may wait 5 s. A full buffer must never end the call or redial.
+- The playback prebuffer is 320 ms. 640 and 960 ms made no difference in 12 calls:
+  the gaps heard then were late codec writes, not an empty buffer.
+
+Wi-Fi
+- A network can have several access points. After an unclean restart (power cycle,
+  flash) the one the pet was on rejects the first attempt within milliseconds and
+  the stack silently joins a weaker one: about every second restart on the test
+  network, at -75 to -91 dBm, where calls starve. Sorting by signal alone does not
+  fix it (9 of 18 restarts). `network.c` now holds a CANDIDATE that scans, pins the
+  strongest and retries it: 10 of 10 restarts, but it used every retry, and it has
+  not been through the full suites. The pet does not roam after joining.
+- Check signal strength before blaming firmware, gateway or Unified.
+
+Console and bench build
+- Opening the USB Serial/JTAG port resets the pet unless DTR and RTS are released
+  in ONE request (`TIOCMBIC` with both bits). pyserial releases them in turn and
+  resets it; so does esptool, by design.
+- The normal build has no console: only a person can start a call on it. Build with
+  `PET_PRIVATE_MIC_DIAG=1` for the bench: `voice on|off`, `voice last 0..2` (reports
+  of the last three calls, kept until reboot), `voice scan`, and per-call switches.
+  Reports are counts and timings only. The bench build's sdkconfig lives in
+  `build-bench/`; the root `.gitignore` is hash-pinned by the isolation test.
+- The normal binary must contain no bench strings; `tests/run_bridge_native.sh` and
+  `scripts/build.sh` check this.
+
+Testing
+- The link rig and the native suites replace the CPU, scheduler, codec, display and
+  radio. They cannot show any of the faults above. Reproduce on the pet first.
+- Test the first call after a restart explicitly: it has been the failing one.
+- `tests/isolation_test.py` has one historical failure (a missing
+  `.superpowers/sdd/.gitignore`); any other failure is new.
+- One SDK build at a time, pinned local image, no network.
