@@ -154,15 +154,16 @@ The gateway service must recover from app/host restart, not merely listen.
 
 | Release decision | Smallest usable result | Stop or proceed |
 | --- | --- | --- |
-| Locate the LAN failure | A technician can distinguish an acoustic failure from recognition, delivery or reply failure on the same candidate. | One arranged lab window; no bulk restarts or speculative installs. If there is no known acoustic source or physical observer, report that before changing the board. If the same experiment fails twice without narrowing the cause, stop that experiment. |
+| Locate the LAN failure | Trace the November 16 working code against the candidate; reproduce a difference in the joined path or isolate an exact remaining uncertainty. | No tester scheduling and no request to the user for unchanged-firmware echo, tone or mic checks. Ask for a spoken **product** test only on a named candidate, with the change, evidence, expected result and failure readout ready. Preserve the provisioned board. |
 | Restore the conversation | Three intended requests produce three attributable, intelligible replies on normal firmware, with honest progress; one follows power-up. | Preserve the exact working image, gateway source, Unified version and limits. If the first broken boundary changes, investigate it before adding features. |
 | Hand out a LAN prototype | A teammate with a fresh board/host can complete the setup above and repeat the conversation using the repo alone. | One independent clean setup. Missing installer, trust setup or incompatible Unified blocks release, not a note to fix after publication. Recheck the exact assembled head before PR approval. |
 | Ship the requested assistant | I2, I3 and I4 below verified on the same accumulating product. | No “whole Unified” label based on a text-only demo, and no “portable” label based on host-side VPN reachability. |
 
-Planning assumptions: the diagnostic is a single short physical session, not a
-forecast that the fault will be repaired during it. Once the first failing
-boundary is known, estimate **that repair**, then schedule one integrated
-acceptance session. Next reserve a clean-host/board setup with a teammate.
+The user will perform the meaningful device acceptance test when needed.
+First exhaust the preserved evidence and discriminating source/host tests.
+Once the first failing boundary is known, estimate **that repair**, then
+present the integrated acceptance candidate. A clean-host/board setup with
+a teammate is a later release requirement, not a prerequisite for this work.
 Do not promise a ship date before the fault, teammate hardware, and scoped
 Unified operations are established. The integration owner reports the next
 decision, exact candidate and expected user-visible outcome, not worker counts.

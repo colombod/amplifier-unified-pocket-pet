@@ -40,6 +40,15 @@ checkout, a maintainer's successful setup and an independent teammate's
 successful setup are three distinct claims. A LAN prototype may be shared as
 LAN-only; it does not satisfy P5.
 
+**Already-provisioned device:** an update must retain the exact on-board
+credentials and configuration in place. Re-pairing, re-entering Wi-Fi or
+substituting a saved copy of NVS is not an acceptable recovery. On this
+device use only an explicitly authorized, verified app-partition update with
+a private rollback of that device's app. Refuse an unexpected layout or
+identity, a write outside the app partition, or an incompatible storage
+format. Verify preservation without printing secret values. The fresh-board
+installation procedure is a different operation on different hardware.
+
 Reuse the documented ESP32-S3 AMOLED board, existing audio/display/artwork/phone
 setup and native Tailscale work. Reuse Unified's current supported conversation,
 voice, work-discovery, question and workspace/chat mechanisms. No second chatbot,
