@@ -50,6 +50,13 @@ exit reasons are in [references/report-format.md](references/report-format.md).
 
 ## Limits
 
+- The report and the uplink ratio count bytes of the audio stream, not sound. A
+  leg whose listener plays a tone carries only zeros, because the firmware zeroes
+  microphone data while the speaker plays. To see microphone content use a leg
+  with a silent speaker and count non-zero samples at the other end. No bench leg
+  shows that speech is captured or recognised: only a spoken call through the
+  real gateway does.
+- Nothing here can see the screen.
 - Opening the console resets the pet unless DTR and RTS are released in one request.
   `pet_bench.Console` does this; pyserial and esptool do not.
 - `voice audio` applies to the next call only; `voice core`, `voice prio` and

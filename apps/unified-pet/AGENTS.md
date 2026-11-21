@@ -59,9 +59,16 @@ Wi-Fi
   point). Five pinned attempts are allowed; the two spare ones have never been used
   or tested. The pet does not roam after joining.
 - After a restart, a dead link, a killed listener or a dropped access point in the
-  middle of a call, the next call was clean every time (20 restarts and 3 of each
-  fault on the bench build 0.3.17, provider-free listener). Not tested: the real
-  gateway killed during a call, and a redial that succeeds while the mic stays on.
+  middle of a call, the pet's next call streamed at full rate and ended on mic off
+  every time (20 restarts and 3 of each fault on the bench build 0.3.17,
+  provider-free listener). That is reconnection and stream rate ONLY: the stream
+  was digital silence and nobody spoke. The spoken call on the normal 0.3.17 the
+  same evening failed (half the audio arrived, nothing recognised, cause unknown).
+  Not tested: the real gateway killed during a call, and a redial that succeeds
+  while the mic stays on.
+- In a conversation the microphone data is zeroed while the speaker is playing
+  (`bridge_voice.c`). A bench leg that plays a tone therefore carries no microphone
+  content; "uplink ratio" and "microphone %" count bytes on time, not sound.
 - Check signal strength before blaming firmware, gateway or Unified.
 
 Console and bench build
