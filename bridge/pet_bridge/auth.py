@@ -1085,13 +1085,18 @@ def _client_id_for(
     return client_id
 
 
-def _attach_post(client: Any, credential: Credential, client_id: str) -> Any:
-    payload = {
+def native_attach_payload(client_id: str) -> dict[str, Any]:
+    """Public request shape; contains neither a credential nor a destination."""
+    return {
         "clientId": client_id,
         "kind": "native",
         "protocolVersion": 1,
         "includeState": False,
     }
+
+
+def _attach_post(client: Any, credential: Credential, client_id: str) -> Any:
+    payload = native_attach_payload(client_id)
     headers = {**_JSON_HEADERS, "Authorization": "Bearer " + credential.token}
     try:
         response = client.request(

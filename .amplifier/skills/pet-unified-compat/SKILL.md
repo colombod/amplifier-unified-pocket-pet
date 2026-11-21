@@ -28,7 +28,10 @@ Every listing page must name the attached host identity and instance.
 
 1. Find the Unified release in use and its source (the installed `amplifier_web`
    package, or that release in the Unified repository).
-2. Read `amplifier_web/device_pairing.py`, function `permits_companion`. Check each
+2. In that installation's Python, run `-I -B bridge/tools/check_unified.py`
+   from the product checkout. It exercises the candidate release's actual
+   `permits_companion` policy without a socket, credential or service restart.
+   For a new target, read `amplifier_web/device_pairing.py`. Check each
    row of the table against it, including query and body shape.
 3. Compare the device-facing files with the last release checked:
    `auth.py`, `device_pairing.py`, `live_clients.py`, `client_views.py`,

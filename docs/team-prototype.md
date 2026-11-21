@@ -19,6 +19,15 @@ conversation for consequential details.
 
 ## What to get
 
+**Before pairing:** on the Unified host, from the product checkout, run
+`"$UNIFIED_PYTHON" -I -B bridge/tools/check_unified.py`, where `UNIFIED_PYTHON`
+is the absolute path of the Python interpreter used by your Unified installation.
+It checks the candidate target (0.116.0) and asks that package's actual companion
+policy about the gateway's attach, list, read and send request shapes, entirely
+in memory. No token, board, service stop, provider call or real send is involved.
+An unknown version is reported as unqualified, not as a broken installation.
+A pass is not proof of pairing, a spoken reply or compatibility with another release.
+
 **Host-only, free first check:** from this checkout on Linux, with Python,
 `aiohttp` and `cryptography` installed, run
 `python3 -B bridge/tools/test_pet_link_test_host.py -q`. It uses ephemeral
