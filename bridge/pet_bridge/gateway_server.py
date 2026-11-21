@@ -648,18 +648,34 @@ class _Dial:
 
 
 async def _dial(dial: _Dial, key: Secret, timeout: float) -> AiohttpProviderLink:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     trace = aiohttp.TraceConfig()
     trace.on_request_redirect.append(_refuse_redirect)
+    attempted = False
+
+    async def upgrade_once(request: aiohttp.ClientRequest,
+                           handler: aiohttp.ClientHandlerType) -> aiohttp.ClientResponse:
+        # aiohttp retries a disconnected GET, including a WebSocket upgrade.
+        # We cannot know if the provider saw the first request. This middleware
+        # runs before each connect/send attempt; its latch lives for one dial.
+        nonlocal attempted
+        if attempted or loop.time() >= deadline:
+            raise ProviderError("provider_connect")
+        attempted = True
+        return await handler(request)
+
     dial.connector = aiohttp.TCPConnector(ssl=_client_ssl())
     dial.session = aiohttp.ClientSession(
         connector=dial.connector,
         trust_env=False,
         trace_configs=[trace],
+        middlewares=(upgrade_once,),
         timeout=aiohttp.ClientTimeout(
             total=None, connect=timeout, sock_connect=timeout
         ),
     )
-    async with asyncio.timeout(timeout):
+    async with asyncio.timeout_at(deadline):
         dial.ws = await dial.session.ws_connect(
             gp.PROVIDER_URL,
             headers={"Authorization": "Bearer " + key.reveal()},
@@ -1052,7 +1068,7 @@ class _Gateway:
         )
         self._ws_factory = ws_factory or _new_ws
         self._device_factory = device_factory or AiohttpDeviceLink
-        self._session_factory = session_factory or self._new_session
+        self._session_factory = session_factory
         self._busy = False
         self._closing = False
         self._active: Any = None
@@ -1091,7 +1107,7 @@ class _Gateway:
         return self._forced
 
     # -- sessions
-    async def _connect(self) -> Any:
+    async def _connect(self, *, remaining: Callable[[], float] | None = None) -> Any:
         # Custody owns the single slot until the prior runner has settled. Recheck
         # its durable send state immediately before any paid provider connection.
         # This explicitly named job may reconcile an exact positively proven input.
@@ -1108,7 +1124,12 @@ class _Gateway:
             raise asyncio.CancelledError
         await self._event("provider_dial", outcome="attempt", code=None)
         try:
-            link = await self._deps.provider_connect(self._key, timeout=gs.START_DEADLINE_S)
+            # Both admission and event-log I/O may have suspended. Revalidate
+            # at the paid boundary rather than relying on timer dispatch order.
+            timeout = gs.START_DEADLINE_S if remaining is None else remaining()
+            if timeout <= 0:
+                raise ProviderError("provider_policy")
+            link = await self._deps.provider_connect(self._key, timeout=timeout)
         except BaseException as err:
             code = err.code if isinstance(err, ProviderError) else "provider_connect"
             await self._event("provider_dial", outcome="failed", code=code)
@@ -1153,10 +1174,14 @@ class _Gateway:
             task.exception()
         self._busy = False
 
-    def _new_session(self, device: Any, connect: Callable[[], Awaitable[Any]]) -> Any:
-        return PetSession(
+    def _new_session(self, device: Any) -> PetSession:
+        async def connect() -> Any:
+            return await self._connect(remaining=session.provider_start_remaining)
+
+        session = PetSession(
             device, connect, self._runner, self._ops, self._settings, self._deps.clock()
         )
+        return session
 
     async def handle(self, request: web.BaseRequest) -> web.StreamResponse:
         """One device request: guard, upgrade, take the slot, own the session's custody."""
@@ -1195,7 +1220,8 @@ class _Gateway:
                     await self._refuse_late_upgrade(ws, request)
                     return ws
                 device = self._device_factory(ws, request.transport)
-                session = self._session_factory(device, self._connect)
+                session = (self._new_session(device) if self._session_factory is None
+                           else self._session_factory(device, self._connect))
                 self._active = session
                 self._sessions += 1
                 self._custody_t0 = self._clock.now()

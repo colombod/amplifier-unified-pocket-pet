@@ -32,6 +32,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import aiohttp
 from cryptography import x509
@@ -781,6 +782,51 @@ class EndingTest(Case):
                 record = await host.finish()
                 self.assertEqual((record["first_close_reason"], record["output_written"]["frames"]), (reason, 0))
                 self.check_private_record(host, record)
+
+
+class PaidUpgradeBoundaryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dropped_reply_never_repeats_upgrade_and_independent_dial_is_not_blocked(self):
+        # Unlike a mock of ClientSession.ws_connect, this exercises aiohttp's
+        # internal GET retry. Only the disposable TLS peer counts attempts.
+        from aiohttp import web
+        with mock.patch.object(sys, "path", [str(BRIDGE), *sys.path]):
+            from pet_bridge import gateway_server as gateway
+
+        observed = []
+        allow = False
+
+        async def peer(request):
+            observed.append(request.path)
+            if not allow:
+                request.transport.abort()  # complete request received; upgrade response lost
+                return web.Response()
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for _ in ws:
+                self.fail("A handshake-only test sent application data.")
+            return ws
+
+        app = web.Application()
+        app.router.add_get("/test-only", peer)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_tls.load_cert_chain(F.cert, F.key)
+        site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_tls)
+        await site.start()
+        host, port = runner.addresses[0]
+        self.assertEqual(host, "127.0.0.1")
+        with mock.patch.object(gateway.gp, "PROVIDER_URL", f"wss://127.0.0.1:{port}/test-only"), \
+             mock.patch.object(gateway, "_client_ssl", return_value=F.client_ssl()):
+            with self.assertRaises(gateway.ProviderError) as refusal:
+                await gateway.connect_provider(gateway.Secret(F.token), timeout=2)
+            self.assertEqual(refusal.exception.code, "provider_connect")
+            self.assertEqual(observed, ["/test-only"])
+            allow = True
+            link = await gateway.connect_provider(gateway.Secret(F.token), timeout=2)
+            await asyncio.wait_for(link.close(), 3)
+            self.assertEqual(observed, ["/test-only", "/test-only"])
 
 
 class LeftBehindTest(unittest.TestCase):

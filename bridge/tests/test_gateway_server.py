@@ -1581,7 +1581,7 @@ class ConnectProviderTest(OfflineAsyncCase):
             aiohttp.ClientTimeout(total=None, connect=25.0, sock_connect=25.0),
         )
         self.assertEqual(
-            set(kw), {"connector", "trust_env", "trace_configs", "timeout"}
+            set(kw), {"connector", "trust_env", "trace_configs", "middlewares", "timeout"}
         )
         ((url, call),) = session.connect_calls
         self.assertEqual(url, "wss://api.openai.com/v1/live/sessions")

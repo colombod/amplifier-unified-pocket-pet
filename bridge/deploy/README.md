@@ -450,6 +450,15 @@ time/quiet limits still apply. `Restart=on-failure` restarts the gateway after a
 process failure (10-second delay), not an active voice call or an uncertain send.
 It does not reconnect the device; device firmware owns that behaviour.
 
+The newer gateway source prevents a second HTTP upgrade inside one provider
+dial if the first upgrade response is lost. This is separate from a new
+device connection. An authenticated client can also shorten a single session
+by including top-level `max_seconds` (integer 5–60) in `session.start`.
+The local deadline starts before dialing, includes mode changes and close,
+and does not authorize a send, retry or another call. Older gateways reject
+that start frame; do not retry without the limit. This is a local media bound,
+not a provider billing or remote termination guarantee.
+
 ## Remove
 
 ```sh

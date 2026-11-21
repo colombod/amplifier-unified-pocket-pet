@@ -1860,6 +1860,8 @@ class SessionCaptureTest(SessionCase):
         self.device.disconnect()
         outcome = await self.h.finish()
         self.assertEqual(outcome.audio_in_bytes, 200)  # decoded bytes forwarded
+        self.assertEqual(outcome.transcript_segments, 1)
+        self.assertEqual(self.ops.count("confirm"), 0)  # a preview alone never submits to Unified
 
     async def test_t_core_sess_capture_overflow_over_96000_pending_bytes_closes(self):
         await self.h.boot()
@@ -3919,6 +3921,59 @@ class RepairCloseTest(FlowCase):
     async def started_at(self) -> float:
         await self.h.boot()
         return self.clock.now()
+
+    async def test_expiry_before_first_connector_step_never_dials(self):
+        original_start = self.h.session._on_start
+        def stalled_start(limit):
+            original_start(limit)
+            self.clock._now += 6  # dispatcher held the loop; no timer/connector has run yet
+        with mock.patch.object(self.h.session, "_on_start", stalled_start):
+            self.h.go()
+            await self.h.feed({**json.loads(ASSISTANT_START), "max_seconds": 5})
+            self.assertEqual(self.h.factory.calls, 0)
+            outcome = await self.h.finish()  # must not require a new wait starting at t=6
+        self.assertEqual(outcome.error_code, "deadline")
+        self.assertFalse(self.provider.of_type("session.start"))
+
+    async def test_connector_return_after_budget_does_not_start_provider(self):
+        async def late():
+            link = await self.h.factory()
+            self.clock._now += 6  # return a link after the deadline, before the timer can run
+            return link
+        self.h.session._provider_connect = late
+        self.h.go()
+        await self.h.feed({**json.loads(ASSISTANT_START), "max_seconds": 5})
+        self.assertFalse(self.provider.of_type("session.start"))
+        self.assertEqual((await self.h.finish()).error_code, "deadline")
+        self.assertEqual(self.provider.close_calls, 1)
+
+    async def test_close_wait_does_not_get_fresh_time_after_late_first_step(self):
+        async def delayed():
+            self.clock._now += 6
+            await asyncio.Event().wait()
+        finished = await asyncio.wait_for(self.h.session._within(delayed(), self.clock.now() + 2), 1)
+        self.assertFalse(finished)
+
+    async def test_short_client_deadline_includes_startup_mode_change_and_close(self):
+        self.h.go()
+        t0 = self.clock.now()
+        frame = json.loads(ASSISTANT_START)
+        await self.h.feed({**frame, "max_seconds": 45})
+        await self.clock.advance(15)
+        await self.h.feed({"type": "pet.converse.begin"})
+        self.provider.auto_close = False
+        self.assertTrue(self.device.of_type("pet.converse.began"))
+        await self.clock.advance(27.9)
+        self.assertFalse(self.device.of_type("pet.converse.notice"))
+        await self.clock.advance(0.1)
+        self.assertEqual(self.device.of_type("pet.converse.notice"),
+                         [{"type": "pet.converse.notice", "code": "time_limit"}])
+        await self.clock.advance(2)
+        outcome = await self.h.finish()
+        self.assertAlmostEqual(self.clock.now() - t0, 45)
+        self.assertFalse(outcome.close_confirmed)
+        self.assertEqual(self.provider.close_calls, 1)
+        self.assertEqual(outcome.requests_sent, 0)
 
     async def test_u2r_m5_cap_returns_at_exactly_accepted_plus_60_with_blocked_device_and_provider(
         self,

@@ -358,6 +358,7 @@ class SessionStartFrameTest(OfflineTestCase):
                 "b64",
                 "pcm_len",
                 "pcm_has_signal",
+                "max_seconds",
             },
         )
         frame = parse(ASSISTANT_START)
@@ -385,6 +386,13 @@ class SessionStartFrameTest(OfflineTestCase):
             ]
         )
         self.assertEqual(parse(minimal).kind, "start")
+
+    def test_optional_media_budget_must_be_a_short_whole_number(self):
+        for value in (5, 45, 60):
+            self.assertEqual(parse(mutated_start(lambda d: d.update(max_seconds=value))).max_seconds, value)
+        for value in (None, True, "45", 45.5, 4, 61):
+            self.assertEqual(code_of(self, mutated_start(lambda d: d.update(max_seconds=value))),
+                             "unknown_command")
 
     def test_t_state_start_shape_violations_are_unknown_command(self):
         cases = {

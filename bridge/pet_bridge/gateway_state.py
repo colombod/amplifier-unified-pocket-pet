@@ -15,7 +15,8 @@ Device -> gateway (inbound; ``parse_device_frame``)
     NaN/Infinity, nesting depth <= 16, ``type`` is a string, no lone surrogates.
     Anything else (including a binary WebSocket message) is ``unknown_command``.
 
-    ``session.start``           keys exactly {type, event_id, session}.  ``event_id``
+    ``session.start``           {type, event_id, session} plus optional ``max_seconds``
+        (integer 5..60; only shortens the gateway's local media deadline). ``event_id``
         matches ``[A-Za-z0-9][A-Za-z0-9._:-]{0,63}``.  ``session`` keys are a subset of
         {model, store, input, instructions, audio, delegation} and include {model,
         store, audio}; ``store`` is JSON false; ``audio`` is exactly
@@ -213,6 +214,7 @@ class DeviceFrame:
     b64: str | None = field(default=None, repr=False)
     pcm_len: int = 0
     pcm_has_signal: bool = False  # at least one nonzero sample, not evidence of speech
+    max_seconds: int | None = None  # a start-only upper bound, not a provider setting
 
 
 # -- strict JSON ---------------------------------------------------------------------
@@ -383,7 +385,10 @@ def _check_ignored_start_fields(session: dict[str, Any]) -> None:
 
 
 def _parse_start(obj: dict[str, Any], model: str, voice: str) -> DeviceFrame:
-    if set(obj) != {"type", "event_id", "session"} or not is_event_id(obj["event_id"]):
+    if set(obj) - {"max_seconds"} != {"type", "event_id", "session"} or not is_event_id(obj["event_id"]):
+        raise _unknown()
+    limit = obj.get("max_seconds")
+    if "max_seconds" in obj and (type(limit) is not int or not 5 <= limit <= 60):
         raise _unknown()
     session = obj["session"]
     if not isinstance(session, dict):
@@ -398,7 +403,7 @@ def _parse_start(obj: dict[str, Any], model: str, voice: str) -> DeviceFrame:
     _check_ignored_start_fields(session)
     if requested_model != model or requested_voice != voice:
         raise GatewayProtocolError("model_mismatch")
-    return DeviceFrame(kind="start", event_id=obj["event_id"])
+    return DeviceFrame(kind="start", event_id=obj["event_id"], max_seconds=limit)
 
 
 def _parse_greeting(obj: dict[str, Any], _model: str, _voice: str) -> DeviceFrame:

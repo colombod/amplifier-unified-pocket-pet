@@ -2055,6 +2055,20 @@ class EventBackpressureTest(srv.GatewayCase):
 
 
 class PreDialGatewayTest(srv.GatewayCase):
+    async def test_attempt_logging_that_returns_after_start_budget_never_dials(self):
+        original = self.gw._event
+        async def delayed(event, **facts):
+            await original(event, **facts)
+            if event == "provider_dial" and facts.get("outcome") == "attempt":
+                self.h.clock._now += 6  # before the socket operation, with no timer dispatch
+        with mock.patch.object(self.gw, "_event", delayed):
+            handle = asyncio.create_task(self.gw.handle(self.request()))
+            self.h.device.feed({**json.loads(gf.ASSISTANT_START), "max_seconds": 5})
+            await self.h.quiesce()
+            self.assertEqual(self.connects, [])
+            await asyncio.wait_for(handle, 2)
+        self.assertFalse(self.h.device.of_type("session.started"))
+
     async def test_gate_failure_values_or_exception_emit_policy_without_dial_or_details(self):
         for value in (False, None, 1, {}, RuntimeError(gf.KEY_CANARY)):
             with self.subTest(value=type(value).__name__):

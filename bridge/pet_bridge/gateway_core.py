@@ -1493,6 +1493,7 @@ class PetSession:
         self._device_gone = False
         self._device_code = 1000
         self._accepted_t: float | None = None
+        self._media_deadline = math.inf  # optional, fixed before the first provider dial
         self._turn_id: str | None = None
         self._timed_out_turn: str | None = None
         self._turn_used = False
@@ -1756,7 +1757,7 @@ class PetSession:
         old = self._timers.pop(name, None)
         if old is not None:
             old.cancel()
-        self._timers[name] = self._spawn(self._timer(name, seconds))
+        self._timers[name] = self._spawn(self._timer(name, self._clock.now() + seconds))
 
     def _disarm(self, name: str) -> None:
         old = self._timers.pop(name, None)
@@ -1767,8 +1768,15 @@ class PetSession:
         for name in list(self._timers):
             self._disarm(name)
 
-    async def _timer(self, name: str, seconds: float) -> None:
-        await self._clock.sleep(seconds)
+    async def _sleep_until(self, deadline: float) -> None:
+        # A scheduled coroutine may not get its first step until well after
+        # it was armed. Never grant it that scheduling delay a second time.
+        remaining = deadline - self._clock.now()
+        if remaining > _EPS:
+            await self._clock.sleep(remaining)
+
+    async def _timer(self, name: str, deadline: float) -> None:
+        await self._sleep_until(deadline)
         self._post(("timer", name))
 
     async def _within(self, awaitable: Awaitable[Any], deadline: float) -> bool:
@@ -1784,7 +1792,7 @@ class PetSession:
         try:
             remaining = deadline - self._clock.now()
             if remaining > _EPS:
-                timer = asyncio.ensure_future(self._clock.sleep(remaining))
+                timer = asyncio.ensure_future(self._sleep_until(deadline))
                 await asyncio.wait({work, timer}, return_when=asyncio.FIRST_COMPLETED)
             else:
                 for _ in range(_GRACE_TURNS):
@@ -1849,10 +1857,23 @@ class PetSession:
                 self._note_converse_audio(frame.pcm_len)
             self._post_external(("device", frame))
 
+    def provider_start_remaining(self) -> float:
+        """Admission time left, measured in this session's monotonic clock."""
+        if self._state != _STARTING or self._accepted_t is None:
+            return 0.0
+        deadline = min(self._accepted_t + gs.START_DEADLINE_S, self._media_deadline - 2.0)
+        return max(0.0, deadline - self._clock.now())
+
     async def _connect(self) -> None:
+        if not self.provider_start_remaining():
+            self._post(("timer", "start"))
+            return
         try:
             link = await self._provider_connect()
         except ProviderError as err:
+            if self._state == _STARTING and not self.provider_start_remaining():
+                self._post(("timer", "start"))
+                return
             # Only fixed connector classifications, never exception details.
             code = {
                 "provider_auth": 1008, "provider_policy": 1008, "provider_protocol": 1002,
@@ -1871,6 +1892,11 @@ class PetSession:
             await self._within(link.close(), hard)
             return
         self._provider = link
+        if not self.provider_start_remaining():
+            # Keep the returned link under normal shutdown custody, but issue
+            # neither provider start nor further media work after expiry.
+            self._post(("timer", "start"))
+            return
         self._provider_reader = self._spawn(self._read_provider(link))
         self._spawn(self._pout.run(self._provider_sent, self._provider_send_failed))
         self._provider_start_id = self._new_event_id()
@@ -1878,7 +1904,11 @@ class PetSession:
             self._provider_start_id, self._settings.model, self._settings.voice
         )
         try:
-            await self._provider_send(start)
+            async with self._plock:
+                if not self.provider_start_remaining():
+                    self._post(("timer", "start"))
+                    return
+                await link.send_text(start)
         except Exception:  # noqa: BLE001 - fixed outcome, no detail
             self._provider_send_failed()
 
@@ -2087,7 +2117,7 @@ class PetSession:
         hard = now + gs.CLOSE_DEADLINE_S
         if self._accepted_t is not None:
             cap = gs.CONVERSE_LIMIT_S if self._converse else gs.SESSION_CAP_S
-            hard = min(hard, self._accepted_t + cap)
+            hard = min(hard, self._accepted_t + cap, self._media_deadline)
         if self._converse:
             self._converse_end = self._converse_end or (
                 "provider_failure" if fatal else self._error_code or "closed"
@@ -2244,7 +2274,7 @@ class PetSession:
         if kind == "greeting":
             return
         if kind == "start":
-            self._on_start()
+            self._on_start(frame.max_seconds)
         elif kind == "audio":
             self._on_audio(frame)
         elif kind in ("stop", "close"):
@@ -2288,13 +2318,18 @@ class PetSession:
         self._send_stage = "preflight"
         self._submit("preflight", self._ops.preflight, "preflight")
 
-    def _on_start(self) -> None:
+    def _on_start(self, max_seconds: int | None) -> None:
         if self._state != _AWAIT_START:
             self._fail("busy")
             return
         self._state = _STARTING
         self._accepted_t = self._clock.now()
         self._disarm("await_start")
+        if max_seconds is not None:
+            self._media_deadline = self._accepted_t + max_seconds
+            # Reserve the same two seconds for close as an ordinary call. The
+            # separate timer survives the change from one-turn to conversation.
+            self._arm("media_limit", max_seconds - 2.0)
         self._arm("start", gs.START_DEADLINE_S)
         self._arm("cap", gs.SESSION_WORK_S)
         self._connect_task = self._spawn(self._connect())
@@ -2883,6 +2918,7 @@ class PetSession:
             "silence": self._on_silence_timer,
             "converse_idle": self._converse_idle,
             "converse_limit": self._converse_limit,
+            "media_limit": self._converse_limit if self._converse else self._on_cap_timer,
             "converse_render": self._converse_render_tick,
             "converse_reply": self._converse_reply_timeout,
             "converse_progress": self._converse_progress,
@@ -3077,6 +3113,8 @@ class PetSession:
         if not capturing:
             self._late_input()
             return
+        if event.text.strip():
+            self._segments += 1  # the sealed one-turn preview can prove recognition without a send
         self._last_delta = self._clock.now()
         if state == _SETTLING:
             self._arm_settle()
