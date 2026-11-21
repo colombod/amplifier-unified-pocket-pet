@@ -8,6 +8,11 @@ retain the distinction between the goal and a proven integration.
 
 ## Unified voice prototype
 
+**Release status (21 November 2026): not ready to hand to a team.** The last
+normal firmware tested (`0.3.17`) connected but recognized no speech in the
+reported call. The earlier audible results below are a baseline, not acceptance
+of this checkout. Start with the [recovery decision and product architecture](PROJECT-BRIEF.md#delivery-sequence).
+
 The independent app in `apps/unified-pet` connects the pet to a host-side
 gateway in `bridge/`. The gateway sends spoken requests to a dedicated Unified
 front-door conversation, which can use the user's authorized Unified actions.

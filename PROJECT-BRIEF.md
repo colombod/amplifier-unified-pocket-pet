@@ -12,11 +12,18 @@ starting a new chat in a new workspace as well as continuing existing work.
 
 ## Design: extend what already exists
 
-    pet microphone / speaker / animation / context / Settings
-        → existing Wi-Fi + native Tailscale + authenticated TLS
-        → narrow host hardware/media adapter
-        → Unified native conversations, voice execution and supported host actions
-        → correlated result → spoken reply on the pet
+    apps/unified-pet/ — microphone, speaker, Tachikoma, touch, phone setup
+        ↕ authenticated audio and state over Wi-Fi (LAN today)
+    bridge/pet_bridge/ — adapt pet media to voice provider; send and correlate once
+        ↕ supported scoped Unified client interface
+    Amplifier Unified — owns workspaces, conversations, attention, permissions and work
+
+`bridge/deploy/` and the team guide belong to the product, as do the portable
+installation and self-check tools; site secrets, deployment state, captures and
+flash backups do not. `bridge/tools/pet_link_test_host.py` is a provider-free
+listener, not the production gateway. Root `main/` is the earlier standalone
+experiment, **not** the firmware to flash for Unified. Keep device-side
+Tailscale as a distinct, unfinished transport for this same product.
 
 - **Pet:** documented Waveshare ESP32-S3-Touch-AMOLED-1.8 V2, CO5300/CST820,
   ES8311, 16 MiB flash / 8 MiB PSRAM, pinned IDF 5.5.4 and official BSP 2.0.3.
@@ -62,9 +69,9 @@ Keep necessary hardware media adaptation rather than claiming a native route
 exists. Shared external-agent rooms and the post-release ACP room-history change
 are not needed for this pet and must not trigger a room/runtime migration.
 
-### Real gaps, not reasons to redesign everything
+### Historical engineering findings (through the early LAN candidate)
 
-1. Build 11 is installed and was used for two multi-exchange calls; its mic
+1. Build 11 was installed and used for two multi-exchange calls; its mic
    catch-up fix held over the longest call, about seven minutes. On 16 November
    a later call gave one heard answer and then "Microphone stream interrupted":
    its capture buffer overflowed. The physical trigger is unknown. Offline, the
@@ -90,11 +97,11 @@ are not needed for this pet and must not trigger a room/runtime migration.
    must join the voice path. Implement those on current supported interfaces;
    identify a real capability gap before changing host architecture.
    `/api/companion` is an active-or-pinned preview, not the all-work catalog.
-   An opt-in observation-v1 catalog adapter now exists, including dormant chats
-   and coherent continuation, but the inspected host's `companion-v1` middleware
-   denies `/api/sessions` despite advertising it. Its tests verify rejection,
-   not usable all-work access. Do not require pinning every chat, widen the
-   credential, or build UI on an inaccessible catalog.
+   An opt-in observation-v1 adapter exists. The early inspected host denied
+   scoped session listing. By Unified 0.114.5/0.116.0 the observed situation
+   had reversed: `GET /api/sessions?view=observation` worked for the paired
+   client and `/api/companion` was denied. Listing is not send, focus or answer
+   authority. Do not require pinning every chat or widen the device credential.
    Global discovery, attention and management therefore belong in the existing
    configured Unified manager and its supported host tools; the media adapter
    delivers the request and correlated result, never executes parsed action
@@ -109,6 +116,56 @@ are not needed for this pet and must not trigger a room/runtime migration.
    recovery and physical repeatability remain limits to verify.
 
 ## Delivery sequence
+
+**Recovery decision, 21 November 2026: no release candidate has passed.**
+Build 11 (`1004293`, app SHA-256 `fadafa58091bb1c6366e5fba79d9bce2c20e94176c8b417c605a78ab83151a25`)
+and gateway `8857705` produced the user-heard two-answer call on 16 November.
+Use that pair as a comparator, not an automatic rollback. The last installed
+normal build was `0.3.17-strong-ap` from `8d2f313`, gateway `7a31bba`, Unified
+0.116.0. Its 19:33 call produced no transcript and no send. The AP and the
+cause are unknown. The earlier `0.3.12`/`7161575` reply had a long silent wait
+and choppy audio; it is not a replacement release. PR #7 at `16d89c8` is held.
+
+One integration owner ships one tested firmware/gateway/Unified combination
+from the product repository. Never bulk-promote experimental branches or private
+history. Recover existing tools into the product when a teammate needs them.
+Keep a tag and artifact hashes for a demonstrated combination, and distinguish
+a historical observation from a supported release. A worker may supply an
+isolated change; the integration owner reviews and verifies it in the product.
+
+**Immediate proof:** with a quiet pet speaker, distinguish missing input,
+digital silence, nonzero signal, a recognized known phrase, a send to the right
+conversation, the correlated result and intelligible playback. Nonzero signal
+may be noise. Continuous-tone tests are for transport/recovery only. Keep the
+normal firmware stable while isolating the first missing link. A bench twin
+is a diagnostic comparison, never a substitute for the normal build. Use a
+known external acoustic source if available. If it is not available, report
+that limitation rather than making the user the test rig. Do not change Wi-Fi
+or buffer settings on the basis of a byte count. The reported black screen is
+a separate physical failure, not cleared by ping or USB output.
+
+On one named normal candidate demonstrate three consecutive contextual requests,
+including two in one conversation and one after power-up; hear intelligible
+answers, observe the actual screen and repeat after ordinary interruption
+without duplicates or power cycling. Only then offer a LAN team candidate.
+Validate a clean clone, phone setup, fresh-board install versus app-only rollback,
+gateway installation and pairing, and a one-command Unified compatibility check.
+The gateway service must recover from app/host restart, not merely listen.
+
+| Release decision | Smallest usable result | Stop or proceed |
+| --- | --- | --- |
+| Locate the LAN failure | A technician can distinguish an acoustic failure from recognition, delivery or reply failure on the same candidate. | One arranged lab window; no bulk restarts or speculative installs. If there is no known acoustic source or physical observer, report that before changing the board. If the same experiment fails twice without narrowing the cause, stop that experiment. |
+| Restore the conversation | Three intended requests produce three attributable, intelligible replies on normal firmware, with honest progress; one follows power-up. | Preserve the exact working image, gateway source, Unified version and limits. If the first broken boundary changes, investigate it before adding features. |
+| Hand out a LAN prototype | A teammate with a fresh board/host can complete the setup above and repeat the conversation using the repo alone. | One independent clean setup. Missing installer, trust setup or incompatible Unified blocks release, not a note to fix after publication. Recheck the exact assembled head before PR approval. |
+| Ship the requested assistant | I2, I3 and I4 below verified on the same accumulating product. | No “whole Unified” label based on a text-only demo, and no “portable” label based on host-side VPN reachability. |
+
+Planning assumptions: the diagnostic is a single short physical session, not a
+forecast that the fault will be repaired during it. Once the first failing
+boundary is known, estimate **that repair**, then schedule one integrated
+acceptance session. Next reserve a clean-host/board setup with a teammate.
+Do not promise a ship date before the fault, teammate hardware, and scoped
+Unified operations are established. The integration owner reports the next
+decision, exact candidate and expected user-visible outcome, not worker counts.
 
 The next usable outcome is a team-shareable prototype whose gateway remains
 available across Unified restarts and whose pet reconnects while the mic is on.
@@ -128,8 +185,8 @@ independent implementation with explicit file/resource ownership.
 | I3 — manage attention and create work | Ask what needs attention, answer the intended waiting question, create a new workspace and start a new chat/work there. | Join supported attention/question revision and workspace prepare/create/chat-start actions to the existing voice interaction, preserving permissions. | Genuine waiting question answered at its source; second question not confused; real new workspace + distinct chat + actual requested execution, not just a folder/task/accepted request. |
 | I4 — portable daily use | Do the same useful work away from home and recover from network changes without maintenance rituals. | Complete sustained native Tailscale/audio/UI coexistence, setup/reconnect and power behavior. Retain identity; measure actual resources, latency and battery rather than invent targets. | Supported off-home Wi-Fi with home-LAN route unavailable, real voice/result and context switch/new work; repeated calls and interruption recovery; usable animation/touch; measured limits documented. |
 
-Tailscale integration may advance alongside I1/I2 once file/resource ownership
-allows; off-site proof is required for product delivery, not deferred out of scope.
+After the team LAN increment, present the device-side Tailscale plan and estimate
+for decision before implementation. Off-site proof remains required for the product.
 Do not expand I1 into a new framework or repeat accepted microphone qualification.
 If evidence contradicts the existing path, change only the implicated boundary
 and explain the effect on the next usable outcome before dependent changes.
@@ -166,15 +223,15 @@ cost; otherwise keep the existing path and record the finding.
   rerun or repin a consumed installer: its retry and execution-custody failure
   paths need repair, and direct device access is not established. No
   bootloader/table write, automatic rollback, old NVS restore or token regeneration.
-- Last demonstrated device boundary: build 11 completed two multi-exchange
+- Earlier demonstrated device boundary (15–16 November): build 11 completed two multi-exchange
   calls through the Unified front door. A later call through the installed,
   independent gateway yielded one user-heard answer with the exact input matched
   to the chat; it ended normally on quiet. Survival across Unified restart and
   automatic reconnect remain unverified. A later post-upgrade test reached the
   front-door chat, but the call had closed before its answer was ready; the
   reason for the device-side stop is unknown. Do not resend that request. The
-  original host's LAN service now runs the pre-dial safeguard, but voice after
-  that cutover has not yet been verified. Any
+  original host's LAN service subsequently ran the pre-dial safeguard; see the
+  dated recovery decision above for the later physical outcome. Any
   firmware update requires a concrete candidate, a reviewed safe app-only
   installation path and applicable device authority. Do not replay prior
   one-shot operations.

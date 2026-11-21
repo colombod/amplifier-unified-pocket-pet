@@ -29,6 +29,17 @@ substitutes for the outcome. [Vision](../docs/VISION.md) owns the destination;
 
 ## Design commitments and open implementation choices
 
+**Team release clarification (21 November):** the recipient is another Unified
+user, not just the maintainer. From one clone and documented prerequisites,
+they must be able to identify the exact board, build, install on a fresh board,
+update with backup/rollback, install and pair the gateway on their own host,
+check the supported Unified version, configure from their phone, check audio
+without paying a provider, and use the normal pet. Private credentials and
+machine-specific state are inputs, never unpublished product code. A source
+checkout, a maintainer's successful setup and an independent teammate's
+successful setup are three distinct claims. A LAN prototype may be shared as
+LAN-only; it does not satisfy P5.
+
 Reuse the documented ESP32-S3 AMOLED board, existing audio/display/artwork/phone
 setup and native Tailscale work. Reuse Unified's current supported conversation,
 voice, work-discovery, question and workspace/chat mechanisms. No second chatbot,
