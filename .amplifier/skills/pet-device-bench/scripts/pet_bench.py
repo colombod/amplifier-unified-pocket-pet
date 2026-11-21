@@ -54,6 +54,9 @@ def parse_report(text):
             if len(p) != 4 or p[3] not in JITTER:
                 raise ValueError('invalid jitter acknowledgement')
             continue
+        if p[:3] == ['pet-bench-v1', 'voice', 'drop']:
+            numbers(p[3:], 1)  # result code of leaving the access point
+            continue
         if p[:3] == ['pet-bench-v1', 'voice', 'bw']:
             numbers(p[3:], 2)
             if p[3] not in ('20', '40'):

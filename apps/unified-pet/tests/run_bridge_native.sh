@@ -192,7 +192,7 @@ compile -DPET_PRIVATE_MIC_DIAG=1 -o "$out/runtime-micdiag"
 if nm "$out/runtime" | grep -E 'bv_diag_|bv_keep|bench_prebuffer|bench_audio_|bridge_voice_bench_(jitter|audio|last)|esp_wifi_'; then
     echo 'private symbol leaked into normal compile' >&2; exit 1
 fi
-if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw|voice audio|voice last|voice scan|kept-end'; then
+if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw|voice audio|voice last|voice scan|voice drop|kept-end'; then
     echo 'private string leaked into normal compile' >&2; exit 1
 fi
 echo 'NORMAL PRIVATE SYMBOL/STRING CHECK: PASS'

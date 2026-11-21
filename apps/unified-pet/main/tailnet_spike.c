@@ -323,6 +323,14 @@ static void console(void *arg) {
                     char ack[64];int len=snprintf(ack,sizeof(ack),"pet-bench-v1 voice bw %u %u\n",bw,(unsigned)e);
                     usb_serial_jtag_write_bytes(ack,len,pdMS_TO_TICKS(100));
                 }
+                else if(!strcmp(line,"voice drop")){
+                    /* Bench only: leave the access point, as a lost link does, so the
+                     * ordinary recovery in network.c has to notice and rejoin.
+                     * pet-bench-v1 voice drop <result code>. */
+                    esp_err_t e=esp_wifi_disconnect();
+                    char ack[64];int len=snprintf(ack,sizeof(ack),"pet-bench-v1 voice drop %u\n",(unsigned)e);
+                    usb_serial_jtag_write_bytes(ack,len,pdMS_TO_TICKS(100));
+                }
 #endif
             }
             memset(line,0,sizeof(line));n=0;discard=false;

@@ -140,7 +140,7 @@ from pathlib import Path
 import sys
 data=Path(sys.argv[1]).read_bytes()
 markers=("pet-bench-v1","pet-mic-v1","voice on","voice core","voice prio",
-         "voice jitter","voice bw","voice audio","voice last","voice scan","kept-end",
+         "voice jitter","voice bw","voice audio","voice last","voice scan","voice drop","kept-end",
          "bv_keep","bridge_voice_bench_last")
 found=[marker for marker in markers if marker.encode() in data]
 if found:

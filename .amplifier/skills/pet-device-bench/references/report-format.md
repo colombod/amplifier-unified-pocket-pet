@@ -16,6 +16,7 @@ Nothing here carries audio, words, names, addresses or identifiers.
 | `voice bw 20\|40` | station channel bandwidth | `pet-bench-v1 voice bw <bw> <result>` |
 | `voice last 0\|1\|2` | print a kept report (0 = newest) | see Kept reports |
 | `voice scan` | scan for the joined network's access points | see Scan |
+| `voice drop` | leave the access point; the pet's ordinary recovery rejoins (first retry after 5 s) | `pet-bench-v1 voice drop <result>` |
 
 An acknowledgement confirms the command was taken, not that a call connected.
 
