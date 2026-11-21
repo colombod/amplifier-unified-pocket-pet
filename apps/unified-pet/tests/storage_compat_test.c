@@ -115,8 +115,35 @@ int main(void) {
  command_t blank={.kind=1,.ssid="SYNTHETIC-NEW-SSID",.password="SYNTHETIC-NEW-WIFI"};
  strcpy(state.ssid,"SYNTHETIC-OLD-SSID");
  assert(join_network(&blank,true)); /* Actual production join/save body. */
- /* Among several access points of one network, the strongest is joined. */
+ /* Nothing listed by the scan: one unpinned configuration, strongest by signal. */
  assert(station_scan_method==WIFI_ALL_CHANNEL_SCAN&&station_sort_method==WIFI_CONNECT_AP_BY_SIGNAL);
+ assert(scan_calls==1&&station_history_n==1&&!station_history[0].pinned);
+ /* Three access points listed: the strongest is pinned, whatever its position.
+  * It turns the pet away once (a stale session) and takes it on the next try:
+  * the pet insists on it and no other configuration is applied. */
+ scan_found_n=3;
+ scan_found[0]=(wifi_ap_record_t){.bssid={1,1,1,1,1,1},.primary=11,.rssi=-80};
+ scan_found[1]=(wifi_ap_record_t){.bssid={2,2,2,2,2,2},.primary=1,.rssi=-50};
+ scan_found[2]=(wifi_ap_record_t){.bssid={3,3,3,3,3,3},.primary=6,.rssi=-91};
+ station_history_n=0;link_script_n=1;link_script_i=0;link_script[0]=LINK_LOST;
+ assert(join_network(&blank,false));
+ assert(station_history_n==1&&station_history[0].pinned&&station_history[0].channel==1);
+ assert(!memcmp(station_history[0].bssid,scan_found[1].bssid,6)&&link_script_i==1);
+ /* The pinned one never takes it: after JOIN_PINNED_ATTEMPTS any access point
+  * is accepted, with one further unpinned configuration. */
+ station_history_n=0;link_script_n=JOIN_PINNED_ATTEMPTS;link_script_i=0;
+ for(unsigned i=0;i<JOIN_PINNED_ATTEMPTS;i++)link_script[i]=LINK_LOST;
+ assert(join_network(&blank,false));
+ assert(station_history_n==2&&station_history[0].pinned&&!station_history[1].pinned&&link_script_i==JOIN_PINNED_ATTEMPTS);
+ /* Nothing takes it at all: bounded, and reported as not joined. */
+ station_history_n=0;link_script_n=JOIN_PINNED_ATTEMPTS+JOIN_OPEN_ATTEMPTS;link_script_i=0;
+ for(unsigned i=0;i<link_script_n;i++)link_script[i]=LINK_LOST;
+ assert(!join_network(&blank,false));
+ assert(station_history_n==2&&link_script_i==JOIN_PINNED_ATTEMPTS+JOIN_OPEN_ATTEMPTS);
+ /* A failed scan is not an obstacle: unpinned, as when nothing is listed. */
+ station_history_n=0;link_script_n=0;link_script_i=0;scan_result=ESP_FAIL;
+ assert(join_network(&blank,false)&&station_history_n==1&&!station_history[0].pinned);
+ scan_result=ESP_OK;scan_found_n=0;station_history_n=0;
  /* Joining names no network: not the one left, not the one typed in. */
  assert(!state.ssid[0]);
  assert(state.settings_saved&&state.key_saved&&state.connected);

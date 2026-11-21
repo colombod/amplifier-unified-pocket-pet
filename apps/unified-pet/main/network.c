@@ -380,6 +380,36 @@ static void open_ap(void) {
     if(mode!=WIFI_MODE_APSTA) ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     xSemaphoreTake(state_lock,portMAX_DELAY); state.setup=true; xSemaphoreGive(state_lock);
 }
+/* A network can have several access points, and the Wi-Fi stack on its own does
+ * not reliably end up on the strongest. After a restart without a clean
+ * disconnect (power cycle, firmware install) the access point the pet was on
+ * still holds its old session and turns the first new attempt away within
+ * milliseconds; the stack then silently joins a weaker one and stays there.
+ * Measured on this pet: every second restart landed at -75 to -91 dBm with one
+ * at about -50 dBm in range, and calls there starved (working-files/voice-bench,
+ * 21 November 2026). So: scan for the network, pin the strongest access point,
+ * and insist on it for a few attempts before accepting any other. */
+#define JOIN_PINNED_ATTEMPTS 3
+#define JOIN_OPEN_ATTEMPTS 2
+static bool strongest_access_point(const char *name,wifi_config_t *cfg) {
+    wifi_scan_config_t scan={.ssid=(uint8_t*)name,.show_hidden=true};
+    uint16_t count=8; wifi_ap_record_t *found=calloc(count,sizeof(*found));
+    bool listed=found && esp_wifi_scan_start(&scan,true)==ESP_OK && esp_wifi_scan_get_ap_records(&count,found)==ESP_OK && count>0;
+    if(listed) {
+        unsigned best=0;
+        for(unsigned i=1;i<count;i++) if(found[i].rssi>found[best].rssi) best=i;
+        memcpy(cfg->sta.bssid,found[best].bssid,sizeof(cfg->sta.bssid)); cfg->sta.bssid_set=true; cfg->sta.channel=found[best].primary;
+        ESP_LOGI("pet_net","Strongest of %u access points: channel %u, %d dBm",(unsigned)count,(unsigned)found[best].primary,(int)found[best].rssi);
+    }
+    free(found); return listed;
+}
+/* The pinned access point did not take the pet: accept whichever does. */
+static void any_access_point(const command_t *cmd) {
+    wifi_config_t cfg={0}; memcpy(cfg.sta.ssid,cmd->ssid,strlen(cmd->ssid)); memcpy(cfg.sta.password,cmd->password,strlen(cmd->password));
+    cfg.sta.pmf_cfg.capable=true; cfg.sta.pmf_cfg.required=false;
+    cfg.sta.scan_method=WIFI_ALL_CHANNEL_SCAN; cfg.sta.sort_method=WIFI_CONNECT_AP_BY_SIGNAL;
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&cfg)); memset(&cfg,0,sizeof(cfg));
+}
 static bool join_network(const command_t *cmd,bool save) {
     /* The network being left is no longer the current one, and the one being
      * joined is not yet: the name stays empty until the station reports it. */
@@ -389,14 +419,13 @@ static bool join_network(const command_t *cmd,bool save) {
     if(esp_wifi_disconnect()==ESP_OK) xEventGroupWaitBits(events,LINK_LOST,pdFALSE,pdFALSE,pdMS_TO_TICKS(600));
     wifi_config_t cfg={0}; memcpy(cfg.sta.ssid,cmd->ssid,strlen(cmd->ssid)); memcpy(cfg.sta.password,cmd->password,strlen(cmd->password));
     cfg.sta.pmf_cfg.capable=true; cfg.sta.pmf_cfg.required=false;
-    /* A network can have several access points. The default joins the first one
-     * that answers, however weak: this pet sat at -75 dBm with stalled calls, and
-     * later saw one at -42 dBm among four in range (working-files/voice-bench,
-     * 21 November 2026). Look at every channel and join the strongest. */
     cfg.sta.scan_method=WIFI_ALL_CHANNEL_SCAN; cfg.sta.sort_method=WIFI_CONNECT_AP_BY_SIGNAL;
+    bool pinned=strongest_access_point(cmd->ssid,&cfg);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&cfg)); memset(&cfg,0,sizeof(cfg));
     bool ok=false;
-    for(int attempt=0;attempt<3&&!ok;attempt++) {
+    int attempts=pinned?JOIN_PINNED_ATTEMPTS+JOIN_OPEN_ATTEMPTS:3;
+    for(int attempt=0;attempt<attempts&&!ok;attempt++) {
+        if(pinned&&attempt==JOIN_PINNED_ATTEMPTS) any_access_point(cmd);
         xEventGroupClearBits(events,IP_READY|LINK_LOST);
         if(esp_wifi_connect()!=ESP_OK) break;
         EventBits_t bits=xEventGroupWaitBits(events,IP_READY|LINK_LOST,pdFALSE,pdFALSE,pdMS_TO_TICKS(12000));

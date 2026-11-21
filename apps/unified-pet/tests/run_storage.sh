@@ -11,9 +11,11 @@ import sys
 from pathlib import Path
 source=Path("main/network.c")
 lines=source.read_text(encoding="utf-8").splitlines(keepends=True)
-parts=[]
+# The production join bounds, not test copies of them.
+parts=[line for line in lines if line.startswith("#define JOIN_")]
+assert len(parts)==2,parts
 for name in ("mode_ready","refresh_bridge_mode","network_copy_api_key","network_copy_tailscale_auth_key","network_copy_unified_target",
-             "network_init","join_network"):
+             "network_init","strongest_access_point","any_access_point","join_network"):
     start=next(i for i,line in enumerate(lines) if re.match(rf"^(?:esp_err_t|void|static void|static bool) {name}\(",line))
     end=next(i for i in range(start+1,len(lines)) if lines[i]=="}\n")
     body="".join(lines[start:end+1])
