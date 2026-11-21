@@ -79,9 +79,11 @@ second where the owner's send time went (transport lock, socket, or neither).
 | `listen-rtt160` | 160 ms round trip, microphone only | same |
 | `loss-0.5pct` | 10 ms round trip, 0.5% loss each way | same |
 | `blackout-600ms` | 0.6 s total blackout while listening | same |
-| `blackout-2500ms` | 2.5 s total blackout during an answer | one call through mic off; up to 4 s of whole-chunk capture gaps; nothing twice or out of order |
+| `blackout-2500ms` | 2.5 s total blackout during an answer | one call through mic off; no observed missing, repeated or reordered mic samples |
 
-Since `0.3.12-voice-steady` (retained in `0.3.13-voice-clear`), only the long-blackout expectation changes: a 5 s
+The `0.3.18-voice-buffer` candidate restores the no-gap criterion for this
+blackout. The historical results below used a weaker criterion; they don't
+qualify the new candidate. In `0.3.12-voice-steady` (retained in `0.3.13-voice-clear`), only the long-blackout expectation changed: a 5 s
 send allowance and newest-chunk dropping replace the former 1.8 s send limit
 and FIFO-overflow exit. It must now keep one call, not reconnect. Its delivered
 audio minimum subtracts the explicit 4 s gap budget; all six other scenarios

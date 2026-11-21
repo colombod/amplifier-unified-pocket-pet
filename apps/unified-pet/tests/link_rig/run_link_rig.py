@@ -204,8 +204,8 @@ def judge(scenario: dict, result: dict) -> dict:
         problems.append("observed microphone gaps exceeded this scenario's bound")
     interrupted = "Microphone stream interrupted." in texts or "Reconnecting..." in texts or len(calls) > 1
     if want in ("survives", "survives_with_gaps"):
-        # One call from mic on to the user's mic off. Only the long blackout
-        # allows bounded, whole-chunk capture gaps; replay/order checks stay on.
+        # One call from mic on to mic off. Historical/custom scenarios can
+        # admit explicit gaps; the maintained release scenarios do not.
         if interrupted:
             problems.append("the call was interrupted: " + " | ".join(t for t in texts if t not in ("Listening", "Speaking")))
         if not texts or texts[-1] != "Mic off":

@@ -23,7 +23,11 @@
 #include "driver/usb_serial_jtag.h"
 #include "esp_wifi.h"
 #endif
-#define BV_MIC 96000
+/* A stalled send is allowed to hold the owner for five seconds, while the
+ * capture task keeps reading 48 PCM bytes/ms. Retain that interval plus one
+ * append in PSRAM. This is capacity, not a prebuffer: send and mute timings
+ * do not change. Repeated or sustained stalls can still exhaust the FIFO. */
+#define BV_MIC (48u*BV_STALL_MS+BV_APPEND)
 #define BV_SPEAKER (256*1024)
 #define BV_FRAME 96000
 #define BV_CHUNK 960

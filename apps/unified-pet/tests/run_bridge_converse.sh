@@ -100,7 +100,7 @@ for name in stop-before-active stop-registration stop-reconnect-registration sto
     off-answering off-parent off-no-reply host-quiet host-time-limit host-burst-error \
     notice-queue notice-linger notice-begin notice-user notice-fatal terminal-wire cert-first cert-reconnect cert-muted cert-unknown cert-no-evidence cert-silent cert-silent-reconnect malformed-tail reviewed-races sdk-event-loss no-error \
     malformed turn-frame unknown-type deadline audio-open mic-read speaker-write setup-token setup-start \
-    burst-ok gappy lag late-600 late-600-heavy recover send-wait send-wait-off send-wait-off-lost retained \
+    burst-ok gappy lag late-600 late-600-heavy recover phrase-control phrase-stall phrase-stall-radio send-wait send-wait-off send-wait-off-lost retained \
     re-listening re-asking re-answering re-close re-error re-flood re-send re-stall re-stall-long re-send-wait-long \
     re-first re-first-503 re-first-timeout re-error-busy re-no-begin re-busy \
     re-give-up re-give-up-first re-give-up-timeout re-off-wait re-off-connect re-off-begin re-off-instant \

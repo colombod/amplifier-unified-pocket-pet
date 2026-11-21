@@ -126,6 +126,19 @@ normal build was `0.3.17-strong-ap` from `8d2f313`, gateway `7a31bba`, Unified
 cause are unknown. The earlier `0.3.12`/`7161575` reply had a long silent wait
 and choppy audio; it is not a replacement release. PR #7 at `16d89c8` is held.
 
+**First localized repair (`0.3.18-voice-buffer`, not physically accepted):**
+the post-Build-11 firmware will wait five seconds on a socket send but
+buffered only two seconds of microphone input. When it filled, it silently
+dropped new 20 ms chunks. In a retained device report the queue reached
+96,000 bytes and one send was blocked for 3.336 s. In the firmware owner test,
+three distinct 200 ms input markers went from 4,800 / 4,800 / 4,800 samples on
+the wire to 4,800 / **0** / 4,800 with a 2.6 s stall. Reserving 244,800 bytes
+in PSRAM instead of 96,000 preserves every marker in those tested transient
+stalls. It does not delay normal sends or enlarge playback buffering. Prolonged
+overload can still lose speech. This is a specific loss mechanism, **not**
+proof of the last call's cause, microphone operation, or spoken acceptance.
+It changes no storage layout, credentials, or phone setup.
+
 One integration owner ships one tested firmware/gateway/Unified combination
 from the product repository. Never bulk-promote experimental branches or private
 history. Recover existing tools into the product when a teammate needs them.

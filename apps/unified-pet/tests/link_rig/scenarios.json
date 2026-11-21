@@ -68,7 +68,7 @@
     "expect": "survives"
   },
   "blackout-2500ms": {
-    "about": "A 2.5 s blackout during an answer: one call survives, dropping newest whole capture chunks if retransmission fills its FIFO.",
+    "about": "A 2.5 s blackout during an answer: the same call survives and delivers the buffered microphone stream, without a hole in the observed input.",
     "link": "delay:both:0:0:3;drop:both:5500:8000:0",
     "answers": [
       {
@@ -78,7 +78,6 @@
     ],
     "mic_off_ms": 20000,
     "accept_calls": 3,
-    "mic_gap_max_ms": 4000,
-    "expect": "survives_with_gaps"
+    "expect": "survives"
   }
 }

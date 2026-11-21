@@ -244,6 +244,7 @@ static unsigned frames_high;
  * defensive short-enqueue failure even though ordinary conversation overflow
  * now drops. They do not claim a real FIFO overflow still ends a conversation. */
 static bool force_capture_short;
+static StreamBufferHandle_t fixture_mic;
 static void queue_fault_stall(void){
     force_capture_short=true;owner_stall_at=now+3000000;owner_stall_us=2600000;
 }
@@ -276,11 +277,16 @@ static unsigned uxQueueMessagesWaiting(QueueHandle_t q){return q->n;}
 static void vQueueDelete(QueueHandle_t q){assert(!guard_held&&!q->n);queues_deleted++;free(q);}
 static StreamBufferHandle_t xStreamBufferCreateStatic(size_t size,size_t trigger,unsigned char *memory,StaticStreamBuffer_t *meta){
     (void)trigger;(void)memory;(void)meta;StreamBufferHandle_t s=calloc(1,sizeof(*s));assert(s);
-    s->cap=size-1;s->data=malloc(s->cap);assert(s->data);streams_made++;return s;
+    s->cap=size-1;
+    /* Production creates capture first on each call. The explicitly injected
+     * short-write cases reproduce the original fault at the same instant;
+     * every ordinary case uses the exact production allocation. */
+    if(!fixture_mic){fixture_mic=s;if(force_capture_short)s->cap=96000;}
+    s->data=malloc(s->cap);assert(s->data);streams_made++;return s;
 }
 static size_t xStreamBufferBytesAvailable(StreamBufferHandle_t s){return s->n;}
 static size_t xStreamBufferSpacesAvailable(StreamBufferHandle_t s){
-    if(force_capture_short&&s->cap==96000&&s->n==s->cap)return 960; /* injected probe fault */
+    if(force_capture_short&&s==fixture_mic&&s->n==s->cap)return 960; /* injected probe fault */
     return s->cap-s->n;
 }
 static size_t mic_high,mic_waiting; /* microphone audio captured but not yet sent */
@@ -288,24 +294,24 @@ static unsigned mic_short_writes;
 static size_t xStreamBufferSend(StreamBufferHandle_t s,const void *p,size_t n,unsigned ticks){
     assert(!ticks);
     if(n>s->cap-s->n){ /* zero-wait partial write, as the RTOS */
-        if(s->cap==96000)mic_short_writes++;
+        if(s==fixture_mic)mic_short_writes++;
         n=s->cap-s->n;
     }
-    if(s->cap==96000&&n){
+    if(s==fixture_mic&&n){
         assert(n==960&&capture_positions_n<40000);
         if(capture_positions_n)assert(fixture_capture_position>capture_positions[capture_positions_n-1]);
         capture_positions[capture_positions_n++]=fixture_capture_position;
     }
     memcpy(s->data+s->n,p,n);s->n+=n;if(s->n>s->high)s->high=s->n;
-    if(s->cap==96000){mic_waiting=s->n;if(s->n>mic_high)mic_high=s->n;}
+    if(s==fixture_mic){mic_waiting=s->n;if(s->n>mic_high)mic_high=s->n;}
     return n;
 }
 static size_t xStreamBufferReceive(StreamBufferHandle_t s,void *p,size_t n,unsigned ticks){
     assert(!ticks);if(n>s->n)n=s->n;memcpy(p,s->data,n);memmove(s->data,s->data+n,s->n-n);s->n-=n;
-    if(s->cap==96000)mic_waiting=s->n;
+    if(s==fixture_mic)mic_waiting=s->n;
     return n;
 }
-static void vStreamBufferDelete(StreamBufferHandle_t s){assert(!guard_held);streams_deleted++;free(s->data);free(s);}
+static void vStreamBufferDelete(StreamBufferHandle_t s){assert(!guard_held);if(s==fixture_mic)fixture_mic=NULL;streams_deleted++;free(s->data);free(s);}
 static EventGroupHandle_t xEventGroupCreate(void){groups_made++;return calloc(1,sizeof(struct {unsigned bits;}));}
 static unsigned xEventGroupSetBits(EventGroupHandle_t e,unsigned bits){e->bits|=bits;return e->bits;}
 static unsigned xEventGroupClearBits(EventGroupHandle_t e,unsigned bits){e->bits&=~bits;return e->bits;}
@@ -344,7 +350,19 @@ static bool shown(const char *text){
 static bool codec_open,open_fail,open_committed_before_wait;
 static uint64_t mic_samples,wire_samples,open_samples;
 static unsigned mic_call,open_failures;
-static unsigned mic_stamp(unsigned call,uint64_t position){return 0x1000u+(call%4)*0x1000u+(unsigned)(position%0x1000);}
+static bool mark_phrase;
+static unsigned marker_received[3];
+static unsigned mic_stamp(unsigned call,uint64_t position){
+    if(mark_phrase){
+        /* Three distinct 200 ms PCM words, before/during/after a 2.6 s
+         * owner stall. Test the bytes in the outgoing frame, not the queue's
+         * idea of what should have arrived. Not a transcription test. */
+        const unsigned at[]={24000,120000,168000};
+        for(unsigned i=0;i<3;i++)
+            if(position>=at[i]&&position<at[i]+4800)return 0x5801+i;
+    }
+    return 0x1000u+(call%4)*0x1000u+(unsigned)(position%0x1000);
+}
 static unsigned opens,closes,inhibits,mic_reads,mic_fail_at,mic_read_attempts,spk_writes,spk_fail_at;
 static void (*audio_close_hook)(void);
 static int64_t spk_busy,mic_off_at,first_audible_at;
@@ -594,6 +612,7 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
             assert(capture_positions_sent<capture_positions_n);
             wire_samples=capture_positions[capture_positions_sent]+capture_position_offset;
             unsigned v=pcm[i]|(unsigned)pcm[i+1]<<8;
+            if(mark_phrase&&v>=0x5801&&v<=0x5803)marker_received[v-0x5801]++;
             if(!v)zero_bytes+=2;
             else if(v>=0x7000)echo_bytes+=2;
             else{
@@ -656,7 +675,7 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t h,const 
 }
 
 #include "bridge-converse-production.inc"
-_Static_assert(BV_MIC==96000,"the harness identifies the microphone buffer by its size");
+_Static_assert(BV_MIC % BV_CHUNK == 0,"capture capacity must hold whole codec chunks");
 static void check_status_publication(live_state_t state){
     /* A retrying NEW call may keep its connecting look; a call being released
      * must never promise a replacement before final-access proof and tail. */
@@ -897,6 +916,7 @@ static void says(int64_t from_ms,int64_t to_ms){
 /* Fixture state only. Production statics are NEVER reset between calls: every
  * later call in a process is a conversation started after an earlier one ended. */
 static void fresh(void){
+    mark_phrase=false;memset(marker_received,0,sizeof(marker_received));
     script_n=0;host_next=0;speech_n=0;omit_silence=false;stall_from=stall_to=0;stalled=0;host_audible=host_silent=0;
     parent_stop=false;mic_off_at=0;first_audible_at=0;played=played_audible=played_after_off=0;loud_n=0;spk_busy=0;
     fail_next_guard=fail_tail_guard=fail_message_alloc=delay_message_alloc=false;
@@ -1523,6 +1543,16 @@ static void recover(void){
     assert(mic_sent>(uint64_t)48000*11);                  /* ... and nothing was left behind */
     assert(played_audible==host_audible&&frames_high>=14&&frames_high<=20);
 }
+static void phrase_comparison(unsigned stall_ms){
+    fresh();opened();mark_phrase=true; /* quiet pet speaker */
+    if(stall_ms){owner_stall_at=run_start+3000000;owner_stall_us=stall_ms*1000;}
+    at(12000,EV_MIC_OFF,NULL);call(false);stopped_cleanly(2);
+    printf("input PCM markers, quiet speaker, stall_ms=%u: %u %u %u / 4800 each; calls=%u\n",
+           stall_ms,marker_received[0],marker_received[1],marker_received[2],new_calls);
+    assert(new_calls==1&&marker_received[0]==4800&&marker_received[1]==4800&&marker_received[2]==4800);
+    for(unsigned i=1;i<capture_positions_sent;i++)
+        assert(capture_positions[i]==capture_positions[i-1]+480);
+}
 static void send_wait(void){
     /* One lost packet: the socket takes no microphone frame for 1.4 s, until
      * TCP sends it again. The audio waits in the microphone buffer and the
@@ -1702,7 +1732,9 @@ static void re_drop(const char *name){
             assert(sent_n==4&&!strcmp(sent[2],PET_STOP)&&!strcmp(sent[3],SESSION_CLOSE));
             assert(!up_at_fence&&run_end-mic_off_at<=3*send_latency_us+50000&&played_after_off<=960);
         }else stopped_cleanly(2);
-        assert(new_calls==1&&!shown("Reconnecting...")&&mic_high==96000&&mic_short_writes==0);
+        assert(new_calls==1&&!shown("Reconnecting...")&&mic_short_writes==0);
+        if(!strcmp(name,"re-stall"))assert(mic_high==BV_MIC); /* sustained overload */
+        else assert(mic_high>96000&&mic_high<BV_MIC); /* former FIFO would lose speech */
         assert(send_limit_high==5000);
         if(strcmp(name,"re-stall"))assert(!send_failed&&mic_sent>48000*10);
         return;
@@ -2887,6 +2919,9 @@ int main(int argc,char **argv){
     else if(!strcmp(name,"late-600"))late_call(name,8,20);
     else if(!strcmp(name,"late-600-heavy"))late_call(name,20,40);
     else if(!strcmp(name,"recover"))recover();
+    else if(!strcmp(name,"phrase-control"))phrase_comparison(0);
+    else if(!strcmp(name,"phrase-stall"))phrase_comparison(2600);
+    else if(!strcmp(name,"phrase-stall-radio"))phrase_comparison(3336);
     else if(!strcmp(name,"send-wait"))send_wait();
     else if(!strcmp(name,"send-wait-off")||!strcmp(name,"send-wait-off-lost"))send_wait_off(name);
     else if(!strcmp(name,"sequence"))sequence();
