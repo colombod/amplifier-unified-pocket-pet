@@ -26,4 +26,5 @@ void bridge_voice_reap_finished(void);
 /* Snapshotted once per call; never retunes an already running call. */
 bool bridge_voice_bench_jitter(unsigned ms);
 void bridge_voice_bench_audio(unsigned priority,int core);
+void bridge_voice_bench_last(unsigned back);
 #endif

@@ -66,7 +66,7 @@ for name in ['take','give','quiet','health_end','note_exit','stopping','exit_sta
     start,end=function(name);body=text[start:end]
     hashes[name]=digest(body.encode());parts.append(located(start,end))
     if name=='converse_tail':
-        for diag in ['bv_diag_write','bv_diag_report']:
+        for diag in ['bv_diag_write','bv_diag_emit','bv_diag_report']:
             start,end=function(diag);body=text[start:end]
             hashes[diag]=digest(body.encode())
             parts.extend(['#if defined(PET_PRIVATE_MIC_DIAG)',located(start,end),'#endif'])

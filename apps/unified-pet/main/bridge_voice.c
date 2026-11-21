@@ -197,6 +197,15 @@ static atomic_bool restart_required;
 static struct { bool again,reached; unsigned failures; int64_t ended_at; } call_report;
 #if defined(PET_PRIVATE_MIC_DIAG)
 static atomic_uint bench_prebuffer_ms=320;
+/* Bench only: the reports of the last BV_DIAG_KEEP calls stay in memory, so a
+ * call made with nobody reading the console can be read out afterwards
+ * ("voice last <n>"). Counts and timings only, exactly the console report. */
+#define BV_DIAG_KEEP 3u
+#define BV_DIAG_KEEP_BYTES 12288u
+static SemaphoreHandle_t bv_keep_lock;
+static char *bv_keep_text[BV_DIAG_KEEP],*bv_keep_cur;
+static unsigned bv_keep_len[BV_DIAG_KEEP],bv_keep_start_ms[BV_DIAG_KEEP],bv_keep_count,*bv_keep_cur_len;
+static bool bv_keep_usb;
 /* Bench only: priority and core of the next call's two audio tasks.
  * Consumed once at call entry; the normal defaults apply again afterwards. */
 static atomic_uint bench_audio_priority=BV_AUDIO_PRIORITY;
@@ -734,7 +743,12 @@ static void publish(bridge_voice_t *c){
     if(c->reconnects&&state==LIVE_CONNECTING){live_voice_bridge_status(LIVE_RECONNECTING,"Reconnecting...");return;}
     live_voice_bridge_status(state,view.status); /* only fixed metadata, NOT target/transcript */
 }
-void bridge_voice_init(void){guard=xSemaphoreCreateMutex();assert(guard);}
+void bridge_voice_init(void){
+    guard=xSemaphoreCreateMutex();assert(guard);
+#if defined(PET_PRIVATE_MIC_DIAG)
+    bv_keep_lock=xSemaphoreCreateMutex();
+#endif
+}
 bool bridge_voice_restart_required(void){return atomic_load(&restart_required);}
 void bridge_voice_stop(void){
     /* This latch is independent of the model guard. If a contended guard
@@ -907,12 +921,18 @@ static void converse_tail(bridge_voice_t *c){
 }
 #if defined(PET_PRIVATE_MIC_DIAG)
 static bool bv_diag_write(const char *line,int n,size_t cap,int64_t until){
+    if(n<=0||(size_t)n>=cap)return false;
+    if(bv_keep_cur&&*bv_keep_cur_len+(unsigned)n<=BV_DIAG_KEEP_BYTES){
+        memcpy(bv_keep_cur+*bv_keep_cur_len,line,(size_t)n);*bv_keep_cur_len+=(unsigned)n;
+    }
+    /* After the first console write that fails nothing more is written there;
+     * the kept copy is still completed. */
     int64_t left=until-esp_timer_get_time();
-    return n>0&&(size_t)n<cap&&left>0&&
-        usb_serial_jtag_write_bytes(line,(size_t)n,pdMS_TO_TICKS((unsigned)(left/1000)))==n;
+    if(bv_keep_usb&&(left<=0||
+        usb_serial_jtag_write_bytes(line,(size_t)n,pdMS_TO_TICKS((unsigned)(left/1000)))!=n))bv_keep_usb=false;
+    return bv_keep_usb||bv_keep_cur!=NULL;
 }
-static void bv_diag_report(bridge_voice_t *c){
-    if(!c->mic_started)return;
+static void bv_diag_emit(bridge_voice_t *c){
     /* No model lock; both audio tasks and the transport have settled. One
      * bounded best-effort write window on the existing USB console. The
      * operator must discard a report without its trailer. */
@@ -1014,6 +1034,42 @@ static void bv_diag_report(bridge_voice_t *c){
     if(!bv_diag_write(line,n,sizeof(line),until))return;
     static const char bench_end[]="pet-bench-v1 end\n";
     (void)bv_diag_write(bench_end,sizeof(bench_end)-1,sizeof(bench_end),until);
+}
+static void bv_diag_report(bridge_voice_t *c){
+    if(!c->mic_started)return;
+    bool locked=bv_keep_lock&&xSemaphoreTake(bv_keep_lock,pdMS_TO_TICKS(5000))==pdTRUE;
+    if(locked){
+        unsigned slot=bv_keep_count%BV_DIAG_KEEP;
+        if(!bv_keep_text[slot])bv_keep_text[slot]=heap_caps_malloc(BV_DIAG_KEEP_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+        bv_keep_len[slot]=0;bv_keep_start_ms[slot]=(unsigned)(c->mic_start/1000);
+        bv_keep_cur=bv_keep_text[slot];bv_keep_cur_len=&bv_keep_len[slot];
+    }
+    bv_keep_usb=true;
+    bv_diag_emit(c);
+    if(locked){bv_keep_cur=NULL;bv_keep_count++;xSemaphoreGive(bv_keep_lock);}
+}
+/* pet-bench-v1 kept <back> <calls_since_boot> <bytes> <call_start_uptime_ms> <now_uptime_ms>
+ * then the kept report unchanged, then "pet-bench-v1 kept-end". */
+void bridge_voice_bench_last(unsigned back){
+    if(!bv_keep_lock||xSemaphoreTake(bv_keep_lock,pdMS_TO_TICKS(3000))!=pdTRUE)return;
+    unsigned have=bv_keep_count<BV_DIAG_KEEP?bv_keep_count:BV_DIAG_KEEP,len=0,start=0;
+    const char *text=NULL;
+    if(back<have){
+        unsigned slot=(bv_keep_count-1-back)%BV_DIAG_KEEP;
+        text=bv_keep_text[slot];len=text?bv_keep_len[slot]:0;start=bv_keep_start_ms[slot];
+    }
+    char line[96];
+    int n=snprintf(line,sizeof(line),"pet-bench-v1 kept %u %u %u %u %u\n",back,bv_keep_count,len,start,
+        (unsigned)(esp_timer_get_time()/1000));
+    usb_serial_jtag_write_bytes(line,(size_t)n,pdMS_TO_TICKS(200));
+    for(unsigned off=0;off<len;){
+        unsigned chunk=len-off>256?256:len-off;
+        if(usb_serial_jtag_write_bytes(text+off,chunk,pdMS_TO_TICKS(500))!=(int)chunk)break;
+        off+=chunk;
+    }
+    static const char done[]="pet-bench-v1 kept-end\n";
+    usb_serial_jtag_write_bytes(done,sizeof(done)-1,pdMS_TO_TICKS(200));
+    xSemaphoreGive(bv_keep_lock);
 }
 #endif
 static void cleanup(bridge_voice_t *c,bool wait){
