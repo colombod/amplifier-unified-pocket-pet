@@ -390,8 +390,8 @@ static bool join_network(const command_t *cmd,bool save) {
     wifi_config_t cfg={0}; memcpy(cfg.sta.ssid,cmd->ssid,strlen(cmd->ssid)); memcpy(cfg.sta.password,cmd->password,strlen(cmd->password));
     cfg.sta.pmf_cfg.capable=true; cfg.sta.pmf_cfg.required=false;
     /* A network can have several access points. The default joins the first one
-     * that answers, however weak: this pet sat at -75 dBm, with stalled and
-     * starved calls, while one at -42 dBm was in range (working-files/voice-bench,
+     * that answers, however weak: this pet sat at -75 dBm with stalled calls, and
+     * later saw one at -42 dBm among four in range (working-files/voice-bench,
      * 21 November 2026). Look at every channel and join the strongest. */
     cfg.sta.scan_method=WIFI_ALL_CHANNEL_SCAN; cfg.sta.sort_method=WIFI_CONNECT_AP_BY_SIGNAL;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&cfg)); memset(&cfg,0,sizeof(cfg));
