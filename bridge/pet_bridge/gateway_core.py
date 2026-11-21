@@ -1279,6 +1279,8 @@ class SessionOutcome:
     refused_ended: int = 0           # the call ended first, input not known late
     refused_ended_input_late: int = 0  # the call ended first, input known late
     input_wait_ms: int = 0           # requests held for late input, to 100 ms
+    input_frames_nonzero: int = 0    # admitted device frames with any nonzero PCM sample
+    input_frames_zero: int = 0       # admitted device frames containing digital silence
 
 
 _REFUSAL_REASONS = (
@@ -1504,6 +1506,7 @@ class PetSession:
         self._error_code: str | None = None
         self._close_origin: str | None = None
         self._audio_in = 0
+        self._input_nonzero = self._input_zero = 0
         self._input_bytes = 0
         self._input_offset: float | None = None
         self._input_rate_offset: float | None = None
@@ -1661,6 +1664,8 @@ class PetSession:
             error_code=self._error_code,
             close_confirmed=self._close_confirmed,
             audio_in_bytes=self._audio_in,
+            input_frames_nonzero=self._input_nonzero,
+            input_frames_zero=self._input_zero,
             audio_out_bytes=self._audio.sent_bytes,
             dropped_audio_bytes=self._audio.dropped_bytes + self._dropped_in,
             confirm_job=self._confirm_job if inflight else None,
@@ -2308,6 +2313,10 @@ class PetSession:
             self._fail("overflow")
             return
         self._audio_in += frame.pcm_len
+        if frame.pcm_has_signal:
+            self._input_nonzero += 1
+        else:
+            self._input_zero += 1
 
     def _on_begin(self) -> None:
         if self._state != _READY or self._turn_used or self._begin_pending:
@@ -2529,7 +2538,10 @@ class PetSession:
         if not ok or not getattr(value, "idle", False):
             self._known_unsent("preflight")  # read-only: nothing was submitted
             if self._converse:
-                self._converse_notice("busy")
+                # An inaccessible/unlisted target (or a failed read) is not
+                # evidence that someone is working. Keep the same no-send fence.
+                busy = ok and isinstance(value, Preflight) and value.reason == "activity"
+                self._converse_notice("busy" if busy else "not_sent")
                 return
             self._fail("busy")
             return

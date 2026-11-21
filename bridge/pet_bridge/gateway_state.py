@@ -211,6 +211,7 @@ class DeviceFrame:
     preview_revision: int | None = None
     b64: str | None = field(default=None, repr=False)
     pcm_len: int = 0
+    pcm_has_signal: bool = False  # at least one nonzero sample, not evidence of speech
 
 
 # -- strict JSON ---------------------------------------------------------------------
@@ -295,8 +296,8 @@ def is_event_id(value: Any) -> bool:
     return isinstance(value, str) and _EVENT_ID_RE.fullmatch(value) is not None
 
 
-def audio_b64_len(value: Any) -> int | None:
-    """Decoded length of a valid device audio string (2..4800, even), else ``None``."""
+def _device_pcm(value: Any) -> bytes | None:
+    """Validated PCM16; never retain decoded samples on the frame."""
     if not isinstance(value, str):
         return None
     try:
@@ -308,7 +309,13 @@ def audio_b64_len(value: Any) -> int | None:
         return None
     if base64.b64encode(decoded).decode("ascii") != value:
         return None  # non-zero pad bits: only the canonical encoding is accepted
-    return size
+    return decoded
+
+
+def audio_b64_len(value: Any) -> int | None:
+    """Decoded length of a valid device audio string (2..4800, even), else ``None``."""
+    pcm = _device_pcm(value)
+    return None if pcm is None else len(pcm)
 
 
 def valid_short8(session_id: Any) -> str | None:
@@ -410,10 +417,11 @@ def _parse_greeting(obj: dict[str, Any], _model: str, _voice: str) -> DeviceFram
 def _parse_audio(obj: dict[str, Any], _model: str, _voice: str) -> DeviceFrame:
     if set(obj) != {"type", "audio"}:
         raise _unknown()
-    size = audio_b64_len(obj["audio"])
-    if size is None:
+    pcm = _device_pcm(obj["audio"])
+    if pcm is None:
         raise _unknown()
-    return DeviceFrame(kind="audio", b64=obj["audio"], pcm_len=size)
+    return DeviceFrame(kind="audio", b64=obj["audio"], pcm_len=len(pcm),
+                       pcm_has_signal=pcm.count(0) != len(pcm))
 
 
 def _bare(kind: str):

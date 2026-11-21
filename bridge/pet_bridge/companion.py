@@ -408,6 +408,8 @@ def preflight(
         return verdict(False, "unlisted")
     if not 0 <= monotonic() - listing.fetched_monotonic <= max_age:
         return verdict(False, "stale_list")
+    if row.status in ("working", "running", "stopping"):
+        return verdict(False, "activity")
     if row.status != "idle":
         return verdict(False, "status_not_idle")
     if row.execution or row.preparing or row.loading:

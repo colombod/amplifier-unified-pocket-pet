@@ -357,6 +357,7 @@ class SessionStartFrameTest(OfflineTestCase):
                 "preview_revision",
                 "b64",
                 "pcm_len",
+                "pcm_has_signal",
             },
         )
         frame = parse(ASSISTANT_START)
@@ -538,9 +539,10 @@ class AudioFrameTest(OfflineTestCase):
                 encoded = b64(raw[:size])
                 frame = parse(audio_frame(encoded))
                 self.assertEqual(
-                    frame, DeviceFrame(kind="audio", b64=encoded, pcm_len=size)
+                    frame, DeviceFrame(kind="audio", b64=encoded, pcm_len=size, pcm_has_signal=True)
                 )
                 self.assertEqual(frame.b64, encoded)
+                self.assertFalse(parse(audio_frame(b64(bytes(size)))).pcm_has_signal)
 
     def test_t_state_audio_rejects_size_parity_and_alphabet_violations(self):
         good = b64(b"\x00\x01" * 10)

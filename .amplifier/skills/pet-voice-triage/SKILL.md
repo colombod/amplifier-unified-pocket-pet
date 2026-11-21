@@ -13,7 +13,10 @@ the call, toggle the mic or reboot.
 
 1. **Gateway event log**: the file given to `pet_bridge serve --event-log`. One
    `session_end` line per call, counts only. Compute `audio_in_bytes / 48000`
-   against the call length (from the `device_connect` line before it).
+   against the call length (from the `device_connect` line before it). This is
+   stream duration, not microphone content. Where present, `input_frames_zero`
+   and `input_frames_nonzero` count admitted silent and non-silent frames, not
+   recognized speech. Older records have no signal counters; do not infer them.
 2. **Unified's access log** for the gateway's requests: status of
    `GET /api/sessions`, `GET /api/conversation/detail`, `POST .../commands`, and
    how long the POST took.
@@ -25,7 +28,7 @@ the call, toggle the mic or reboot.
 
 | Reported | Counter | Cause |
 | --- | --- | --- |
-| "That conversation is busy" | `refused_preflight` > 0 | The idle check failed, for any reason. `GET /api/sessions` 403/404: Unified changed, load `pet-unified-compat`. 200 but the bound conversation is not listed: its workspace folder is not registered in Unified. Listed and not idle: really busy. |
+| Request refused at preflight | `refused_preflight` > 0 | Older gateways said “busy” for any failed idle check. In this source, known activity reports busy; inability to read or find the conversation reports not sent. Inspect the listing/access result before attributing the cause. |
 | Stays on Listening, nothing happens | microphone under about 90% of the call length | Starved microphone. Check signal first (weak access point after an unclean restart), then the pet report for late sends. |
 | Stays on Listening, nothing happens | microphone near 100%, `transcript_segments` 0 | Nothing was recognised. Not explained yet: record call time, signal and whether the person spoke. |
 | Answer comes from the voice model, not Unified | `transcript_segments` > 0, `delegations` 0 | The question did not need Unified. Test with one that does ("what is this chat's title"). |

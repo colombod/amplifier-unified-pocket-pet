@@ -19,6 +19,7 @@ class EventLogError(Exception):
 _OUTCOME_FIELDS = (
     "final_state", "turn_started", "send_outcome", "reply_done", "error_code",
     "close_confirmed", "audio_in_bytes", "audio_out_bytes", "dropped_audio_bytes",
+    "input_frames_nonzero", "input_frames_zero",
     "confirm_job", "close_origin", "conversation", "requests_submitted",
     "requests_sent", "requests_accepted", "requests_uncertain", "requests_refused",
     "replies_rendered", "progress_rendered", "conversation_end",

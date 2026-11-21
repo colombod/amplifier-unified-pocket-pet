@@ -234,7 +234,7 @@ class ConversationTest(ConversationCase):
         self.assertFalse([t for t in self.h.device.types() if t.startswith(("pet.turn.", "pet.reply."))])
 
     async def test_busy_target_notice_no_send_then_new_request_can_work(self):
-        self.h.ops.results["preflight"] = Preflight(SESSION, 9, False, "busy")
+        self.h.ops.results["preflight"] = Preflight(SESSION, 9, False, "activity")
         await self.request()
         self.assertEqual(self.notices(), ["busy"])
         self.assertEqual(self.h.ops.count("confirm"), 0)
@@ -593,6 +593,17 @@ class ConversationTest(ConversationCase):
         await self.h.clock.advance(0.2)
         self.assertEqual(self.states()[-1], "listening")
         await self.stop()
+
+    async def test_stream_rate_is_not_signal_or_recognised_speech(self):
+        # The same number of bytes can arrive when the speaker gate blanks the
+        # mic. Count input on the normal gateway, never guess that it is speech.
+        for pcm in (bytes(4800), bytes(4800), bytes(4799) + b"\x01"):
+            await self.h.feed({"type": "session.input_audio.append",
+                               "audio": base64.b64encode(pcm).decode("ascii")})
+        result = await self.stop()
+        self.assertEqual(result.audio_in_bytes, 14400)
+        self.assertEqual((result.input_frames_zero, result.input_frames_nonzero), (2, 1))
+        self.assertEqual((result.transcript_segments, result.requests_sent, result.replies_rendered), (0, 0, 0))
 
     async def test_continuous_audio_in_both_directions_all_states_and_pacing(self):
         for phase in ("listening", "asking", "answering"):
@@ -1303,7 +1314,7 @@ class NoSubmitReasonTest(ConversationCase):
                           result.transcript_segments_unused), (1, 2, 1))
 
     async def test_busy_conversation_is_preflight(self):
-        self.h.ops.results["preflight"] = Preflight(SESSION, 9, False, "busy")
+        self.h.ops.results["preflight"] = Preflight(SESSION, 9, False, "activity")
         await self.notice(1, "busy")
         await self.notice(2, "busy")
         result = await self.stop()
@@ -1463,15 +1474,15 @@ class RealConversationFlowTest(flow.FlowCase):
         self.assertEqual(len(self.client.posts), 1)
         self.assertEqual(self.record(command)["state"], "COMPLETE")
 
-    async def test_observation_403_refuses_request_with_busy_notice_and_no_send(self):
+    async def test_observation_403_reports_not_sent_instead_of_inventing_busy(self):
         self.client.listing_response = Response(403, b"SECRET")
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         self.assertEqual(fs.device.of_type("pet.converse.notice"),
-                         [{"type": "pet.converse.notice", "code": "busy"}])
+                         [{"type": "pet.converse.notice", "code": "not_sent"}])
         self.assertEqual([f["content"] for f in
                           fs.provider.of_type("session.commentary.append")],
-                         ["That conversation is busy."])
+                         ["That was not sent."])
         self.assertEqual(self.client.posts, [])
         self.assertEqual([(c["method"], c["target"]) for c in self.client.calls],
                          [("GET", flow.OBSERVATION_TARGET)])

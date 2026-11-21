@@ -91,7 +91,7 @@ Recheck `amplifier_web/device_pairing.py` `permits_companion` in the Unified rel
 
 - Session listing is `GET /api/sessions?view=observation` only. `GET /api/companion` answered 200 until Unified changed and 403 afterwards; every spoken request was then refused.
 - Also allowed, in exactly these shapes: `POST /api/clients/attach` (`kind: native`, `protocolVersion: 1`), `GET /api/conversation/detail?part=messages`, `POST /api/sessions/<id>/commands` with `conversation.send` (`via: chat`, `preserveDraft: true`, `attachmentIds: []`).
-- The pet says "That conversation is busy" for ANY failed idle check: an HTTP error, a session that is not listed, or one that is really working. Read the gateway's `session_end` counters (`refused_preflight`) and Unified's access log before assuming it is busy.
+- Older deployed gateways say "That conversation is busy" for any failed idle check. This checkout distinguishes positive activity from an inaccessible, unlisted or unknown state in running conversation mode; the latter reports "not sent". Neither case submits work.
 - The bound conversation is listed only while its workspace folder is a registered Unified workspace.
 - A dormant conversation can take more than a minute to accept the first request (67 s measured). The gateway speaks fixed progress lines meanwhile; the device must stay in `asking`, never `answering`, until the real reply.
 - The gateway follows a Unified restart by itself (`host_restart_follow` in the event log). Its credential store has a single owner: a second process gets `auth_locked`.

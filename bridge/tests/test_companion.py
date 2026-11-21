@@ -643,7 +643,8 @@ class PreflightTest(OfflineTestCase):
                     monotonic=FixedClock(100.0),
                 )
                 self.assertFalse(result.idle)
-                self.assertEqual(result.reason, "status_not_idle")
+                self.assertEqual(result.reason, "activity" if status in
+                                 ("working", "running", "stopping") else "status_not_idle")
         for flag in ("execution", "preparing", "loading"):
             with self.subTest(flag=flag):
                 result = preflight(
