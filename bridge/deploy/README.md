@@ -1,6 +1,7 @@
 # Run the pocket gateway as a user service
 
-This is a template, not an installer. Nothing in this directory enables a service.
+The installer below generates the user unit from the checked-in template.
+It does not enable a service or open a connection.
 Use a Linux host with systemd user services, the bridge's existing Python/aiohttp
 environment, working private gateway settings (a private `.env` file, recommended,
 or the alternative private JSON config), TLS files, a paired restricted
@@ -18,10 +19,8 @@ For example, with an installed `uv` and that Python interpreter:
 
 ```sh
 uv venv --python /absolute/path/to/python3.13 /absolute/private/path/venv
-uv pip install --python /absolute/private/path/venv/bin/python \
-  'aiohttp==3.14.5' 'aiohappyeyeballs==2.7.1' 'aiosignal==1.4.0' \
-  'attrs==26.1.0' 'frozenlist==1.8.0' 'multidict==7.2.1' \
-  'propcache==0.5.4' 'yarl==1.25.1' 'idna==3.20'
+# From the repository root:
+uv pip install --python /absolute/private/path/venv/bin/python -r bridge/deploy/requirements.txt
 ```
 
 The environment still depends on its base Python installation. Use a stable
@@ -193,23 +192,25 @@ Nothing here is automatic, and the JSON file keeps working if you do nothing.
 
 ## Install and start
 
-1. Create an owner-only log directory, for example:
-   `install -d -m 700 "$HOME/.local/state/pocket-gateway"`.
-   Keep the settings, credential and key files private; do not put a key or
-   token in the unit.
-2. Copy `pocket-gateway.service` to
-   `~/.config/systemd/user/pocket-gateway.service` (create that directory if needed).
-   Replace **every** placeholder in the copy:
-   - `@PYTHON@`: absolute Python interpreter with the bridge's dependencies.
-   - `@BRIDGE_DIR@`: absolute repository `bridge` directory, where `pet_bridge` lives.
-   - `@ENV_FILE@`: absolute path of the private `.env` file.
-   - `@EVENT_LOG@`: absolute JSONL path in the owner-only directory from step 1.
-   To use a JSON config instead, delete the `--env-file` line, uncomment the
-   `--config` line below it and replace `@CONFIG@` with the absolute private JSON
-   path. Exactly one `ExecStart=` line may be active.
-   These are systemd paths, not shell commands; no `~` or `$HOME` expansion occurs
-   inside the unit. Quote the interpreter if its path contains spaces. Escape `%`
-   as `%%` in literal paths for systemd.
+1. On a **new installation**, after pairing and binding, use a stable checkout
+   and the gateway venv's Python. From the repo root, check the filled settings
+   without writing or opening network connections:
+
+   ```sh
+   "$PET_PYTHON" -I -B bridge/deploy/install_user_service.py --env-file "$PET_ENV_FILE"
+   ```
+
+2. Add `--install` to write the unit. For private JSON settings, substitute
+   `--config /absolute/private/gateway.json` for `--env-file "$PET_ENV_FILE"`.
+   The installer fills `@ENV_FILE@` or `@CONFIG@` in the checked-in template.
+   Only paths, not secret values, are embedded. No hand-edit is needed. The
+   command creates the log directory (0700) and a unit at
+   `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/pocket-gateway.service`.
+   The event log location is `${XDG_STATE_HOME:-$HOME/.local/state}/pocket-gateway/events.jsonl`.
+   It never enables a unit, starts a listener, replaces an existing unit or
+   changes credentials. If a unit or event log already exists, use the existing
+   installation/migration instructions instead. Use the same XDG configuration
+   as your user service manager and run without sudo.
 3. Stop any manually launched gateway yourself first: only one may own the journal
    and listen address. Then run these in order, in one shell. The first two note
    the time **before** the start, which the check afterwards needs:
@@ -453,9 +454,9 @@ It does not reconnect the device; device firmware owns that behaviour.
 
 ```sh
 systemctl --user disable --now pocket-gateway.service
-rm "$HOME/.config/systemd/user/pocket-gateway.service"
+rm "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/pocket-gateway.service"
 systemctl --user daemon-reload
-systemctl --user reset-failed
+systemctl --user reset-failed pocket-gateway.service  # only if still listed as failed
 ```
 
 This leaves the repository, private settings file, credentials, journal and event log

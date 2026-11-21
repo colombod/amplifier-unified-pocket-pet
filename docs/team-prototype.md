@@ -596,10 +596,11 @@ check is not a pass.
 
 ## 4. Run and use the prototype
 
-Start only one gateway against a given state and listener. The Linux service is a
-**template**, not an already installed service: follow
-[bridge/deploy/README.md](../bridge/deploy/README.md) after the maintainer has
-verified the paths, dependencies and certificate. Unified must remain available
+Start only one gateway against a given state and listener. The repository's
+[fresh user-service installer](../bridge/deploy/README.md#install-and-start)
+checks your configuration and generates the Linux user unit without hand-editing.
+It does not start a listener or pair a device. Follow the start and verification
+steps after checking the dependencies and certificate. Unified must remain available
 separately. Systemd ordering is not proof that the network is ready. The service
 was installed on the original host; its TLS listener returned the expected
 unauthenticated `401`, and the user heard a real Unified reply through it. The
