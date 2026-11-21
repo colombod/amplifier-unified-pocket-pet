@@ -649,6 +649,466 @@ class ConversationTest(ConversationCase):
         self.assertIn("reply_unavailable", self.notices())
 
 
+class ProgressTest(ConversationCase):
+    """Hints reuse commentary/ACK/audible quiet without resolving the request."""
+
+    def commentary(self):
+        return self.h.provider.of_type("session.commentary.append")
+
+    def lines(self):
+        return [f["content"] for f in self.commentary()]
+
+    def pending_reply(self):
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "generation_running", False, 3
+        )
+
+    async def first_hint(self, *, slow_accept=False):
+        gate = self.h.ops.hold("confirm") if slow_accept else None
+        if not slow_accept:
+            self.pending_reply()
+        await self.request()
+        submitted = self.h.clock.now()
+        await self.h.clock.advance(4.9)
+        self.assertEqual(self.lines(), [])
+        await self.h.clock.advance(0.1)
+        self.assertAlmostEqual(self.h.provider.times[-1], submitted + 5)
+        self.assertEqual(self.lines(), [
+            "Starting that conversation. One moment." if slow_accept else
+            "It's working on your request."
+        ])
+        self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
+        self.assertEqual(self.states(), ["listening", "asking"])
+        return gate
+
+    async def reply_once(self):
+        self.h.ops.results.pop("poll", None)
+        await self.h.clock.advance(1)
+        self.assertEqual(self.lines().count(REPLY_TEXT), 1)
+        await self.render()
+        self.assertEqual(self.states()[-1], "listening")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertEqual(self.h.session.outcome.replies_rendered, 1)
+
+    async def test_reply_before_first_interval_has_no_hint(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(self.lines(), [REPLY_TEXT])
+        self.assertEqual((await self.stop()).progress_rendered, 0)
+
+    async def test_slow_accept_hint_completes_then_real_reply_once(self):
+        gate = await self.first_hint(slow_accept=True)
+        await self.render()
+        self.assertEqual(self.h.session._state, "SENDING")
+        self.assertEqual(self.states(), ["listening", "asking"])
+        self.assertEqual(self.h.ops.count("poll"), 0)
+        self.assertEqual(self.h.session.outcome.progress_rendered, 1)
+        gate.set()
+        await self.h.quiesce()
+        await self.reply_once()
+        self.assertEqual(self.states().count("answering"), 1)
+        self.assertEqual((await self.stop()).requests_accepted, 1)
+
+    async def test_accepted_slow_reply_first_and_repeat_at_exact_interval(self):
+        await self.first_hint()
+        start = self.h.clock.now()
+        await self.render()
+        await self.h.clock.advance(start + 29.9 - self.h.clock.now())
+        self.assertEqual(len(self.lines()), 1)
+        await self.h.clock.advance(0.1)
+        self.assertEqual(self.lines(), ["It's working on your request.", "Still working on it."])
+        self.assertAlmostEqual(self.h.provider.times[-1], start + 30)
+        await self.render()
+        self.assertNotIn("answering", self.states())
+        await self.reply_once()
+        result = await self.stop()
+        self.assertEqual((result.progress_rendered, result.replies_rendered), (2, 1))
+
+    async def test_starting_repeat_then_first_accepted_stage_is_not_a_repeat(self):
+        gate = await self.first_hint(slow_accept=True)
+        start = self.h.clock.now()
+        await self.render()
+        await self.h.clock.advance(start + 30 - self.h.clock.now())
+        self.assertEqual(self.lines()[-1], "Still starting it.")
+        await self.render()
+        self.pending_reply()
+        gate.set()
+        await self.h.quiesce()
+        await self.h.clock.advance(start + 60 - self.h.clock.now())
+        self.assertEqual(self.lines()[-1], "It's working on your request.")
+        await self.render()
+        self.assertEqual((await self.stop()).progress_rendered, 3)
+
+    async def test_accept_during_hint_starts_deadline_now_and_polls_afterwards(self):
+        gate = await self.first_hint(slow_accept=True)
+        await self.h.clock.advance(0.5)
+        accepted = self.h.clock.now()
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.h.session._state, "AWAIT_REPLY")
+        self.assertEqual(self.h.session._send_accept_t, accepted)
+        self.assertEqual(self.h.ops.count("poll"), 0)
+        self.assertEqual(self.h.runner.held_results(), ())
+        await self.render()
+        self.assertEqual(self.h.ops.count("poll"), 0)
+        await self.reply_once()
+        self.assertEqual((await self.stop()).progress_rendered, 1)
+
+    async def failed_confirm_during_hint(self, outcome, reason, notice, line):
+        gate = await self.first_hint(slow_accept=True)
+        self.h.ops.results["confirm"] = core.CommandResult(TURN, outcome, reason, False)
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.notices(), [])
+        self.assertEqual(self.h.session.outcome.send_outcome, outcome)
+        self.assertIsNone(self.h.session.outcome.confirm_job)
+        await self.render()
+        self.assertEqual(self.notices(), [notice])
+        self.assertEqual(self.lines().count(line), 1)
+        await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(self.notices(), [notice])
+        self.assertEqual(self.lines().count(line), 1)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertEqual(self.h.ops.count("poll"), 0)
+        return await self.stop()
+
+    async def test_refused_during_hint_has_one_existing_notice_no_retry(self):
+        result = await self.failed_confirm_during_hint(
+            "refused", "binding_mismatch", "not_sent", "That was not sent."
+        )
+        self.assertEqual((result.requests_sent, result.requests_refused,
+                          result.refused_confirm, result.progress_rendered), (0, 1, 1, 1))
+
+    async def test_uncertain_during_hint_has_one_existing_notice_no_retry(self):
+        result = await self.failed_confirm_during_hint(
+            "uncertain", "transport_exception", "send_uncertain",
+            "I could not confirm it was sent. I will not send it again."
+        )
+        self.assertEqual((result.requests_sent, result.requests_uncertain,
+                          result.progress_rendered), (1, 1, 1))
+
+    async def test_ready_poll_during_hint_is_claimed_afterwards_once(self):
+        gate = self.h.ops.hold("poll")
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "ready" if self.h.ops.count("poll") == 1 else "speak",
+            "reply_complete", True, 3,
+            None if self.h.ops.count("poll") == 1 else REPLY_TEXT,
+        )
+        await self.request()
+        await self.h.clock.advance(5)
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.h.ops.count("poll"), 1)  # no claim under the hint
+        self.assertNotIn(REPLY_TEXT, self.lines())
+        await self.render()
+        self.assertEqual(self.h.ops.count("poll"), 2)  # observe + exactly one claim
+        self.assertEqual(self.lines().count(REPLY_TEXT), 1)
+        await self.render()
+        self.assertEqual(self.states()[-1], "listening")
+        result = await self.stop()
+        self.assertEqual((result.replies_rendered, result.progress_rendered), (1, 1))
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_text_poll_during_hint_is_retained_and_spoken_once(self):
+        gate = self.h.ops.hold("poll")
+        await self.request()
+        await self.h.clock.advance(5)
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.h.session._progress_poll[1].text, REPLY_TEXT)
+        self.assertNotIn(REPLY_TEXT, self.lines())
+        await self.render()
+        self.assertEqual(self.lines().count(REPLY_TEXT), 1)
+        await self.render()
+        self.assertEqual((await self.stop()).replies_rendered, 1)
+        self.assertEqual(self.h.ops.count("poll"), 1)
+
+    async def test_poll_failure_during_hint_has_one_notice_afterwards(self):
+        gate = self.h.ops.hold("poll")
+        self.h.ops.results["poll"] = RuntimeError("fixture")
+        await self.request()
+        await self.h.clock.advance(5)
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.notices(), [])
+        await self.render()
+        self.assertEqual(self.notices(), ["reply_unavailable"])
+        await self.render()
+        self.assertEqual((await self.stop()).progress_rendered, 1)
+
+    async def missing_hint_response(self, *, ack, audio):
+        self.h.provider.auto_ack = ack
+        await self.first_hint()
+        start = self.h.clock.now()
+        if audio:
+            await self.render()
+        await self.h.clock.advance(start + 9.9 - self.h.clock.now())
+        self.assertEqual(self.h.session._render_kind, "progress")
+        await self.h.clock.advance(0.1)
+        self.assertIsNone(self.h.session._render_kind)
+        self.assertEqual(self.h.session._state, "AWAIT_REPLY")
+        self.assertEqual(self.notices(), [])
+        self.assertFalse(self.h.task.done())
+        await self.h.clock.advance(31)
+        self.assertEqual(len(self.lines()), 1)  # disabled for this request
+        self.h.provider.auto_ack = True
+        await self.reply_once()
+        self.assertEqual((await self.stop()).progress_rendered, 0)
+
+    async def test_no_ack_or_audio_abandoned_at_bound_no_more_hints_reply_works(self):
+        await self.missing_hint_response(ack=False, audio=False)
+
+    async def test_ack_without_audio_does_not_count_or_close_call(self):
+        await self.missing_hint_response(ack=True, audio=False)
+
+    async def test_audio_without_ack_does_not_count_or_close_call(self):
+        await self.missing_hint_response(ack=False, audio=True)
+
+    async def test_missing_delegation_silently_disables_hints_for_request(self):
+        self.pending_reply()
+        await self.request()
+        self.h.session._delegation_id = None
+        await self.h.clock.advance(36)
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.notices(), [])
+        self.assertFalse(self.h.task.done())
+        self.h.session._delegation_id = "dlg_1"
+        await self.reply_once()
+        self.assertEqual((await self.stop()).progress_rendered, 0)
+
+    async def test_full_outbox_silently_disables_hint_without_dropping_microphone(self):
+        self.pending_reply()
+        await self.request()
+        # Exercise actual bounded FIFO refusal, not an overflow/error substitute.
+        gate = self.h.provider.send_block = asyncio.Event()
+        await self.h.feed(old.audio_frame(100))
+        self.h.session._pout._cap = 1
+        await self.h.feed(old.audio_frame(100))
+        await self.h.clock.advance(5)
+        self.assertEqual(self.notices(), [])
+        self.assertEqual(self.lines(), [])
+        self.assertTrue(self.h.session._progress_disabled)
+        self.assertEqual(self.h.session._pout.pending_audio, 400)
+        gate.set()
+        await self.h.quiesce()
+        self.h.session._pout._cap = 512
+        await self.h.clock.advance(31)
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.h.provider.types().count("session.input_audio.append"), 2)
+        await self.reply_once()
+        await self.stop()
+
+    async def test_queued_hint_expires_without_later_send_or_lost_input(self):
+        self.pending_reply()
+        await self.request()
+        gate = self.h.provider.send_block = asyncio.Event()
+        await self.h.feed(old.audio_frame(100))  # occupies sender, not the hint
+        await self.h.clock.advance(5)
+        self.assertEqual(self.h.session._render_kind, "progress")
+        await self.h.feed(old.audio_frame(100))  # remains queued behind the hint
+        await self.h.clock.advance(10)
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(self.h.provider.types().count("session.input_audio.append"), 2)
+        await self.reply_once()
+        await self.stop()
+
+    async def stop_during_hint(self, frame):
+        await self.first_hint()
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        result = await self.stop(frame)
+        self.assertEqual(result.conversation_end, "stopped")
+        self.assertEqual((result.requests_submitted, result.requests_sent,
+                          result.requests_accepted, result.progress_rendered,
+                          result.replies_rendered), (1, 1, 1, 0, 0))
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        before = self.h.device.raw[:]
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.clock.advance(35)
+        self.assertEqual(self.h.device.raw, before)
+
+    async def test_mic_off_during_hint_stops_and_does_not_count_partial_render(self):
+        await self.stop_during_hint('{"type":"session.close"}')
+
+    async def test_device_stop_during_hint_stops_and_does_not_count_partial_render(self):
+        await self.stop_during_hint('{"type":"pet.stop"}')
+
+    async def test_stop_during_starting_hint_retains_inflight_confirm(self):
+        gate = await self.first_hint(slow_accept=True)
+        await self.h.feed('{"type":"pet.stop"}')
+        result = await self.h.finish()
+        self.assertEqual(result.send_outcome, "inflight")
+        self.assertEqual((result.requests_submitted, result.requests_sent,
+                          result.progress_rendered), (1, 0, 0))
+        gate.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(result.confirm_job).outcome, "accepted")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_user_interruption_during_hint_is_consumed_not_queued_or_resent(self):
+        await self.first_hint()
+        await self.h.push(old.delta("interrupt", "other request", 2000, 2500))
+        await self.h.push(old.delegation("interrupt_dlg"))
+        await self.render()
+        await self.reply_once()
+        result = await self.stop()
+        self.assertEqual((result.refused_pending, result.transcript_segments_unused), (1, 1))
+
+    async def test_provider_loss_during_hint_preserves_confirm_outcome(self):
+        gate = await self.first_hint(slow_accept=True)
+        self.h.provider.push_closed(clean=False)
+        result = await self.h.finish()
+        self.assertEqual(result.conversation_end, "provider_failure")
+        self.assertEqual(self.h.device.close_codes, [1011])
+        self.assertEqual(result.send_outcome, "inflight")
+        self.assertEqual(result.progress_rendered, 0)
+        gate.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(result.confirm_job).outcome, "accepted")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_device_loss_during_hint_preserves_waiting_semantics(self):
+        await self.first_hint()
+        self.h.device.disconnect()
+        result = await self.h.finish()
+        self.assertEqual(result.conversation_end, "device_lost")
+        self.assertEqual((result.requests_accepted, result.progress_rendered), (1, 0))
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_call_limit_during_hint_keeps_existing_close_and_counters(self):
+        # Move the real conversation work cap near this hint, not a new hint cap.
+        self.h.session._arm("converse_limit", 7)
+        gate = await self.first_hint(slow_accept=True)
+        await self.h.clock.advance(0.5)
+        result = await self.h.finish()
+        self.assertEqual(result.conversation_end, "time_limit")
+        self.assertEqual((result.requests_submitted, result.requests_sent,
+                          result.progress_rendered), (1, 0, 0))
+        self.assertTrue(result.close_confirmed)
+        gate.set()
+        await self.h.runner.wait_idle()
+        self.assertEqual(self.h.runner.take_result(result.confirm_job).outcome, "accepted")
+
+    async def test_reply_claim_pending_never_starts_hint(self):
+        gate = self.h.ops.hold("epoch_current")
+        await self.request()
+        await self.h.clock.advance(5)
+        self.assertTrue(self.h.session._speak_pending)
+        self.assertEqual(self.lines(), [])
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.lines(), [REPLY_TEXT])
+        await self.render()
+        self.assertEqual((await self.stop()).progress_rendered, 0)
+
+    async def test_claim_inflight_cannot_be_overtaken_by_hint(self):
+        gate = self.h.ops.hold("claim_reply")
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "ready", "reply_complete", True, 3
+        )
+        self.h.ops.results["claim_reply"] = lambda turn: core.ReplyResult(
+            turn, "speak", "reply_complete", True, 3, REPLY_TEXT
+        )
+        self.h.ops.claim_observed_reply = lambda turn: self.h.ops._enter("claim_reply", (turn,))
+        await self.request()
+        await self.h.clock.advance(5)
+        self.assertEqual(self.h.ops.count("claim_reply"), 1)
+        self.assertTrue(self.h.session._speak_pending)
+        self.assertEqual(self.lines(), [])
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.lines(), [REPLY_TEXT])
+        await self.render()
+        self.assertEqual((await self.stop()).progress_rendered, 0)
+
+    async def test_stale_progress_timer_cannot_hint_for_next_request_early(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        await self.render()
+        self.pending_reply()
+        await self.request(2)
+        self.h.session._post(("timer", "converse_progress"))
+        await self.h.quiesce()
+        self.assertEqual(self.lines(), [REPLY_TEXT])
+        await self.h.clock.advance(5)
+        self.assertEqual(self.lines(), [REPLY_TEXT, "It's working on your request."])
+        self.assertEqual(self.commentary()[-1]["delegation_id"], "dlg_2")
+        await self.render()
+        self.assertEqual((await self.stop()).progress_rendered, 1)
+
+    async def test_reply_deadline_during_hint_is_not_disarmed_or_extended(self):
+        gate = self.h.ops.hold("confirm")
+        self.pending_reply()
+        await self.request()
+        submitted = self.h.clock.now()
+        await self.h.clock.advance(5)
+        # Accept 0.5 s into the first hint; repeat at submitted+185 is active
+        # when the original acceptance deadline fires at submitted+185.5.
+        await self.h.clock.advance(0.5)
+        gate.set()
+        await self.h.quiesce()
+        accepted = self.h.clock.now()
+        await self.render()
+        for due in (35, 65, 95, 125, 155):
+            await self.h.clock.advance(submitted + due - self.h.clock.now())
+            await self.render()
+        await self.h.clock.advance(accepted + 179.9 - self.h.clock.now())
+        self.assertEqual(self.h.session._render_kind, "progress")
+        self.assertEqual(self.notices(), [])
+        await self.h.clock.advance(0.1)
+        self.assertEqual(self.notices(), ["reply_unavailable"])
+        self.assertEqual(self.h.session._timed_out_turn, self.h.session._turn_id)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        await self.render()
+        self.assertEqual((await self.stop()).progress_rendered, 6)
+
+    async def test_counts_only_session_end_contains_audibly_completed_hints(self):
+        from pet_bridge.gateway_events import EventLog
+
+        await self.first_hint()
+        await self.render()
+        result = await self.stop()
+        sink = object.__new__(EventLog)
+        sink.write = mock.Mock()
+        sink.session_end(result)
+        args, facts = sink.write.call_args
+        self.assertEqual(args, ("session_end",))
+        self.assertIs(type(facts["progress_rendered"]), int)
+        self.assertEqual(facts["progress_rendered"], 1)
+        self.assertEqual(facts["replies_rendered"], 0)
+        for secret in (REPLY_TEXT, "request 1", "dlg_1", *self.lines()):
+            self.assertNotIn(secret, repr(facts))
+
+
+class ProgressOneTurnTest(old.SessionCase):
+    async def test_one_turn_slow_confirm_and_reply_never_emit_progress(self):
+        await self.h.boot()
+        await self.h.preview()
+        gate = self.h.ops.hold("confirm")
+        preview = self.h.device.of_type("pet.turn.preview")[-1]
+        await self.h.feed({
+            "type": "pet.turn.send_confirm", "turn_id": TURN,
+            "text_sha256": preview["text_sha256"], "preview_revision": 1,
+        })
+        await self.h.clock.advance(6)
+        self.assertNotIn("converse_progress", self.h.session._timers)
+        self.assertEqual(self.h.provider.of_type("session.commentary.append"), [])
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "generation_running", False, 3
+        )
+        gate.set()
+        await self.h.quiesce()
+        await self.h.clock.advance(31)
+        self.assertEqual(self.h.provider.of_type("session.commentary.append"), [])
+        await self.h.feed('{"type":"pet.stop"}')
+        self.assertEqual((await self.h.finish()).progress_rendered, 0)
+
+
 class DelayedInputTest(ConversationCase):
     """Synthetic transport schedules through PetSession, not a model of settling."""
 
@@ -972,6 +1432,37 @@ class RealConversationFlowTest(flow.FlowCase):
             await self.quiesce()
             await self.clock.advance(0.1)
 
+    async def test_real_slow_accept_during_progress_posts_and_claims_exactly_once(self):
+        self.client.reply_text = REPLY_TEXT
+        fs = await self.begin_conversation()
+        gate = self.hold_posts()
+        await self.request(fs, 1)
+        await self.clock.advance(5)
+        self.assertEqual(
+            [f["content"] for f in fs.provider.of_type("session.commentary.append")],
+            ["Starting that conversation. One moment."],
+        )
+        gate.set()
+        await self.quiesce()
+        command = self.client.last_command
+        self.assertEqual(self.record(command)["state"], "ACCEPTED")
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "asking")
+        self.assertEqual(len(self.client.named("detail")), 0)
+        await self.render(fs)
+        await self.clock.advance(1)
+        self.assertEqual(
+            [f["content"] for f in fs.provider.of_type("session.commentary.append")],
+            ["Starting that conversation. One moment.", REPLY_TEXT],
+        )
+        self.assertTrue(self.record(command)["reply_consumed"])
+        await self.render(fs)
+        await fs.feed('{"type":"pet.stop"}')
+        result = await fs.finish()
+        self.assertEqual((result.requests_accepted, result.replies_rendered,
+                          result.progress_rendered), (1, 1, 1))
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.record(command)["state"], "COMPLETE")
+
     async def test_observation_403_refuses_request_with_busy_notice_and_no_send(self):
         self.client.listing_response = Response(403, b"SECRET")
         fs = await self.begin_conversation()
@@ -1157,10 +1648,13 @@ class RealConversationFlowTest(flow.FlowCase):
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
         self.assertFalse(self.record(first).get("reply_consumed", False))
         self.assertNotEqual(self.record(first).get("reply_outcome"), "claimed_for_render")
+        # The blocked poll now gets one bounded hint at 5 s. With no audio it
+        # expires silently; it must not consume the real reply or repeat.
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["No reply is available yet."],
+            ["It's working on your request.", "No reply is available yet."],
         )
+        self.assertEqual(fs.session.outcome.progress_rendered, 0)
         await self.render(fs)
         await self.request(fs, 2)
         self.assertEqual(len(self.client.posts), 2)  # fresh proof, not the late poll
@@ -1256,9 +1750,11 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.request(fs, 2)
         self.assertEqual(len(self.client.posts), 2)
         self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
+        # Only the new fixed progress context precedes the timeout notice;
+        # the late empty/invalid/long reply is still never exported.
         self.assertEqual(
             [frame["content"] for frame in fs.provider.of_type("session.commentary.append")],
-            ["No reply is available yet."],
+            ["It's working on your request.", "No reply is available yet."],
         )
         await fs.feed('{"type":"pet.stop"}')
         await fs.finish()

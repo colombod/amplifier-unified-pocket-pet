@@ -21,7 +21,7 @@ _OUTCOME_FIELDS = (
     "close_confirmed", "audio_in_bytes", "audio_out_bytes", "dropped_audio_bytes",
     "confirm_job", "close_origin", "conversation", "requests_submitted",
     "requests_sent", "requests_accepted", "requests_uncertain", "requests_refused",
-    "replies_rendered", "conversation_end",
+    "replies_rendered", "progress_rendered", "conversation_end",
     # Counts and one duration rounded to 100 ms: no words, audio or identifiers.
     "delegations", "delegations_repeated", "transcript_segments",
     "transcript_segments_unused", "refused_pending", "refused_no_words",

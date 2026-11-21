@@ -1259,6 +1259,7 @@ class SessionOutcome:
     requests_refused: int = 0
     # ACKed commentary + audible output followed by quiet, not proof of hearing.
     replies_rendered: int = 0
+    progress_rendered: int = 0
     conversation_end: str | None = None
     # Why nothing was submitted: counts and one coarse duration only, never
     # words, audio or identifiers. Each refusal is counted under exactly one
@@ -1395,6 +1396,17 @@ class _Outbox:
         self._queue.clear()
         self._refresh()
         return dropped
+
+    def discard_tags(self, tags: tuple[str, ...]) -> None:
+        """Withdraw queued hints only; never discard microphone input or cancel a send."""
+        kept = collections.deque()
+        for item in self._queue:
+            if item[2] in tags:
+                self.pending_audio -= item[1]
+            else:
+                kept.append(item)
+        self._queue = kept
+        self._refresh()
 
     async def flush(self) -> None:
         await self._idle.wait()
@@ -1549,12 +1561,18 @@ class PetSession:
         self._input_wait_total = 0.0
         self._input_wait_end: float | None = None
         self._replies_rendered = 0
+        self._progress_rendered = 0
         self._last_speech = 0.0
         self._seen_delegations: set[str] = set()
         self._seen_transcripts: set[str] = set()
         self._transcript_end = -1
         self._transcript_floor = -1
-        self._render_reply = False
+        self._render_kind: str | None = None  # reply | notice | progress
+        self._progress_due: float | None = None
+        self._progress_stages: set[bool] = set()  # False = starting, True = accepted
+        self._progress_disabled = False
+        self._progress_confirm: tuple[str, str | None] | None = None
+        self._progress_poll: tuple[bool, Any] | None = None
         self._render_audible = False
         self._last_audible = -math.inf
         self._render_start = 0.0
@@ -1654,6 +1672,7 @@ class PetSession:
             requests_uncertain=self._requests_uncertain,
             requests_refused=self._requests_refused,
             replies_rendered=self._replies_rendered,
+            progress_rendered=self._progress_rendered,
             conversation_end=self._converse_end,
             delegations=self._delegations,
             delegations_repeated=self._delegations_repeated,
@@ -1873,10 +1892,11 @@ class PetSession:
             if self._converse and self._input_wait_t is not None:
                 self._arm_settle()  # recovery quiet starts after the actual drain
         elif tag is not None:
-            # Commit the capture boundary synchronously AFTER send_text returned,
-            # before yielding to the reader/dispatcher. Only this reply's FIRST
-            # commentary can arm the existing held queue. ACK still gates playback.
-            if (self._state == _SPEAKING and self._chunk_ids
+            # Commit synchronously AFTER send_text returned, before yielding to
+            # the reader/dispatcher. Only a one-turn reply opens a held queue
+            # here (its ACK gates playback); conversation renders reuse the
+            # existing stream and this boundary for audible-output accounting.
+            if (self._render_active() and self._chunk_ids
                     and tag == self._chunk_ids[0] and not self._commentary_committed):
                 self._commentary_committed = True
                 if not self._converse:
@@ -2066,6 +2086,8 @@ class PetSession:
             )
         self._close_hard = hard
         self._state = _CLOSING
+        self._progress_poll = None
+        self._progress_confirm = None
         self._device_code = device_code
         self._fatal = fatal
         self._cancel_timers()
@@ -2536,6 +2558,8 @@ class PetSession:
             # The host may take many seconds to answer (it starts a dormant
             # conversation first): tell the device now, not only once accepted.
             self._emit(gs.build_converse_state("asking"))
+            self._progress_due = self._clock.now() + gs.CONVERSE_PROGRESS_FIRST_S
+            self._arm("converse_progress", gs.CONVERSE_PROGRESS_FIRST_S)
         self._spawn(self._await_confirm(ticket))
 
     async def _await_confirm(self, ticket: JobTicket) -> None:
@@ -2589,6 +2613,10 @@ class PetSession:
         if self._state != _SENDING:
             return  # a late result is metadata only: no frame, no poll, no speech
         if self._converse:
+            if self._render_kind == "progress" and state != "accepted":
+                # Custody/counters already settled; defer only the terminal notice.
+                self._progress_confirm = (state, reason)
+                return
             if state != "accepted":
                 self._converse_notice(
                     "send_uncertain"
@@ -2623,7 +2651,7 @@ class PetSession:
 
     def _on_poll_timer(self) -> None:
         busy = self._poll_inflight or self._speak_pending or self._contaminated
-        if self._state != _AWAIT_REPLY or busy:
+        if self._state != _AWAIT_REPLY or busy or self._render_kind == "progress":
             return
         limit = gs.CONVERSE_REPLY_MAX_S if self._converse else gs.POLL_MAX_S
         if self._clock.now() + _EPS >= self._send_accept_t + limit:
@@ -2638,6 +2666,11 @@ class PetSession:
         self._submit("poll", lambda: action(turn), "poll")
 
     def _on_poll_result(self, ok: bool, value: Any) -> None:
+        if self._render_kind == "progress" and self._state == _AWAIT_REPLY:
+            # At most one poll is in flight. Keep its result, including ready/text
+            # or failure, rather than claiming/dropping it under the hint.
+            self._progress_poll = (ok, value)
+            return
         self._poll_inflight = False
         if self._state != _AWAIT_REPLY or self._contaminated:
             return
@@ -2658,10 +2691,15 @@ class PetSession:
             self._fail("reply_unavailable")
             return
         if value.status == "ready" and self._converse:
+            # Once a claim is queued it may consume text on the worker before
+            # its result reaches us. A hint must not overtake that boundary.
+            self._speak_pending = True
             self._poll_inflight = True
             turn = self._turn_str()
             self._submit("poll", lambda: self._ops.claim_observed_reply(turn), "claim_reply")
         elif value.status == "pending":
+            if self._converse:
+                self._speak_pending = False
             self._arm("poll", gs.POLL_INTERVAL_S)
         elif value.status == "speak" and isinstance(value.text, str):
             self._speak_pending = True
@@ -2698,7 +2736,7 @@ class PetSession:
     def _start_speaking(self) -> None:
         text, self._reply_text = self._reply_text, None
         if self._converse:
-            self._converse_render(text or "", reply=True)
+            self._converse_render(text or "", kind="reply")
             return
         self._state = _SPEAKING
         self._audio.close_and_drain()  # old audio is gone before the first commentary
@@ -2729,7 +2767,7 @@ class PetSession:
                 return
 
     def _on_chunk_sent(self, tag: str) -> None:
-        if self._state != _SPEAKING or tag not in self._chunk_ids:
+        if not self._render_active() or tag not in self._chunk_ids:
             return
         self._chunks_sent.add(tag)
         if self._converse:
@@ -2742,7 +2780,7 @@ class PetSession:
     def _on_ack(self, event: gp.ProviderEvent) -> None:
         ident = event.client_event_id
         if (
-            self._state != _SPEAKING
+            not self._render_active()
             or ident not in self._chunk_ids
             or ident in self._acked
         ):
@@ -2832,6 +2870,7 @@ class PetSession:
             "converse_limit": self._converse_limit,
             "converse_render": self._converse_render_tick,
             "converse_reply": self._converse_reply_timeout,
+            "converse_progress": self._converse_progress,
         }.get(name)
         if handler is not None:
             handler()
@@ -3106,7 +3145,7 @@ class PetSession:
     def _on_audio_sent(self, pcm: bytes) -> None:
         # Observe only completed paced device sends, not provider arrival time:
         # queued/backpressured speech must not admit a new request too early.
-        if (not self._converse or self._state != _SPEAKING
+        if (not self._converse or not self._render_active()
                 or not self._converse_audio_ready or not self._commentary_committed):
             return
         if any(abs(int.from_bytes(pcm[i:i + 2], "little", signed=True)) > 256
@@ -3137,8 +3176,14 @@ class PetSession:
     def _converse_listen(self) -> None:
         if self._state in (_CLOSING, _CLOSED):
             return
-        for timer in ("settle", "poll", "converse_reply", "converse_render"):
+        for timer in ("settle", "poll", "converse_reply", "converse_render", "converse_progress"):
             self._disarm(timer)
+        self._render_kind = None
+        self._progress_due = None
+        self._progress_stages.clear()
+        self._progress_disabled = False
+        self._progress_poll = None
+        self._progress_confirm = None
         self._request_seq += 1
         self._state = _CAPTURING
         self._stager = gs.TranscriptStager()
@@ -3296,6 +3341,9 @@ class PetSession:
             self._converse_notice("not_sent")  # delegation without recognised words
 
     def _converse_notice(self, code: str, *, timed_out: bool = False) -> None:
+        self._stop_progress()
+        self._progress_due = None
+        self._disarm("converse_progress")
         if not self._emit(gs.build_converse_notice(code)):
             return
         self._notice_code = code
@@ -3324,9 +3372,65 @@ class PetSession:
             "send_uncertain": "I could not confirm it was sent. I will not send it again.",
             "reply_unavailable": "No reply is available yet.",
         }
-        self._converse_render(lines[self._notice_code or "not_sent"], reply=False)
+        self._converse_render(lines[self._notice_code or "not_sent"], kind="notice")
 
-    def _converse_render(self, text: str, *, reply: bool) -> None:
+    def _render_active(self) -> bool:
+        return self._state == _SPEAKING or (
+            self._render_kind == "progress" and self._state in (_SENDING, _AWAIT_REPLY)
+        )
+
+    def _converse_progress(self) -> None:
+        # The absolute due time rejects an already-posted timer from an older
+        # request. Listening clears it; no progress path can submit Unified work.
+        if (not self._converse or self._progress_disabled or self._progress_due is None
+                or self._clock.now() + _EPS < self._progress_due
+                or self._state not in (_SENDING, _AWAIT_REPLY)
+                or self._send_state not in ("inflight", "accepted")
+                or self._render_kind == "progress"
+                or self._speak_pending or self._reply_text is not None):
+            return
+        accepted = self._send_state == "accepted"
+        repeated = accepted in self._progress_stages
+        line = (
+            gs.CONVERSE_PROGRESS_WORKING_REPEAT if repeated else gs.CONVERSE_PROGRESS_WORKING
+        ) if accepted else (
+            gs.CONVERSE_PROGRESS_STARTING_REPEAT if repeated else gs.CONVERSE_PROGRESS_STARTING
+        )
+        self._progress_stages.add(accepted)
+        self._progress_due = self._clock.now() + gs.CONVERSE_PROGRESS_REPEAT_S
+        self._arm("converse_progress", gs.CONVERSE_PROGRESS_REPEAT_S)
+        self._converse_render(line, kind="progress")
+
+    def _stop_progress(self) -> None:
+        if self._render_kind == "progress":
+            self._disarm("converse_render")
+            self._pout.discard_tags(self._chunk_ids)
+            self._chunk_ids = ()
+            self._chunks_sent.clear()
+            self._acked.clear()
+            self._commentary_committed = False
+            self._render_kind = None
+        self._progress_poll = None
+        self._progress_confirm = None
+
+    def _finish_progress(self, audible: bool) -> None:
+        # Keep the real waiting state throughout the hint: Stop/loss/caps retain
+        # their existing semantics, and acceptance starts its deadline immediately.
+        confirm, poll = self._progress_confirm, self._progress_poll
+        self._stop_progress()
+        if audible:
+            self._progress_rendered += 1
+        else:
+            self._progress_disabled = True
+            self._disarm("converse_progress")
+        if confirm is not None:
+            self._on_confirm_done(*confirm)
+        elif poll is not None:
+            self._on_poll_result(*poll)
+        elif self._state == _AWAIT_REPLY and not self._poll_inflight:
+            self._arm("poll", gs.POLL_INTERVAL_S)
+
+    def _converse_render(self, text: str, *, kind: str) -> None:
         delegation = self._delegation_id
         try:
             chunks = gs.chunk_commentary(text)
@@ -3336,14 +3440,22 @@ class PetSession:
                 for ident, chunk in zip(ids, chunks, strict=True)
             ]
         except ValueError:
-            if reply:
+            if kind == "progress":
+                self._progress_disabled = True
+                self._disarm("converse_progress")
+            elif kind == "reply":
                 self._converse_notice("reply_unavailable")
             else:
                 self._fail("no_delegation")
             return
-        self._disarm("converse_reply")
-        self._state = _SPEAKING
-        self._render_reply = reply
+        if kind != "progress":
+            self._progress_due = None
+            self._disarm("converse_progress")
+            self._disarm("converse_reply")
+            self._state = _SPEAKING
+        # Progress is an overlay, NOT request resolution. In particular, never
+        # emit "answering": firmware uses that as its no-automatic-redial fence.
+        self._render_kind = kind
         self._render_audible = False
         self._render_start = self._clock.now()
         self._commentary_committed = False
@@ -3351,16 +3463,19 @@ class PetSession:
         self._chunk_ids = ids
         self._chunks_sent.clear()
         self._acked.clear()
-        if not self._emit(gs.build_converse_state("answering")):
+        if kind != "progress" and not self._emit(gs.build_converse_state("answering")):
             return
         for ident, frame in zip(ids, frames, strict=True):
             if not self._pout.put(frame, tag=ident):
-                self._fail("overflow")
+                if kind == "progress":
+                    self._finish_progress(False)
+                else:
+                    self._fail("overflow")
                 return
         self._arm("converse_render", 0.1)
 
     def _converse_render_tick(self) -> None:
-        if self._state != _SPEAKING:
+        if not self._render_active():
             return
         now = self._clock.now()
         ready = (
@@ -3372,8 +3487,18 @@ class PetSession:
         # ACK plus a pause in *audible samples*, not packets. The continuous
         # silence stream must not prevent another request. This is an explicitly
         # conservative display/admission heuristic, never a provider EOS claim.
+        if self._render_kind == "progress":
+            if ready or now - self._render_start >= gs.CONVERSE_PROGRESS_RENDER_MAX_S - _EPS:
+                self._finish_progress(ready)
+            else:
+                # Land on the absolute bound; repeated 0.1 s sleeps can drift
+                # beyond it (and real dispatcher latency must not add a tick).
+                self._arm("converse_render", min(
+                    0.1, self._render_start + gs.CONVERSE_PROGRESS_RENDER_MAX_S - now
+                ))
+            return
         if ready:
-            if self._render_reply:
+            if self._render_kind == "reply":
                 self._replies_rendered += 1
             self._converse_listen()
         elif now - self._render_start >= gs.CONVERSE_RENDER_MAX_S - _EPS:
