@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-set(PROJECT_VER "0.3.16-strong-ap")
+set(PROJECT_VER "0.3.17-strong-ap")
 if(PET_PRIVATE_MIC_DIAG)
-    set(PROJECT_VER "0.3.16-private-micdiag")
+    set(PROJECT_VER "0.3.17-private-micdiag")
     # Private configuration must never seed the normal sdkconfig.
     set(SDKCONFIG "${CMAKE_CURRENT_LIST_DIR}/build-bench/sdkconfig")
     set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.bench.defaults")

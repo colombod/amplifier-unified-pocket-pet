@@ -388,8 +388,11 @@ static void open_ap(void) {
  * Measured on this pet: every second restart landed at -75 to -91 dBm with one
  * at about -50 dBm in range, and calls there starved (working-files/voice-bench,
  * 21 November 2026). So: scan for the network, pin the strongest access point,
- * and insist on it for a few attempts before accepting any other. */
-#define JOIN_PINNED_ATTEMPTS 3
+ * and insist on it for a few attempts before accepting any other.
+ * With three pinned attempts, 33 of 33 restarts joined only on the third: the
+ * first was turned away and the second failed without reaching the access
+ * point (about 3 s each). Five leaves two spare. */
+#define JOIN_PINNED_ATTEMPTS 5
 #define JOIN_OPEN_ATTEMPTS 2
 static bool strongest_access_point(const char *name,wifi_config_t *cfg) {
     wifi_scan_config_t scan={.ssid=(uint8_t*)name,.show_hidden=true};
