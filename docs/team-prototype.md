@@ -179,13 +179,13 @@ says nothing about the others.
 ## 2. Prepare Unified and the gateway
 
 Use your own Unified account and a dedicated private state directory, outside Git.
-The host needs companion pairing, a pinned chat and the supported app actions used
+The host needs companion pairing, an existing chat in a registered workspace and the supported app actions used
 by the front door. Unified 0.98.6 was inspected for the prototype; no minimum
 supported version has been established. A second account's permissions and setup
 have not yet been tested.
 
 1. In Unified, create a **new dedicated workspace** and a chat called **Pocket
-   assistant** in it, with `app_control` available, and pin the chat. In its first
+   assistant** in it, with `app_control` available. Pinning is optional. In its first
    message, ask it to save the block below unchanged as `AGENTS.md` at that
    workspace root. Approve the write through the normal host interface if asked;
    do not replace an existing file or reuse another project's instructions.
@@ -310,9 +310,17 @@ have not yet been tested.
 
    Next run `"$PET_PYTHON" -B -m pet_bridge attach`; proceed only on `Attached.`.
    Run `"$PET_PYTHON" -B -m pet_bridge list` and proceed only if it says `complete`.
-   This is the restricted active-or-pinned companion view, not an all-work list.
-   The bridge view does not show the workspace, so a matching title alone is
-   insufficient. In the **Pocket assistant** chat you created, ask:
+   This lists visible root chats including idle, unpinned chats. To distinguish
+   chats with similar names, list **only** the intended workspace:
+
+   ```sh
+   "$PET_PYTHON" -B -m pet_bridge list --all-work --workspace "/exact/workspace/on/the/Unified/host"
+   ```
+
+   The path is matched by Unified, not resolved on the gateway computer. It may
+   appear in local shell history and host access logs. Listing does not rebind
+   the gateway or change a running call. A title alone is not an identity.
+   To verify the full ID in the **Pocket assistant** chat you created, ask:
 
    > Use `app_control` operation `get_state` with args
    > `{"path":"/selectedSessionId"}` and show me only the exact `value` returned
@@ -326,7 +334,8 @@ have not yet been tested.
    listings, scrollback or screen recording can expose it. Do not publish it.
    Verify the intended workspace and title in Unified, then compare the last
    eight characters of this exact full ID with the corresponding title in
-   `list`. If it is absent, pin the target and recheck. If the value is missing,
+   `list`. If it is absent, check the registered workspace and the exact chat
+   on the same Unified host; pinning is not required. If the value is missing,
    identity uncertain, or the list incomplete, stop rather than guessing.
    The metadata read was verified on the inspected host for its calling chat;
    the teammate's model-mediated copy step remains untested.
@@ -341,9 +350,10 @@ have not yet been tested.
    Binding re-fetches the listing, requires the exact full ID in a complete list,
    and sends no chat message; it does not prove idleness. The resulting state
    root is `$XDG_CONFIG_HOME/amplifier-unified-pet-bridge`. Use
-   `"$PET_PYTHON" -B -m pet_bridge --help` for the supported CLI. Exact-ID binding
-   and incomplete-list refusal are tested with synthetic companion responses, not
-   yet on a second teammate's host.
+   `"$PET_PYTHON" -B -m pet_bridge --help` for the supported CLI. Pairing, native
+   attachment, listing and exact-ID binding were also exercised on a separate
+   disposable Unified 0.117.0 instance over verified HTTPS. This was automated
+   host-side setup, not a human first installation or a conversation on the pet.
    If the shell closes after a confirmed step, start a new private shell in
    `bridge/`, restore `PET_PYTHON` and `XDG_CONFIG_HOME` to the **same** paths
    and continue from the last confirmed checkpoint. Do not rerun `mkdir`,
@@ -481,7 +491,7 @@ have not yet been tested.
      "version": 1,
      "state_root": "<absolute-XDG_CONFIG_HOME>/amplifier-unified-pet-bridge",
      "credential_ref": "<pair-poll-credential-reference>",
-     "session_id": "<full-pinned-front-door-chat-id>",
+     "session_id": "<full-front-door-chat-id>",
      "session_label": "Pocket assistant",
      "bind_host": "<server-lan-ipv4>",
      "port": 9443,

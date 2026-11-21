@@ -158,8 +158,15 @@ installation evidence, not a spoken acceptance result.
 **Teammate setup:** from a fresh local clone of `1d9a514`, an empty home and a
 new Python environment, the [gateway installer](bridge/deploy/README.md#install-and-start)
 installed the user unit and systemd validated it. This used the local package
-cache and disposable settings. It did not enable the unit or pair a teammate's
-Unified installation. Independent host/board setup remains open.
+cache and disposable settings. Separately, the production gateway CLI paired with
+a fresh Unified 0.117.0 instance over verified HTTPS in a network-isolated
+container. An automated owner signed in with the container's own OS account,
+matched the comparison code, and approved the restricted credential. In two
+separate workspaces the CLI found both unpinned chats, filtered each workspace
+without including the other's chat, and bound A → B → A to the original IDs.
+The [repeatable check](bridge/tools/run_local_unified_pairing.sh) disables model
+execution. It demonstrates the host setup and selection path, **not** spoken
+context, a new task starting, or a teammate installing their own device.
 
 One integration owner ships one tested firmware/gateway/Unified combination
 from the product repository. Never bulk-promote experimental branches or private

@@ -289,7 +289,7 @@ def _catalog_row(raw: Any, scope: str) -> SessionRow:
 
 
 def _observation_pages(
-    client: Any, attachment: Any, scope: str, limit: int, max_pages: int
+    client: Any, attachment: Any, scope: str, limit: int, max_pages: int, workspace: str | None = None
 ) -> tuple[list[SessionRow], int | str, bool, int]:
     """Sequential GETs of the observation resource; no retry, no mutation.
 
@@ -297,7 +297,7 @@ def _observation_pages(
     with continuation are not terminal. Any page/status/snapshot failure discards
     the entire traversal; only the page cap returns incomplete rows.
     """
-    route = _route(transport.route_sessions_observation, scope=scope, limit=limit)
+    route = _route(transport.route_sessions_observation, scope=scope, limit=limit, workspace=workspace)
     rows: list[SessionRow] = []
     ids: set[str] = set()
     cursors: set[str] = set()
@@ -335,7 +335,7 @@ def _observation_pages(
             break
         try:
             route = transport.route_sessions_observation(
-                scope=scope, limit=limit, cursor=cursor
+                scope=scope, limit=limit, cursor=cursor, workspace=workspace
             )
         except TransportError:
             raise _invalid() from None
@@ -371,16 +371,17 @@ def list_all_work(
     attachment: Any,
     *,
     scope: str = "roots",
+    workspace: str | None = None,
     limit: int = MAX_ROWS_PER_PAGE,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> SessionCatalog:
     """All activity/pins in an explicit scope: up to 5 sequential GETs.
 
-    No workspace paths are in this resource, so no grouping is inferred.
+    Workspace is an optional exact host-side filter; rows do not carry workspace paths.
     """
     started = monotonic()
     rows, snapshot, complete, pages = _observation_pages(
-        client, attachment, scope, limit, MAX_CATALOG_PAGES
+        client, attachment, scope, limit, MAX_CATALOG_PAGES, workspace
     )
     return SessionCatalog(
         tuple(rows), snapshot, complete, pages, scope,

@@ -209,6 +209,8 @@ class ObservationRouteTest(OfflineTestCase):
             {"limit": x} for x in (True, False, 0, -1, 201, "200", 1.0, None)
         ] + [
             {"cursor": x} for x in ("", "a b", "\n", "\x7f", "é", "x" * 1025, 1, [])
+        ] + [
+            {"workspace": x} for x in ("", "bad\npath", "\udc00", "é" * 257, 1)
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs):

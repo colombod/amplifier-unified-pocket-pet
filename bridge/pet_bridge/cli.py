@@ -55,8 +55,8 @@ _HINTS = {
         "The host instance changed. This bridge cannot continue with that instance. "
         "Nothing was changed."
     ),
-    "list_incomplete": "The list was cut short. Pin the session in Unified so it is listed.",
-    "session_not_listed": "That exact session id is not in the fresh list. Pin it in Unified if it is idle.",
+    "list_incomplete": "The list was cut short. Nothing was bound; a partial list is not sufficient.",
+    "session_not_listed": "Check the exact chat id and that its workspace is registered on this Unified host.",
     "companion_observation_unsupported": (
         "This host does not advertise the supported observation-v1 session resource. "
         "Nothing was changed."
@@ -131,6 +131,8 @@ def _make_parser(out: IO[str]) -> argparse.ArgumentParser:
                 "--scope", choices=("roots", "delegates", "all"), default=None,
                 help="observation scope; requires --all-work (default: roots)",
             )
+            sub.add_argument("--workspace", metavar="HOST_PATH",
+                             help="limit --all-work to this exact registered workspace on the Unified host")
     serve = add("serve", "Run the voice gateway from an explicit private config.")
     source = serve.add_mutually_exclusive_group(required=True)
     source.add_argument(
@@ -293,7 +295,8 @@ class _Context:
         return attachment, companion.list_sessions(self.factory(), attachment)
 
     def list(
-        self, credential: str | None, *, all_work: bool = False, scope: str = "roots"
+        self, credential: str | None, *, all_work: bool = False, scope: str = "roots",
+        workspace: str | None = None,
     ) -> int:
         listing: companion.SessionCatalog | companion.SessionList
         if all_work:
@@ -301,11 +304,13 @@ class _Context:
             attachment = self.store.load_attachment(ref)
             if attachment is None:
                 raise _Failure("not_attached")
-            listing = companion.list_all_work(self.factory(), attachment, scope=scope)
+            listing = companion.list_all_work(self.factory(), attachment, scope=scope, workspace=workspace)
         else:
             _, listing = self._listing(credential)
         state = "complete" if listing.complete else "INCOMPLETE (cap reached)"
         if isinstance(listing, companion.SessionCatalog):
+            if workspace is not None:
+                self.say("Filtered to the requested workspace.")
             self.say(
                 f"All-work sessions (scope={scope}; activity=all; pinned=all): "
                 f"{state}; {len(listing.sessions)} listed; {listing.pages} pages"
@@ -382,7 +387,7 @@ def main(
             raise _Usage
         if args.command == "bind" and not wire.valid_session_id(args.session_id):
             raise _Usage
-        if args.command == "list" and args.scope is not None and not args.all_work:
+        if args.command == "list" and (args.scope is not None or args.workspace is not None) and not args.all_work:
             raise _Usage
         if args.command == "serve" and not Path(
             args.env_file if args.config is None else args.config
@@ -476,6 +481,6 @@ def _run(
             return ctx.attach(args.credential)
         if args.command == "list":
             return ctx.list(
-                args.credential, all_work=args.all_work, scope=args.scope or "roots"
+                args.credential, all_work=args.all_work, scope=args.scope or "roots", workspace=args.workspace
             )
         return ctx.bind(args.credential, args.session_id)

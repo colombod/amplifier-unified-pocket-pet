@@ -229,7 +229,7 @@ def route_send(session_id: Any) -> Route:
 
 
 def route_sessions_observation(
-    *, scope: Any = "roots", limit: Any = 200, cursor: Any = None
+    *, scope: Any = "roots", limit: Any = 200, cursor: Any = None, workspace: str | None = None
 ) -> Route:
     """All activity/pins, explicit root/delegate scope; never an advertised URL proxy."""
     if (
@@ -246,6 +246,13 @@ def route_sessions_observation(
         ("pinned", "all"),
         ("limit", str(limit)),
     ]
+    if workspace is not None:
+        # Unified compares the exact host workspace. Do not resolve a path on
+        # the gateway machine or infer a workspace from a chat title.
+        if (type(workspace) is not str or not workspace or not workspace.isprintable()
+                or len(workspace.encode("utf-8")) > 512):
+            raise TransportError("route_invalid")
+        query.append(("workspace", workspace))
     if cursor is not None:
         query.append(("cursor", _cursor(cursor)))
     route = Route(

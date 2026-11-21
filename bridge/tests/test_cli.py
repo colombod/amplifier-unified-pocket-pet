@@ -885,6 +885,22 @@ class AllWorkListTest(CliCase):
                 self.assertIn("delegate", out)
                 self.assertEqual(dict(self.client.calls[-1]["route"].query)["scope"], scope)
 
+    def test_workspace_is_one_server_filter_on_every_page_and_never_a_binding(self):
+        from urllib.parse import parse_qs, urlsplit
+        workspace = "/projects/Café & tools"
+        self.client.script = [cpage([srow("first-12345678")], "next"), cpage([srow("next-12345678")])]
+        code, out, err = self.run_cli("list", "--all-work", "--workspace", workspace)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Filtered to the requested workspace.", out)
+        self.assertNotIn(workspace, out)
+        self.assertEqual(len(self.client.calls), 2)
+        for i, call in enumerate(self.client.calls):
+            self.assertEqual(call["route"].method, "GET")
+            query = parse_qs(urlsplit(call["route"].target).query)
+            self.assertEqual(query["workspace"], [workspace])
+            self.assertEqual(query.get("cursor"), ["next"] if i else None)
+        self.assertFalse((self.cfg / "journal").exists())
+
     def test_cap_is_visible_incomplete_not_a_pin_requirement(self):
         self.client.script = [cpage([], f"c{i}") for i in range(5)]
         code, out, err = self.run_cli("list", "--all-work")
@@ -922,6 +938,7 @@ class AllWorkListTest(CliCase):
     def test_all_work_options_do_not_silently_change_other_commands(self):
         for argv in (
             ("list", "--scope", "all"),
+            ("list", "--workspace", "/example"),
             ("list", "--all-work", "--scope", "all&workspace=/secret"),
             ("list", "--all-work", "--scope", CANARY),
             ("bind", FULL_ID, "--all-work"), ("attach", "--all-work"),
