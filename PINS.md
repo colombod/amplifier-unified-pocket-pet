@@ -11,12 +11,15 @@ Read before your first command. Facts only; rules live in `AGENTS.md`, promises 
 | Vision (DRAFT) | `docs/VISION.md` |
 | Original user words | `docs/intent.md` |
 | Contracts (DRAFT) | `contracts/README.md`, `contracts/<name>.v1.md` |
-| Current milestone agreement (DRAFT) | `docs/milestones/existing-session-voice.md` |
+| Product promises and delivery sequence | `contracts/pocket-assistant-delivery.v1.md`, `PROJECT-BRIEF.md` (earlier single-session milestone is historical) |
 | Historical standalone voice milestone | `docs/milestone-1.md` |
 | Host bridge source / tests | `bridge/pet_bridge/`, `bridge/tests/` |
 | Device app | `apps/unified-pet/` (root `main/` is the older conversation app) |
 | Conformance ledger, kit, pre-push guard | none exist |
-| Integration branch | `main` |
+| Current local product integration | `product/integration` in the GitHub-connected repository; `main` is the published base, not the installed product |
+| Historical two-answer comparator | Firmware `1004293` (Build 11) and gateway `8857705`; see the dated physical evidence in `PROJECT-BRIEF.md`. Not a supported release. |
+| Unified target under recovery | 0.116.0: listing/detail reads observed, complete spoken journey **not** accepted. There is no released compatibility pin yet. |
+| Provider-free acoustic check | `bridge/tools/pet_link_test_host.py` and its loopback test beside it. Device and Unified voice acceptance are separate. |
 
 ## Hardware
 

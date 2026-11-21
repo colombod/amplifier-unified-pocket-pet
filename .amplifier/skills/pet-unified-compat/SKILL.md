@@ -6,10 +6,12 @@ description: Check that the pet gateway still matches an Amplifier Unified relea
 # Gateway and Unified compatibility
 
 Unified answers a paired device only for an explicit allow-list of requests, and
-that list changes between releases. A request outside it gets 403, which the pet
-speaks as "That conversation is busy". Last releases checked: Unified 0.114.5 and 0.116.0 (device-facing files identical
-in both, read-only check passes on both). The one request answered so far was on
-the release before 0.114.5; no send has been exercised on either since.
+that list changes between releases. Older gateways misreported a denied listing
+as "busy"; see the current conversation-mode behavior in `AGENTS.md`.
+Unified 0.114.5 and 0.116.0 had matching inspected device-facing files and
+passed the read-only check. The November 15–16 exchanges and one later
+November 20 answer predate 0.114.5. Neither newer version has a demonstrated
+end-to-end spoken send and reply in the retained record.
 
 ## The gateway's requests
 
@@ -47,8 +49,9 @@ Every listing page must name the attached host identity and instance.
 
 ## Limits
 
-- Steps 2 to 4 do not prove a send. Only a spoken request that needs Unified does,
-  with `requests_accepted` 1 in the gateway's `session_end`.
+- Steps 2 to 4 do not prove a send. An authorized request accepted by the
+  intended conversation proves a send; user-level acceptance also needs the
+  correlated result, intelligible playback and reuse on normal firmware.
 - A conversation is listed only while its workspace folder is registered in
   Unified. "Not listed" is a setup fault, not an API change.
 - The gateway follows a Unified restart by itself (`host_restart_follow`).
