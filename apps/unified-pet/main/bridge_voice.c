@@ -922,8 +922,13 @@ static void converse_tail(bridge_voice_t *c){
 #if defined(PET_PRIVATE_MIC_DIAG)
 static bool bv_diag_write(const char *line,int n,size_t cap,int64_t until){
     if(n<=0||(size_t)n>=cap)return false;
-    if(bv_keep_cur&&*bv_keep_cur_len+(unsigned)n<=BV_DIAG_KEEP_BYTES){
-        memcpy(bv_keep_cur+*bv_keep_cur_len,line,(size_t)n);*bv_keep_cur_len+=(unsigned)n;
+    if(bv_keep_cur){
+        if((unsigned)n<=BV_DIAG_KEEP_BYTES-*bv_keep_cur_len){
+            memcpy(bv_keep_cur+*bv_keep_cur_len,line,(size_t)n);*bv_keep_cur_len+=(unsigned)n;
+        }else{
+            /* Do not append a misleading trailer after a truncated report. */
+            bv_keep_cur=NULL;
+        }
     }
     /* After the first console write that fails nothing more is written there;
      * the kept copy is still completed. */
@@ -1049,7 +1054,8 @@ static void bv_diag_report(bridge_voice_t *c){
     if(locked){bv_keep_cur=NULL;bv_keep_count++;xSemaphoreGive(bv_keep_lock);}
 }
 /* pet-bench-v1 kept <back> <calls_since_boot> <bytes> <call_start_uptime_ms> <now_uptime_ms>
- * then the kept report unchanged, then "pet-bench-v1 kept-end". */
+ * then the kept report unchanged, then "pet-bench-v1 kept-end" only after all
+ * bytes were written. The report also needs its own pet-bench-v1 end trailer. */
 void bridge_voice_bench_last(unsigned back){
     if(!bv_keep_lock||xSemaphoreTake(bv_keep_lock,pdMS_TO_TICKS(3000))!=pdTRUE)return;
     unsigned have=bv_keep_count<BV_DIAG_KEEP?bv_keep_count:BV_DIAG_KEEP,len=0,start=0;
@@ -1061,14 +1067,20 @@ void bridge_voice_bench_last(unsigned back){
     char line[96];
     int n=snprintf(line,sizeof(line),"pet-bench-v1 kept %u %u %u %u %u\n",back,bv_keep_count,len,start,
         (unsigned)(esp_timer_get_time()/1000));
-    usb_serial_jtag_write_bytes(line,(size_t)n,pdMS_TO_TICKS(200));
+    bool complete=n>0&&(size_t)n<sizeof(line)&&
+        usb_serial_jtag_write_bytes(line,(size_t)n,pdMS_TO_TICKS(200))==n;
+    /* A slow reader cannot hold the report lock for 48 separate 500 ms waits. */
+    int64_t until=esp_timer_get_time()+2000000;
     for(unsigned off=0;off<len;){
+        int64_t left=until-esp_timer_get_time();
+        if(!complete||left<=0){complete=false;break;}
         unsigned chunk=len-off>256?256:len-off;
-        if(usb_serial_jtag_write_bytes(text+off,chunk,pdMS_TO_TICKS(500))!=(int)chunk)break;
+        unsigned ms=(unsigned)(left/1000);if(ms>500)ms=500;
+        if(usb_serial_jtag_write_bytes(text+off,chunk,pdMS_TO_TICKS(ms))!=(int)chunk){complete=false;break;}
         off+=chunk;
     }
     static const char done[]="pet-bench-v1 kept-end\n";
-    usb_serial_jtag_write_bytes(done,sizeof(done)-1,pdMS_TO_TICKS(200));
+    if(complete)usb_serial_jtag_write_bytes(done,sizeof(done)-1,pdMS_TO_TICKS(200));
     xSemaphoreGive(bv_keep_lock);
 }
 #endif

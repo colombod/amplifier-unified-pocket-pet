@@ -132,3 +132,19 @@ for line in "\n".join(Path(p).read_text(encoding="utf-8") for p in sys.argv[2].s
 if missing:
     raise SystemExit("Stale sdkconfig, image does NOT contain: "+", ".join(missing))
 PY
+if [ "$diag" = 0 ]; then
+  # Check the complete linked image too: the native fixture does not compile
+  # the USB console dispatcher, and compiler string merging can hide boundaries.
+  python3 - "$build/unified_pet.bin" <<'PY'
+from pathlib import Path
+import sys
+data=Path(sys.argv[1]).read_bytes()
+markers=("pet-bench-v1","pet-mic-v1","voice on","voice core","voice prio",
+         "voice jitter","voice bw","voice audio","voice last","voice scan","kept-end",
+         "bv_keep","bridge_voice_bench_last")
+found=[marker for marker in markers if marker.encode() in data]
+if found:
+    raise SystemExit("Private markers in normal binary: "+", ".join(found))
+print("NORMAL BINARY PRIVATE MARKER CHECK: PASS")
+PY
+fi

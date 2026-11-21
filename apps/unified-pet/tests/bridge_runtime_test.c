@@ -118,7 +118,19 @@ static char mic_header[512], mic_trailer[512];
 static char bench_task_lines[2][512];
 static char bench_playback_line[512],bench_wifi_line[512];
 static unsigned bench_task_count;
+static bool kept_fixture,kept_lock_held;
+static unsigned kept_usb_calls,kept_usb_fail,kept_usb_us;
+static size_t kept_usb_len;
+static char kept_usb[16000];
 static int usb_serial_jtag_write_bytes(const void *p,size_t n,unsigned timeout){
+    if(kept_fixture){
+        assert(!model_lock_held&&timeout<=2000);
+        kept_usb_calls++;now+=kept_usb_us;
+        if(kept_usb_calls==kept_usb_fail)return n?(int)n-1:0;
+        assert(kept_usb_len+n<sizeof(kept_usb));
+        memcpy(kept_usb+kept_usb_len,p,n);kept_usb_len+=n;kept_usb[kept_usb_len]=0;
+        return (int)n;
+    }
     assert(cleanup_mode&&!model_lock_held&&codec_closes==1&&!deleted_streams&&timeout<=2000);
     assert(n<sizeof(mic_header));
     char *dst=mic_lines++?mic_trailer:mic_header;
@@ -162,6 +174,9 @@ enum {LIVE_ERROR=1,LIVE_OFF=2,LIVE_CLOSING=3,LIVE_RECONNECTING=4};
 static void live_voice_bridge_status(live_state_t s,const char *text){(void)s;snprintf(last_status,sizeof(last_status),"%s",text);}
 static void *selected;
 static int xSemaphoreTake(SemaphoreHandle_t h,unsigned ms){
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(h==(void*)2){assert(!kept_lock_held);kept_lock_held=true;return pdTRUE;}
+#endif
     (void)h;(void)ms;
     if(stop_on_take)a5_stop_on_lock();
     if(a5_enabled&&++a5_lock_calls==a5_lock_at){
@@ -170,7 +185,12 @@ static int xSemaphoreTake(SemaphoreHandle_t h,unsigned ms){
     if(!lock_ok)return pdFALSE;
     assert(!model_lock_held);model_lock_held=true;return pdTRUE;
 }
-static void xSemaphoreGive(SemaphoreHandle_t h){(void)h;assert(model_lock_held);model_lock_held=false;}
+static void xSemaphoreGive(SemaphoreHandle_t h){
+#if defined(PET_PRIVATE_MIC_DIAG)
+    if(h==(void*)2){assert(kept_lock_held);kept_lock_held=false;return;}
+#endif
+    (void)h;assert(model_lock_held);model_lock_held=false;
+}
 static int64_t esp_timer_get_time(void){return now;}
 typedef int portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED 0
@@ -1043,6 +1063,60 @@ static void cleanup_case(const char *name){
     cleanup_mode=false;selected=&context;
 }
 #if defined(PET_PRIVATE_MIC_DIAG)
+static void kept_output_reset(void){
+    kept_usb_calls=kept_usb_fail=kept_usb_us=0;kept_usb_len=0;kept_usb[0]=0;
+}
+static void kept_cases(const char *name){
+    reset();kept_fixture=true;bv_keep_lock=(void*)2;
+    context.mic_started=true;context.mic_start=now;
+    if(!strcmp(name,"kept-ring")){
+        for(unsigned i=0;i<4;i++){
+            kept_output_reset();kept_usb_fail=1; /* no attached console reader */
+            context.mic_start=1000000+(int64_t)i*1000;
+            bv_diag_report(&context);
+            assert(!kept_lock_held&&!bv_keep_cur&&bv_keep_count==i+1);
+            assert(kept_usb_calls==1); /* console failure is latched */
+        }
+        for(unsigned back=0;back<3;back++){
+            kept_output_reset();bridge_voice_bench_last(back);
+            char header[96];
+            unsigned slot=(bv_keep_count-1-back)%BV_DIAG_KEEP;
+            snprintf(header,sizeof(header),"pet-bench-v1 kept %u 4 %u %u ",back,bv_keep_len[slot],1003-back);
+            assert(!strncmp(kept_usb,header,strlen(header)));
+            assert(strstr(kept_usb,"pet-bench-v1 end\npet-bench-v1 kept-end\n"));
+            assert(!kept_lock_held);
+        }
+    }else if(!strcmp(name,"kept-short")||!strcmp(name,"kept-deadline")){
+        bv_keep_text[0]=malloc(BV_DIAG_KEEP_BYTES);assert(bv_keep_text[0]);
+        memset(bv_keep_text[0],'x',BV_DIAG_KEEP_BYTES);
+        bv_keep_len[0]=BV_DIAG_KEEP_BYTES;bv_keep_count=1;
+        if(!strcmp(name,"kept-short")){
+            for(unsigned fail=1;fail<=2;fail++){
+                kept_output_reset();kept_usb_fail=fail;bridge_voice_bench_last(0);
+                assert(kept_usb_calls==fail&&!strstr(kept_usb,"kept-end")&&!kept_lock_held);
+            }
+        }else{
+            kept_output_reset();kept_usb_us=500000;int64_t began=now;
+            bridge_voice_bench_last(0);
+            assert(kept_usb_calls==5&&now-began==2500000);
+            assert(!strstr(kept_usb,"kept-end")&&!kept_lock_held);
+        }
+    }else{
+        assert(!strcmp(name,"kept-overflow"));
+        bv_keep_text[0]=malloc(BV_DIAG_KEEP_BYTES);assert(bv_keep_text[0]);
+        bv_keep_cur=bv_keep_text[0];bv_keep_cur_len=&bv_keep_len[0];
+        bv_keep_len[0]=BV_DIAG_KEEP_BYTES-2;bv_keep_usb=false;
+        assert(bv_diag_write("x\n",2,3,now+2000000));
+        assert(bv_keep_len[0]==BV_DIAG_KEEP_BYTES);
+        assert(!bv_diag_write("overflow\n",9,10,now+2000000));
+        assert(!bv_keep_cur);
+        assert(!bv_diag_write("pet-bench-v1 end\n",17,18,now+2000000));
+        assert(bv_keep_len[0]==BV_DIAG_KEEP_BYTES);
+    }
+    for(unsigned i=0;i<BV_DIAG_KEEP;i++){free(bv_keep_text[i]);bv_keep_text[i]=NULL;}
+    bv_keep_lock=NULL;kept_fixture=false;
+    puts("PASS kept reports: real production bodies, bounded/trailer-safe readout");
+}
 static void playback_cases(const char *name){
     reset();
     if(!strcmp(name,"playback-gaps")){
@@ -1305,7 +1379,8 @@ int main(int argc,char **argv){
     assert(argc<=2);
     printf("CASE %s (synthetic clock/RTOS/codec/transport, no device/Unified)\n",name);
 #if defined(PET_PRIVATE_MIC_DIAG)
-    if(!strncmp(name,"playback-",9))playback_cases(name);
+    if(!strncmp(name,"kept-",5))kept_cases(name);
+    else if(!strncmp(name,"playback-",9))playback_cases(name);
     else if(!strcmp(name,"mic-slow")||!strcmp(name,"mic-healthy")||!strcmp(name,"mic-backlog"))mic_profile(name);
     else if(!strncmp(name,"mic-",4))mic_controls(name);
     else

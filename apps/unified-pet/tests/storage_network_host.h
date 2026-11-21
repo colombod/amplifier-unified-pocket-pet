@@ -9,7 +9,7 @@ typedef struct {int kind;char ssid[33],password[65],key[256];} command_t;
 typedef struct {int unused;} esp_netif_t;
 typedef struct {int unused;} wifi_init_config_t;
 typedef struct {
- struct {unsigned char ssid[33],password[65];struct {bool capable,required;} pmf_cfg;} sta;
+ struct {unsigned char ssid[33],password[65];struct {bool capable,required;} pmf_cfg;int scan_method,sort_method;} sta;
  struct {unsigned char ssid[33],password[65];size_t ssid_len;int authmode,max_connection,channel;} ap;
 } wifi_config_t;
 typedef struct {unsigned free_entries,used_entries;} nvs_stats_t;
@@ -52,7 +52,15 @@ static const char *esp_err_to_name(int e){(void)e;return "synthetic error";}
 static void open_ap(void){state.setup=true;}
 static int esp_wifi_disconnect(void){return ESP_OK;}
 static int esp_wifi_connect(void){on_wifi_connect();return ESP_OK;}
-static int esp_wifi_set_config(int iface,const wifi_config_t *cfg){(void)iface;(void)cfg;return ESP_OK;}
+#define WIFI_FAST_SCAN 0
+#define WIFI_ALL_CHANNEL_SCAN 1
+#define WIFI_CONNECT_AP_BY_SIGNAL 0
+#define WIFI_CONNECT_AP_BY_SECURITY 1
+static int station_scan_method=-1,station_sort_method=-1;
+static int esp_wifi_set_config(int iface,const wifi_config_t *cfg){
+ if(iface==WIFI_IF_STA){station_scan_method=cfg->sta.scan_method;station_sort_method=cfg->sta.sort_method;}
+ return ESP_OK;
+}
 static int esp_read_mac(uint8_t *mac,int kind){(void)kind;memset(mac,0,6);return ESP_OK;}
 static unsigned long esp_random(void){return 0x1234;}
 static int nvs_get_stats(const char *p,nvs_stats_t *s){(void)p;memset(s,0,sizeof(*s));return ESP_OK;}

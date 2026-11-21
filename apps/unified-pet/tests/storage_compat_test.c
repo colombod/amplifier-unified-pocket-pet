@@ -115,6 +115,8 @@ int main(void) {
  command_t blank={.kind=1,.ssid="SYNTHETIC-NEW-SSID",.password="SYNTHETIC-NEW-WIFI"};
  strcpy(state.ssid,"SYNTHETIC-OLD-SSID");
  assert(join_network(&blank,true)); /* Actual production join/save body. */
+ /* Among several access points of one network, the strongest is joined. */
+ assert(station_scan_method==WIFI_ALL_CHANNEL_SCAN&&station_sort_method==WIFI_CONNECT_AP_BY_SIGNAL);
  /* Joining names no network: not the one left, not the one typed in. */
  assert(!state.ssid[0]);
  assert(state.settings_saved&&state.key_saved&&state.connected);

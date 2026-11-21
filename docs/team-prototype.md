@@ -643,6 +643,18 @@ three totalling 1.1 s) when reply audio arrived more than about 0.34 s late on
 a weak Wi-Fi link (-73 to -81 dBm); the 320 ms playback prebuffer is unchanged.
 The normal `0.3.13-voice-clear` build has not yet been qualified by a spoken call.
 
+In `0.3.14-strong-ap`, each station join scans all channels and selects the
+strongest access point of the saved network, rather than the first to answer;
+a device scan found four at -42, -74, -80 and -84 dBm after earlier testing
+had stayed on weak ones (-71 to -81 dBm).
+On weak access points, 5 of 31 bench calls had playback gaps (worst reply-audio
+arrival gap 1.4 s; earlier sends blocked for 1–5 s), while all 11 calls on the
+-42 dBm access point had no playback gaps (worst arrival gap 205 ms, no send
+blocked longer than 111 ms).
+The pet still does not roam: it selects the strongest access point only when
+it joins.
+The normal `0.3.14-strong-ap` build has not been qualified by a spoken call.
+
 The draft gateway no longer sends a request while the pet's audio is known to be
 arriving late, catching up, or still queued toward the provider: it waits for the
 stream to recover and for a fresh quiet period, so trailing words are not cut off

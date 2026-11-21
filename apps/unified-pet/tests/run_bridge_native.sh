@@ -66,7 +66,7 @@ for name in ['take','give','quiet','health_end','note_exit','stopping','exit_sta
     start,end=function(name);body=text[start:end]
     hashes[name]=digest(body.encode());parts.append(located(start,end))
     if name=='converse_tail':
-        for diag in ['bv_diag_write','bv_diag_emit','bv_diag_report']:
+        for diag in ['bv_diag_write','bv_diag_emit','bv_diag_report','bridge_voice_bench_last']:
             start,end=function(diag);body=text[start:end]
             hashes[diag]=digest(body.encode())
             parts.extend(['#if defined(PET_PRIVATE_MIC_DIAG)',located(start,end),'#endif'])
@@ -189,10 +189,10 @@ compile() {
 compile -o "$out/runtime"
 compile -DPET_PRIVATE_MIC_DIAG=1 -o "$out/runtime-micdiag"
 # The normal-source compile must not contain the private measurements/Wi-Fi calls.
-if nm "$out/runtime" | grep -E 'bv_diag_|bench_prebuffer|bench_audio_|bridge_voice_bench_(jitter|audio)|esp_wifi_'; then
+if nm "$out/runtime" | grep -E 'bv_diag_|bv_keep|bench_prebuffer|bench_audio_|bridge_voice_bench_(jitter|audio|last)|esp_wifi_'; then
     echo 'private symbol leaked into normal compile' >&2; exit 1
 fi
-if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw|voice audio'; then
+if strings "$out/runtime" | grep -E 'pet-(mic|bench)-v1|voice jitter|voice bw|voice audio|voice last|voice scan|kept-end'; then
     echo 'private string leaked into normal compile' >&2; exit 1
 fi
 echo 'NORMAL PRIVATE SYMBOL/STRING CHECK: PASS'
@@ -227,6 +227,7 @@ done
 for name in audio-default audio-create-failure audio-override conversation-drop conversation-near-full speaker-room send-limits \
     queue-drain queue-stop queue-parent queue-failure queue-end queue-timeout queue-descheduled queue-one-turn \
     playback-gaps playback-buckets playback-arrivals playback-jitter playback-wifi \
+    kept-ring kept-short kept-deadline kept-overflow \
     mic-play mic-stages mic-healthy mic-slow mic-backlog mic-stop mic-send-boundary mic-no-replay mic-window \
     capture-near-full capture-read-failure cleanup-cpu cleanup-audio-final cleanup-timeout cleanup-transport-timeout
 do
