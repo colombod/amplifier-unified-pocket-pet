@@ -292,6 +292,29 @@ static void console(void *arg) {
                     static const char ack[]="pet-bench-v1 voice audio\n";
                     usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
                 }
+                else if(!strcmp(line,"voice scan")){
+                    /* Bench only: access points of the joined network, strongest first.
+                     * pet-bench-v1 ap <index> <16-bit tag of the address> <channel> <rssi as positive> <1 if joined>
+                     * pet-bench-v1 scan <listed> <result code>. No names or addresses. */
+                    wifi_ap_record_t cur;bool joined=esp_wifi_sta_get_ap_info(&cur)==ESP_OK;
+                    wifi_scan_config_t sc={.ssid=joined?cur.ssid:NULL};
+                    uint16_t count=12;wifi_ap_record_t *found=calloc(count,sizeof(*found));
+                    esp_err_t e=found?esp_wifi_scan_start(&sc,true):ESP_ERR_NO_MEM;
+                    if(e==ESP_OK)e=esp_wifi_scan_get_ap_records(&count,found);
+                    if(e!=ESP_OK)count=0;
+                    char text[64];
+                    for(unsigned i=0;i<count;i++){
+                        unsigned tag=2166136261u;
+                        for(unsigned k=0;k<6;k++)tag=(tag^found[i].bssid[k])*16777619u;
+                        int len=snprintf(text,sizeof(text),"pet-bench-v1 ap %u %u %u %u %u\n",i,(tag^(tag>>16))&0xffffu,
+                            (unsigned)found[i].primary,(unsigned)(-found[i].rssi),
+                            (unsigned)(joined&&!memcmp(found[i].bssid,cur.bssid,6)));
+                        usb_serial_jtag_write_bytes(text,len,pdMS_TO_TICKS(200));
+                    }
+                    int len=snprintf(text,sizeof(text),"pet-bench-v1 scan %u %u\n",(unsigned)count,(unsigned)e);
+                    usb_serial_jtag_write_bytes(text,len,pdMS_TO_TICKS(200));
+                    free(found);
+                }
                 else if(!strcmp(line,"voice last 0")||!strcmp(line,"voice last 1")||!strcmp(line,"voice last 2"))
                     bridge_voice_bench_last((unsigned)(line[11]-'0'));
                 else if(!strcmp(line,"voice bw 20")||!strcmp(line,"voice bw 40")){
