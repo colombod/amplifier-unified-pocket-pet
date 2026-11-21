@@ -234,6 +234,37 @@ Do not expand I1 into a new framework or repeat accepted microphone qualificatio
 If evidence contradicts the existing path, change only the implicated boundary
 and explain the effect on the next usable outcome before dependent changes.
 
+### Off-home transport: preliminary scope for the post-LAN decision
+
+The host already has an optional authenticated tailnet listener. The missing
+link is **inside the pet**: the voice call takes exclusive audio ownership and
+opens the LAN transport, while the diagnostic tunnel requires a different
+owner. A listener on the host, or accepting a tailnet IP in the settings form,
+does not join those paths.
+
+Reuse the recovered prototypes rather than rewriting or merging whole branches.
+`3638a72` adds streaming TLS over a borrowed socket; `8471e3c` adds the transport
+constructor and explicit route selection to the Build 11 code. Across the 19
+distinct device source trees at the reviewed local branch tips, that constructor
+had a definition but no production caller. `307e2e0` and `08e4a05` contain a
+tunnel worker-exit fix and its regression tests; `ba5575f` contains the packet
+self-loop guard. These are candidate changes to port and review, not evidence
+that the current firmware can run a voice call through Tailscale.
+
+| Work after LAN acceptance | Exit condition | Planning allowance |
+| --- | --- | --- |
+| Port the teardown and borrowed-socket pieces onto the accepted firmware. Keep LAN the default and preserve the provisioned identity and settings. | Stop or failed setup releases only resources whose workers have exited. A tailnet selection never silently falls back to LAN. | 1–2 engineer-days |
+| Connect the voice call to the tunnel. Reuse the same gateway protocol, certificate verification, send journal and reply correlation. | A device on a different Wi-Fi sustains both audio directions and a responsive screen. Measure direct and relayed paths where available: 24 kHz PCM16 needs 48 kB/s **each way**, about 64 kB/s after base64 before protocol overhead. Check actual memory headroom, lag and missing audio, not just bytes received. | 2–5 engineer-days |
+| Qualify the user journey and recovery on the normal build. | With the home-LAN route unavailable, hear the right answer and a follow-up, switch workspaces, interrupt the link and resume without a power cycle or duplicate work. Record which paths were actually exercised. | 2–3 engineer-days |
+
+**Preliminary total: 5–10 engineer-days for the transport increment, not a ship
+date.** This assumes a working LAN voice baseline, available off-home Wi-Fi, a
+qualified trust path and authorized hardware access. It excludes implementing
+the cross-workspace and new-work features themselves. If the joined tunnel,
+codec and UI cannot fit or sustain the measured rate, stop at that finding and
+re-estimate before changing the architecture. No tunnel, enrollment, install,
+or paid test is authorized by this estimate.
+
 ### Follow-up: investigate a more native gateway connection
 
 The user asked to track an architecture investigation, including ACP. After the
