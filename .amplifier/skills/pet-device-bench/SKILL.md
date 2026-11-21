@@ -62,8 +62,8 @@ exit reasons are in [references/report-format.md](references/report-format.md).
 - `voice audio` applies to the next call only; `voice core`, `voice prio` and
   `voice jitter` stay until changed or reboot.
 - One scan in ten returned an incomplete answer in testing; rerun it.
-- Not in this repository: the provider-free listener and the app-only installer
-  used for the November 2026 measurements.
+- The portable provider-free listener and loopback test are in `bridge/tools/`.
+  The original site-specific app-only installer is not a teammate release tool.
 
 Done when: each claim cites a saved `summary.json`, with the number of legs per
 side and the signal they ran at.

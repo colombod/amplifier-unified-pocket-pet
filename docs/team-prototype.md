@@ -19,6 +19,25 @@ conversation for consequential details.
 
 ## What to get
 
+**Host-only, free first check:** from this checkout on Linux, with Python,
+`aiohttp` and `cryptography` installed, run
+`python3 -B bridge/tools/test_pet_link_test_host.py -q`. It uses ephemeral
+loopback TLS, disposable credentials and the checked-in firmware's start frame.
+It never opens the pet, calls the provider or contacts Unified. For a physical
+LAN test the [listener](../bridge/tools/pet_link_test_host.py) uses the same
+checkout and admission rules: see `--help`. Select a quiet pet speaker (`--leg
+none`) and an external known acoustic stimulus to check signal; `tone` is a
+transport test, not a microphone test. A nonzero sample isn't recognized
+speech. For a free audible mic-to-speaker check, choose `--leg echo
+--output-seconds 4 --expiry-seconds 15`. Say a harmless short phrase as the
+call opens. The pet speaker stays quiet for the first four seconds, then
+plays back that same input once. This mode briefly holds up to four seconds of
+audio in host RAM; it saves only counts, never audio. Mute normally. If the
+words cannot be heard clearly, the acoustic check did not pass. If they can,
+that proves local playback of captured speech, **not** provider recognition
+or a Unified reply. Do not replace a serving gateway or start a device test
+without arranging the window with its owner.
+
 - A **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**, with CO5300 display and CST820
   touch. The tested board has 16 MB flash, 8 MB PSRAM and ES8311 audio. Do not
   substitute the LCD-1.83 board. See the [Waveshare product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm)
@@ -631,7 +650,9 @@ longer than about 5 s still ends the call as a lost connection. One-turn mode
 retains its earlier behavior. On the device, private bench builds without the
 fix ended 7 of 37 calls themselves; with it, 44 calls (25-100 s each, against a
 provider-free listener) ended only on mic off, including stalls of up to 2.7 s.
-The normal `0.3.12-voice-steady` build has not been qualified by a spoken call.
+One normal `0.3.12-voice-steady` call returned a real Unified answer on
+20 November, after about 95 seconds of silence, with choppy playback. That
+is not conversational acceptance.
 
 In `0.3.13-voice-clear`, both codec audio tasks run at priority 7 pinned to
 core 0, while the voice owner remains at priority 6 on core 1.
