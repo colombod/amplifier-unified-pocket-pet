@@ -148,6 +148,19 @@ then submitted the complete phrase once (13.633 s into the replay); a
 stopped recovery still refused. This is a joined offline regression, not a
 human-heard reply or a qualified Unified release.
 
+**Installed and checked, 21 November:** the provisioned board received the
+`0.3.18-private-micdiag` pilot from `13ff037`, with the settings region unchanged;
+the gateway switched to `d0c18d2` on a host serving Unified 0.117.0. At the
+22:04 UTC log check there had been no device connection, provider dial or
+completed call since activation. The normal image is not installed. That is
+installation evidence, not a spoken acceptance result.
+
+**Teammate setup:** from a fresh local clone of `1d9a514`, an empty home and a
+new Python environment, the [gateway installer](bridge/deploy/README.md#install-and-start)
+installed the user unit and systemd validated it. This used the local package
+cache and disposable settings. It did not enable the unit or pair a teammate's
+Unified installation. Independent host/board setup remains open.
+
 One integration owner ships one tested firmware/gateway/Unified combination
 from the product repository. Never bulk-promote experimental branches or private
 history. Recover existing tools into the product when a teammate needs them.

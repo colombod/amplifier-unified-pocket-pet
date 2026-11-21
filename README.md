@@ -10,8 +10,10 @@ retain the distinction between the goal and a proven integration.
 
 **Release status (21 November 2026): not ready to hand to a team.** The last
 normal firmware tested (`0.3.17`) connected but recognized no speech in the
-reported call. The earlier audible results below are a baseline, not acceptance
-of this checkout. Start with the [recovery decision and product architecture](PROJECT-BRIEF.md#delivery-sequence).
+reported call. The `0.3.18` diagnostic pilot is installed with gateway `d0c18d2`;
+there was no completed voice call as of the 22:04 UTC deployment log check.
+The earlier audible results below are a baseline, not acceptance of this checkout.
+Start with the [recovery decision and product architecture](PROJECT-BRIEF.md#delivery-sequence).
 
 The independent app in `apps/unified-pet` connects the pet to a host-side
 gateway in `bridge/`. The gateway sends spoken requests to a dedicated Unified
