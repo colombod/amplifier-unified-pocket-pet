@@ -117,7 +117,8 @@ are not needed for this pet and must not trigger a room/runtime migration.
 
 ## Delivery sequence
 
-**As of 22 November 2026: display restored, voice failed, release not delivered.**
+**As of 22 November 2026: one two-turn LAN call demonstrated on the diagnostic
+build; normal firmware and the whole-Unified release are not qualified.**
 PR #7 is held. The [original request](docs/intent.md#1-objective) and
 [delivery contract](contracts/pocket-assistant-delivery.v1.md#essential-promises)
 require useful screen-off voice across **all authorized Unified work**. A
@@ -130,6 +131,7 @@ product. Live state and private evidence are indexed in the workspace `SCRATCH.m
 | --- | --- |
 | Display and safe install | App-only update to `0.3.19-amoled-micdiag` (`a17bf56`, image `8536bcf3…`) was read back exactly; the settings region was unchanged before reboot. The user saw Tachikoma and opened Settings on that boot, with no power cycle. This passes display and touch on that boot, not all future boots or voice. |
 | Running gateway | `cea016b` is deployed. One 9.3 s check recovered all eight words of host-generated speech in a preview. It did not use the pet microphone or speaker or send to Unified. |
+| Two-turn LAN call on the pet | On 22 November at 23:01–23:04 UTC, core‑1 diagnostic firmware (`4457f09`, app `aa4cc39f…`) and gateway `cea016b` handled a question for the selected chat title and a follow-up about interruption. Both distinct requests were accepted once and matched to replies in the same Unified chat. The operator heard the title, progress speech and the follow-up answer, then turned the mic off. The gateway counted five progress renders and one reply render as complete, and confirmed a device-initiated close. This proves the observed interaction, not interruption, repeatability or two independently confirmed render completions. The byte-verified app-only install preserved the settings region. |
 | Voice transport repairs | Firmware `13ff037` preserved marked samples through tested transient socket stalls; paired gateway `d0c18d2` preserved one complete scripted request in the matched offline replay. These repairs do not explain or clear the current capture deficit. |
 | Useful historical baseline | Build 11 (`1004293`, image `fadafa58…`) with gateway `8857705` produced two answers the user heard on 16 November; that call later lost the device. Keep the pair for comparison, not automatic rollback. |
 | Teammate tools and routing | `1d9a514` generated a valid systemd unit in a clean local environment; `8fac599` validated the portable app updater with simulated flash. `86c3df7` verified restricted HTTPS pairing and workspace-filtered A → B → A binding in a disposable Unified 0.117.0 host. None proves a fresh-board install, independent teammate setup, or in-call voice switching. |
@@ -188,25 +190,24 @@ were restored and verified. The baseline window closed without a second leg.
    shortfall no longer reproduces under the same conditions before spending
    on another product call. Do not guess at Wi-Fi, buffer size, or task
    priority changes.
-3. **Demonstrate one real conversation.** Identify firmware image, gateway
-   commit and running Unified version. If deployment is needed, obtain the
-   specific device/service authority; preserve app rollback, settings and
-   identity. Before asking the user to test, verify a known external phrase
-   through the actual pet microphone and live recognition path on that build,
-   with specific authority for the provider connection. Do not repeat the
-   host-generated preview. For the authorized product call, ask about a
-   known decision in the selected real chat, then ask why it was made. The
-   user must hear both intelligible answers. Verify that the screen reports
-   acceptance only after Unified accepts, and that the journal and chat match
-   each request once to its own completed reply. Mute without cancelling
-   accepted work. Stop at the first failed boundary; preserve evidence, no
-   automatic test retries.
-4. **Qualify LAN reuse on the normal build.** Three consecutive attributable
+3. **Demonstrate one real diagnostic-build conversation (observed).** The
+   operator’s call above and the matching Unified records supersede the
+   synthetic audio checks. Do not repeat this diagnostic call or substitute a
+   tone test for the next increment.
+4. **Qualify LAN reuse on an exact normal build and gateway pairing.** Build
+   the normal counterpart with the demonstrated display and audio placement,
+   without the diagnostic controls. Record the firmware image, gateway commit
+   and running Unified version. Preserve app rollback, settings and identity
+   for any authorized installation. Verify three consecutive attributable
    responses overall, including a contextual pair and one after power-up.
+   Check that listening, not sent, accepted work and the actual reply are
+   distinguishable. Verify the two turn-to-reply matches in the journal and
+   chat and that mute never cancels accepted work.
    Confirm visible UI, working touch, an ordinary interruption and another
    interaction without a power cycle, duplicated work, or an unresolved
    cleanup. Confirm the live gateway follows an authorized Unified restart.
-   Do not claim this gate on the basis of the diagnostic build alone.
+   Stop at the first failed boundary, preserve evidence and do not retry
+   automatically. Do not claim this gate on the diagnostic build alone.
 
 ### Remaining release gates, in order
 
@@ -219,7 +220,7 @@ were restored and verified. The baseline window closed without a second leg.
 
 One integration owner, one product checkout. Run only the check that can
 change the next decision. No repeated paid probes, new architecture, or
-off-home implementation while the LAN failure is unresolved. The audit's
+off-home implementation while normal LAN use is unqualified. The audit's
 historical cost telemetry was partial; it does not verify a current bill or
 support a ship date.
 
