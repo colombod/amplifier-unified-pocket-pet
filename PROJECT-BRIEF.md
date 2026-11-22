@@ -117,122 +117,96 @@ are not needed for this pet and must not trigger a room/runtime migration.
 
 ## Delivery sequence
 
-**Recovery decision, 21 November 2026: no release candidate has passed.**
-Build 11 (`1004293`, app SHA-256 `fadafa58091bb1c6366e5fba79d9bce2c20e94176c8b417c605a78ab83151a25`)
-and gateway `8857705` produced the user-heard two-answer call on 16 November.
-Use that pair as a comparator, not an automatic rollback. The last installed
-normal build was `0.3.17-strong-ap` from `8d2f313`, gateway `7a31bba`, Unified
-0.116.0. Its 19:33 call produced no transcript and no send. The AP and the
-cause are unknown. The earlier `0.3.12`/`7161575` reply had a long silent wait
-and choppy audio; it is not a replacement release. PR #7 at `16d89c8` is held.
+**As of 22 November 2026: display restored, voice failed, release not delivered.**
+PR #7 is held. The [original request](docs/intent.md#1-objective) and
+[delivery contract](contracts/pocket-assistant-delivery.v1.md#essential-promises)
+require useful screen-off voice across **all authorized Unified work**. A
+conversation in one selected chat is the first recovery milestone, not the
+product. Live state and private evidence are indexed in the workspace `SCRATCH.md`.
 
-**First localized repair (`0.3.18-voice-buffer`, not physically accepted):**
-the post-Build-11 firmware will wait five seconds on a socket send but
-buffered only two seconds of microphone input. When it filled, it silently
-dropped new 20 ms chunks. In a retained device report the queue reached
-96,000 bytes and one send was blocked for 3.336 s. In the firmware owner test,
-three distinct 200 ms input markers went from 4,800 / 4,800 / 4,800 samples on
-the wire to 4,800 / **0** / 4,800 with a 2.6 s stall. Reserving 244,800 bytes
-in PSRAM instead of 96,000 preserves every marker in those tested transient
-stalls. It does not delay normal sends or enlarge playback buffering. Prolonged
-overload can still lose speech. This is a specific loss mechanism, **not**
-proof of the last call's cause, microphone operation, or spoken acceptance.
-It changes no storage layout, credentials, or phone setup.
+### What is done, and what the evidence does not prove
 
-The firmware alone did not fix delivery: replaying the candidate's 2.5 s
-blackout timings through the previous gateway gave `not_sent` while delayed
-audio was still arriving. With the paired gateway change, a single long,
-demonstrably draining stall can receive up to two additional seconds before
-refusal. The exact same arrival trace with scripted transcript and HTTP
-then submitted the complete phrase once (13.633 s into the replay); a
-stopped recovery still refused. This is a joined offline regression, not a
-human-heard reply or a qualified Unified release.
+| Work | Verified result and limit |
+| --- | --- |
+| Display and safe install | App-only update to `0.3.19-amoled-micdiag` (`a17bf56`, image `8536bcf3…`) was read back exactly; the settings region was unchanged before reboot. The user saw Tachikoma and opened Settings on that boot, with no power cycle. This passes display and touch on that boot, not all future boots or voice. |
+| Running gateway | `cea016b` is deployed. One 9.3 s check recovered all eight words of host-generated speech in a preview. It did not use the pet microphone or speaker or send to Unified. |
+| Voice transport repairs | Firmware `13ff037` preserved marked samples through tested transient socket stalls; paired gateway `d0c18d2` preserved one complete scripted request in the matched offline replay. These repairs do not explain or clear the current capture deficit. |
+| Useful historical baseline | Build 11 (`1004293`, image `fadafa58…`) with gateway `8857705` produced two answers the user heard on 16 November; that call later lost the device. Keep the pair for comparison, not automatic rollback. |
+| Teammate tools and routing | `1d9a514` generated a valid systemd unit in a clean local environment; `8fac599` validated the portable app updater with simulated flash. `86c3df7` verified restricted HTTPS pairing and workspace-filtered A → B → A binding in a disposable Unified 0.117.0 host. None proves a fresh-board install, independent teammate setup, or in-call voice switching. |
+| Pending feedback repair | Local source distinguishes no recognized speech, sending, accepted/waiting, and speaking. Fourteen focused gateway checks and the firmware protocol/status check passed offline. The full changed path has not been qualified, built into a new image, or deployed. It does not repair capture. |
 
-**Installed and checked, 21 November:** the provisioned board received the
-`0.3.18-private-micdiag` pilot from `13ff037`, with the settings region unchanged;
-the gateway switched to `d0c18d2` on a host serving Unified 0.117.0. At the
-22:04 UTC log check there had been no device connection, provider dial or
-completed call since activation. The normal image is not installed. That is
-installation evidence, not a spoken acceptance result.
+### Immediate recovery: make the next real call useful
 
-**Teammate setup:** from a fresh local clone of `1d9a514`, an empty home and a
-new Python environment, the [gateway installer](bridge/deploy/README.md#install-and-start)
-installed the user unit and systemd validated it. This used the local package
-cache and disposable settings. Separately, the production gateway CLI paired with
-a fresh Unified 0.117.0 instance over verified HTTPS in a network-isolated
-container. An automated owner signed in with the container's own OS account,
-matched the comparison code, and approved the restricted credential. In two
-separate workspaces the CLI found both unpinned chats, filtered each workspace
-without including the other's chat, and bound A → B → A to the original IDs.
-The [repeatable check](bridge/tools/run_local_unified_pairing.sh) disables model
-execution. It demonstrates the host setup and selection path, **not** spoken
-context, a new task starting, or a teammate installing their own device.
+On **22 November 15:38–15:40 UTC** the user spoke twice. The pet stayed on
+Listening, gave no useful feedback, and the call ended after about 92.5 s.
+The gateway admitted 56.84 s worth of PCM, produced zero recognized segments,
+and sent zero requests to Unified. In the first 32 s the pet reported 20.32 s
+worth of capture and 20.12 s worth of completed sends, with no read errors,
+good recorded signal (−60 to −51 dBm), and a sampled capture queue peak of
+13,440 bytes. The shortfall was already visible before the send queue. These
+are byte counts, not proof of intelligible speech. Long codec reads and
+writes and a snapshot of LVGL at effective priority 22 on audio's core are
+leads, not proof of scheduling as the root cause. The failed call and its
+saved device report have already been collected; do not repeat them.
 
-One integration owner ships one tested firmware/gateway/Unified combination
-from the product repository. Never bulk-promote experimental branches or private
-history. Recover existing tools into the product when a teammate needs them.
-Keep a tag and artifact hashes for a demonstrated combination, and distinguish
-a historical observation from a supported release. A worker may supply an
-isolated change; the integration owner reviews and verifies it in the product.
+1. **Isolate the capture deficit.** Compare Build 11 and the current firmware
+   and retained timing records with unchanged codec configuration. Use the
+   saved evidence to narrow the test to actual sample count at the codec
+   boundary versus scheduling or blocking during display and playback.
+   In the pinned LVGL code, the timer task can wait on the mutex held during
+   touch reads. Check whether priority inheritance keeps the display above
+   the audio tasks during slow reads; the snapshot alone cannot show how
+   long that happened. Compare actual returned sample count, time between
+   reads, and time inside reads, rather than retuning the socket buffer.
+   If a new physical observation is needed, propose one authorized, provider-free
+   comparison with a quiet pet speaker, a known external spoken phrase and
+   a silence control. Keep diagnostics to counts and timings. Compare samples
+   read and sent per elapsed second under otherwise matching conditions. A
+   tone played by the pet, nonzero PCM, or synthetic input past its microphone
+   cannot establish spoken capture. If there is no usable acoustic source,
+   state that specific gap; do not substitute another paid call.
+2. **Build one matched candidate.** Change only the demonstrated faulty
+   boundary, retain the display repair, and finish the feedback change.
+   Exercise the device parser/owner and gateway offline: no-recognition
+   feedback without a send, pending send versus acknowledged acceptance,
+   correlated reply, refusal, and loss without replay. Verify that the capture
+   shortfall no longer reproduces under the same conditions before spending
+   on another product call. Do not guess at Wi-Fi, buffer size, or task
+   priority changes.
+3. **Demonstrate one real conversation.** Identify firmware image, gateway
+   commit and running Unified version. If deployment is needed, obtain the
+   specific device/service authority; preserve app rollback, settings and
+   identity. Before asking the user to test, verify a known external phrase
+   through the actual pet microphone and live recognition path on that build,
+   with specific authority for the provider connection. Do not repeat the
+   host-generated preview. For the authorized product call, ask about a
+   known decision in the selected real chat, then ask why it was made. The
+   user must hear both intelligible answers. Verify that the screen reports
+   acceptance only after Unified accepts, and that the journal and chat match
+   each request once to its own completed reply. Mute without cancelling
+   accepted work. Stop at the first failed boundary; preserve evidence, no
+   automatic test retries.
+4. **Qualify LAN reuse on the normal build.** Three consecutive attributable
+   responses overall, including a contextual pair and one after power-up.
+   Confirm visible UI, working touch, an ordinary interruption and another
+   interaction without a power cycle, duplicated work, or an unresolved
+   cleanup. Confirm the live gateway follows an authorized Unified restart.
+   Do not claim this gate on the basis of the diagnostic build alone.
 
-**Immediate proof:** with a quiet pet speaker, distinguish missing input,
-digital silence, nonzero signal, a recognized known phrase, a send to the right
-conversation, the correlated result and intelligible playback. Nonzero signal
-may be noise. Continuous-tone tests are for transport/recovery only. Keep the
-normal firmware stable while isolating the first missing link. A bench twin
-is a diagnostic comparison, never a substitute for the normal build. Use a
-known external acoustic source if available. If it is not available, report
-that limitation rather than making the user the test rig. Do not change Wi-Fi
-or buffer settings on the basis of a byte count. The reported black screen is
-a separate physical failure, not cleared by ping or USB output.
+### Remaining release gates, in order
 
-On one named normal candidate demonstrate three consecutive contextual requests,
-including two in one conversation and one after power-up; hear intelligible
-answers, observe the actual screen and repeat after ordinary interruption
-without duplicates or power cycling. Only then offer a LAN team candidate.
-Validate a clean clone, phone setup, fresh-board install versus app-only rollback,
-gateway installation and pairing, and a one-command Unified compatibility check.
-The gateway service must recover from app/host restart, not merely listen.
+| Gate | Delivery proof |
+| --- | --- |
+| 1. LAN conversation and recovery | Complete the immediate recovery above with one named, reusable normal combination. Honest status must distinguish listening, not sent, accepted work and the actual answer. |
+| 2. Whole-Unified on LAN | Discover work, use the original chats in two workspaces, switch A → B → A by voice and keep context. Read real waiting questions and answer only the intended current one. Create a real workspace and a distinct chat there, then verify that the requested work starts. Use supported authority and never widen the device credential to bridge a missing capability. |
+| 3. Independent teammate setup | A second operator uses one clean checkout or approved package, a fresh board, their own host and phone: install, compatibility/trust check, pair, provider-free self-check, real interaction and safe update/rollback/removal. Repeatable maintainer tests are prerequisites, not acceptance. A teammate LAN pilot can ship only as LAN-only and only after its demonstrated scope and publication are approved. |
+| 4. Off-home use and final release | After LAN acceptance and the separate transport decision below, demonstrate real voice on another Wi-Fi with the home-LAN path unavailable, including reconnect, correct context and real work. Publish the reviewed combination only with authority. Record exact revisions, image hashes and evidence; exclude private history, credentials and captures. |
 
-| Release decision | Smallest usable result | Stop or proceed |
-| --- | --- | --- |
-| Locate the LAN failure | Trace the November 16 working code against the candidate; reproduce a difference in the joined path or isolate an exact remaining uncertainty. | No tester scheduling and no request to the user for unchanged-firmware echo, tone or mic checks. Ask for a spoken **product** test only on a named candidate, with the change, evidence, expected result and failure readout ready. Preserve the provisioned board. |
-| Restore the conversation | Three intended requests produce three attributable, intelligible replies on normal firmware, with honest progress; one follows power-up. | Preserve the exact working image, gateway source, Unified version and limits. If the first broken boundary changes, investigate it before adding features. |
-| Hand out a LAN prototype | A teammate with a fresh board/host can complete the setup above and repeat the conversation using the repo alone. | One independent clean setup. Missing installer, trust setup or incompatible Unified blocks release, not a note to fix after publication. Recheck the exact assembled head before PR approval. |
-| Ship the requested assistant | I2, I3 and I4 below verified on the same accumulating product. | No “whole Unified” label based on a text-only demo, and no “portable” label based on host-side VPN reachability. |
-
-The user will perform the meaningful device acceptance test when needed.
-First exhaust the preserved evidence and discriminating source/host tests.
-Once the first failing boundary is known, estimate **that repair**, then
-present the integrated acceptance candidate. A clean-host/board setup with
-a teammate is a later release requirement, not a prerequisite for this work.
-Do not promise a ship date before the fault, teammate hardware, and scoped
-Unified operations are established. The integration owner reports the next
-decision, exact candidate and expected user-visible outcome, not worker counts.
-
-The next usable outcome is a team-shareable prototype whose gateway remains
-available across Unified restarts and whose pet reconnects while the mic is on.
-Finish and verify the existing gateway and firmware work, protect private values,
-and prepare a truthful setup guide and reviewable public PR. Demonstrate the
-service and reconnect on the installed device when the required device operation
-is authorized. A teammate's first setup and off-home use are separate proofs.
-
-Each row below is a usable outcome; its checks are supporting work, not another release.
-The delivery manager owns integration and ordinary repairs. Parallelize only
-independent implementation with explicit file/resource ownership.
-
-| Increment | User can do | Smallest necessary work | Demonstration / completion |
-| --- | --- | --- | --- |
-| I1 — clean, reusable Unified voice | Speak to a deliberately selected real conversation, hear its contextual reply, then use voice again without rebooting. | Remove extra/test controls; repair transport/audio ownership and close/reuse; exercise the actual SDK client + adapter + host path, not only extracted lock/pacing functions. Keep native correlation. Design the tailnet join now; do not build a replacement LAN product. | Installed clean screen; correct original-session input/root reply/speaker result; repeated exchange and ordinary disconnect recovery without reset, stale callbacks, duplicate send or admission/resource leak. A single lucky call is insufficient. |
-| I2 — choose and continue any work | Find work across workspaces, switch between real conversations and return with context intact. | Supported paged discovery and explicit focus on host/device; per-interaction frozen target; native send delivery rather than guessed busy policy. | Two conversations in different workspaces, switch away/back and speak again; no new replacement chat, cross-target input or wrong spoken reply. |
-| I3 — manage attention and create work | Ask what needs attention, answer the intended waiting question, create a new workspace and start a new chat/work there. | Join supported attention/question revision and workspace prepare/create/chat-start actions to the existing voice interaction, preserving permissions. | Genuine waiting question answered at its source; second question not confused; real new workspace + distinct chat + actual requested execution, not just a folder/task/accepted request. |
-| I4 — portable daily use | Do the same useful work away from home and recover from network changes without maintenance rituals. | Complete sustained native Tailscale/audio/UI coexistence, setup/reconnect and power behavior. Retain identity; measure actual resources, latency and battery rather than invent targets. | Supported off-home Wi-Fi with home-LAN route unavailable, real voice/result and context switch/new work; repeated calls and interruption recovery; usable animation/touch; measured limits documented. |
-
-After the team LAN increment, present the device-side Tailscale plan and estimate
-for decision before implementation. Off-site proof remains required for the product.
-Do not expand I1 into a new framework or repeat accepted microphone qualification.
-If evidence contradicts the existing path, change only the implicated boundary
-and explain the effect on the next usable outcome before dependent changes.
+One integration owner, one product checkout. Run only the check that can
+change the next decision. No repeated paid probes, new architecture, or
+off-home implementation while the LAN failure is unresolved. The audit's
+historical cost telemetry was partial; it does not verify a current bill or
+support a ship date.
 
 ### Off-home transport: preliminary scope for the post-LAN decision
 
@@ -293,9 +267,10 @@ cost; otherwise keep the existing path and record the finding.
   observed journey, command/result correlation, conditions, failures and limits.
   Source-only, built, installed and physically demonstrated are different states.
 - Preserve current settings, credentials, backups, source and uncertain attempts.
-  Reuse the established app-only backup and verification sequence, but do not
-  rerun or repin a consumed installer: its retry and execution-custody failure
-  paths need repair, and direct device access is not established. No
+  Reuse the verified app-only backup and readback procedure only for an
+  explicitly authorized operation on a verified device. Do not rerun or repin
+  a consumed one-shot installation, or substitute the simulated updater
+  result for qualification on the board. No
   bootloader/table write, automatic rollback, old NVS restore or token regeneration.
 - Earlier demonstrated device boundary (15–16 November): build 11 completed two multi-exchange
   calls through the Unified front door. A later call through the installed,
