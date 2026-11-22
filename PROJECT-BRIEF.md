@@ -133,7 +133,7 @@ product. Live state and private evidence are indexed in the workspace `SCRATCH.m
 | Voice transport repairs | Firmware `13ff037` preserved marked samples through tested transient socket stalls; paired gateway `d0c18d2` preserved one complete scripted request in the matched offline replay. These repairs do not explain or clear the current capture deficit. |
 | Useful historical baseline | Build 11 (`1004293`, image `fadafa58…`) with gateway `8857705` produced two answers the user heard on 16 November; that call later lost the device. Keep the pair for comparison, not automatic rollback. |
 | Teammate tools and routing | `1d9a514` generated a valid systemd unit in a clean local environment; `8fac599` validated the portable app updater with simulated flash. `86c3df7` verified restricted HTTPS pairing and workspace-filtered A → B → A binding in a disposable Unified 0.117.0 host. None proves a fresh-board install, independent teammate setup, or in-call voice switching. |
-| Pending feedback repair | Local source distinguishes no recognized speech, sending, accepted/waiting, and speaking. Fourteen focused gateway checks and the firmware protocol/status check passed offline. The full changed path has not been qualified, built into a new image, or deployed. It does not repair capture. |
+| Feedback repair, source only | `79c18bf` distinguishes no recognized speech, sending, accepted/waiting, and speaking; an accepted send with a lost reply keeps the no-redial fence. All 142 gateway conversation tests, the device protocol/status check and eight focused production-owner cases passed offline. There is no new firmware image or deployment. It does not repair capture. |
 
 ### Immediate recovery: make the next real call useful
 
@@ -149,6 +149,20 @@ writes and a snapshot of LVGL at effective priority 22 on audio's core are
 leads, not proof of scheduling as the root cause. The failed call and its
 saved device report have already been collected; do not repeat them.
 
+An approved provider-free baseline on the same build reproduced the deficit
+with silent playback and the default placement of the audio tasks: **63.0%
+of nominal capture cadence over 21 full steady seconds**. The send rate was
+63.2%, the sampled capture queue peaked at 3,840 bytes, the longest read was
+121.7 ms, and there were no reported read errors. LVGL again appeared at
+effective priority 22 on core 0, with audio tasks at priority 7. This
+reproduces the timing failure without the voice provider but does not
+identify the cause or test intelligibility. The supervisory close check
+stopped the run before the second leg: the listener confirmed peer closure
+but did not report the expected numerical WebSocket close code. Review of
+the completed device user-stop report and the single listener closure with
+no reopen established Mic Off. The original gateway and USB access policy
+were restored and verified. No second leg or paid connection occurred.
+
 1. **Isolate the capture deficit.** Compare Build 11 and the current firmware
    and retained timing records with unchanged codec configuration. Use the
    saved evidence to narrow the test to actual sample count at the codec
@@ -158,13 +172,19 @@ saved device report have already been collected; do not repeat them.
    the audio tasks during slow reads; the snapshot alone cannot show how
    long that happened. Compare actual returned sample count, time between
    reads, and time inside reads, rather than retuning the socket buffer.
-   If a new physical observation is needed, propose one authorized, provider-free
-   comparison with a quiet pet speaker, a known external spoken phrase and
-   a silence control. Keep diagnostics to counts and timings. Compare samples
-   read and sent per elapsed second under otherwise matching conditions. A
-   tone played by the pet, nonzero PCM, or synthetic input past its microphone
-   cannot establish spoken capture. If there is no usable acoustic source,
-   state that specific gap; do not substitute another paid call.
+   Use the completed provider-free core-0 baseline as the reference.
+   Before proposing any follow-up hardware measurement, verify the stop
+   guard against the saved closure evidence so it does not rely on the
+   optional numerical close code. A provider-free leg on the other audio
+   core needs its own authorization for USB and temporary gateway outage.
+   Hold codec settings, network, priority and silent playback constant.
+   Reaching at least 95% of nominal cadence under comparable conditions
+   makes placement a useful repair candidate; it does not prove that
+   display load was the cause or that real speech is restored. Do not
+   replay the completed test or make a scheduling change from one snapshot.
+   Compare counts and timing only; use a separate known external spoken
+   phrase and silence control at the speech boundary, not tone, digital
+   silence or synthetic input injected past the pet microphone.
 2. **Build one matched candidate.** Change only the demonstrated faulty
    boundary, retain the display repair, and finish the feedback change.
    Exercise the device parser/owner and gateway offline: no-recognition
