@@ -29,7 +29,7 @@ BaseType_t rig_create_pinned(TaskFunction_t fn,const char *name,uint32_t stack,v
     if(!strcmp(name,"pet_live"))assert(priority==6&&core==1&&stack==12288);
     else{
         assert(!strcmp(name,"pet_bridge_mic")||!strcmp(name,"pet_bridge_out"));
-        assert(priority==7&&core==0&&stack==4096);
+        assert(priority==7&&core==1&&stack==4096);
     }
     printf("RIG task name=%s priority=%u requested_core=%d (single simulated CPU)\n",
            name,(unsigned)priority,(int)core);

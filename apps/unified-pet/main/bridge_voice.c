@@ -39,12 +39,12 @@
  * 60 ms: a task that is scheduled later than that leaves a hole in the sound
  * (crackling) and loses microphone samples. At the socket reader's priority (5)
  * on core 0 that happened in 7 of 8 bench calls: 10-15 seconds per 25 s call
- * with holes, writes up to 117 ms late, microphone at 95%. Above the voice owner
- * (6), on the core the owner is not on, no write in 19 calls was later than
- * 28 ms; what gaps remained (2 calls) were network underruns of the playback
- * buffer (working-files/voice-bench runs 15-17, 20 November 2026). */
+ * with holes, writes up to 117 ms late, microphone at 95% (20 November 2026).
+ * Keep the audio tasks above the voice owner (6). The 22 November silent
+ * playback comparison at priority 7 measured 63% of nominal capture on core 0
+ * and 100% on core 1. This supports placement, not speech qualification. */
 #define BV_AUDIO_PRIORITY 7
-#define BV_AUDIO_CORE 0
+#define BV_AUDIO_CORE 1
 #define BV_FRAMES 32             /* queued host messages; a short network burst must not end the call */
 #define BV_PREBUFFER 15360       /* 320 ms jitter buffer before (re)starting playback */
 #define BV_PRIME_WAIT_US 400000  /* a short burst before a gap is played, not held for the next one */

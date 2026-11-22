@@ -40,9 +40,12 @@ Scheduling and audio
   display task's priority (LVGL, 4, about 75% of a core) it fell behind real time
   and calls ended themselves. This chip pins a task to its current core at its first
   FPU use, and the codec's volume/gain calls use the FPU: "unpinned" is a random core.
-- The microphone and speaker tasks run at priority 7 on core 0. The codec's DMA
-  holds 60 ms; at priority 5 writes came up to 117 ms late, which is crackling in
-  playback and lost microphone audio.
+- Keep the microphone and speaker tasks at priority 7. The codec's DMA holds
+  60 ms; at priority 5 writes came up to 117 ms late, causing playback crackling
+  and lost microphone audio. The candidate moves both tasks to core 1: the
+  22 November provider-free comparison measured 63% of nominal capture on core 0
+  and 100% on core 1 with silent playback. Wi-Fi was stronger in the second run;
+  this did not test speech recognition or playback intelligibility.
 - In a conversation a full microphone buffer drops its newest audio and the call
   continues; a send may wait 5 s. A full buffer must never end the call or redial.
 - The playback prebuffer is 320 ms. 640 and 960 ms made no difference in 12 calls:

@@ -161,36 +161,27 @@ stopped the run before the second leg: the listener confirmed peer closure
 but did not report the expected numerical WebSocket close code. Review of
 the completed device user-stop report and the single listener closure with
 no reopen established Mic Off. The original gateway and USB access policy
-were restored and verified. No second leg or paid connection occurred.
+were restored and verified. The baseline window closed without a second leg.
 
-1. **Isolate the capture deficit.** Compare Build 11 and the current firmware
-   and retained timing records with unchanged codec configuration. Use the
-   saved evidence to narrow the test to actual sample count at the codec
-   boundary versus scheduling or blocking during display and playback.
-   In the pinned LVGL code, the timer task can wait on the mutex held during
-   touch reads. Check whether priority inheritance keeps the display above
-   the audio tasks during slow reads; the snapshot alone cannot show how
-   long that happened. Compare actual returned sample count, time between
-   reads, and time inside reads, rather than retuning the socket buffer.
-   Use the completed provider-free core-0 baseline as the reference. The
-   retained core-0/priority-7 runs from 20 November reached full capture
-   cadence with LVGL sampled at priority 4 or 6, versus 63% in both
-   22 November observations with LVGL sampled at effective priority 22.
-   These are different runs, not a controlled change in LVGL priority.
-   The corrected Stop check accepted the saved user-stop and peer-closure
-   record (including the empty close payload) and rejected 14 incomplete,
-   abnormal or ambiguous variants offline. The pending decision covers
-   one provider-free leg on the other audio core, not another baseline.
-   Hold codec settings, network, priority and silent playback constant.
-   Reaching at least 95% of nominal cadence under comparable conditions
-   makes placement a useful repair candidate; it does not prove that
-   display load was the cause or that real speech is restored. Do not
-   replay the completed test or make a scheduling change from one snapshot.
-   Compare counts and timing only; use a separate known external spoken
-   phrase and silence control at the speech boundary, not tone, digital
-   silence or synthetic input injected past the pet microphone.
-2. **Build one matched candidate.** Change only the demonstrated faulty
-   boundary, retain the display repair, and finish the feedback change.
+1. **Compare audio task placement (completed, timing only).** A separately
+   authorized provider-free run used the same installed firmware, silent
+   playback, and priority 7, but moved the microphone and playback tasks to
+   core 1 for that call. Task records verified both placements and that
+   the voice owner stayed on core 1 at priority 6. Over 21 steady seconds
+   in each run, capture rose from **63.0% to 100%** of nominal and
+   completed sends from **63.2% to 100%**. The longest measured steady
+   codec read fell from **121.7 ms to 23.0 ms**. Neither run reported read
+   errors or playback underruns. Channel and bandwidth matched; the minimum
+   Wi-Fi signal was stronger in the core-1 run (−48 vs −60 dBm). The result
+   makes core 1 the leading repair candidate, not proof that LVGL caused
+   the deficit or that real speech is restored. The completed device Stop,
+   listener closure, and zero reopens confirmed Mic Off; the unchanged
+   gateway was verified running idle and USB permissions were restored.
+   No flash, intentional reset, paid call, or repeated baseline.
+2. **Build one matched candidate.** Change audio placement without also
+   changing priority, codec settings, or buffers. Retain the display repair
+   and finish the feedback change. Keep the observed Wi-Fi difference in
+   mind when qualifying capture.
    Exercise the device parser/owner and gateway offline: no-recognition
    feedback without a send, pending send versus acknowledged acceptance,
    correlated reply, refusal, and loss without replay. Verify that the capture

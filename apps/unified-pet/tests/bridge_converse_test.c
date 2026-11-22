@@ -152,7 +152,7 @@ static void *task_main(void *p){
     assert(!"task returned without vTaskDelete");return NULL;
 }
 static int xTaskCreatePinnedToCore(void (*fn)(void*),const char *name,unsigned stack,void *arg,unsigned prio,void *handle,int core){
-    assert(prio==7&&core==0&&stack==4096&&!handle);
+    assert(prio==7&&core==1&&stack==4096&&!handle);
     assert(!strcmp(name,"pet_bridge_mic")||!strcmp(name,"pet_bridge_out"));
     (void)name;(void)stack;(void)prio;(void)handle;
     if(task_fail_at&&++task_attempts==task_fail_at)return 0;

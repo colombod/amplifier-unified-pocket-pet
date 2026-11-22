@@ -1349,26 +1349,26 @@ static void check_audio_create(unsigned priority,int core,unsigned fail_at){
     if(fail_at)assert(atomic_load(&context.exit_reason)==BV_EXIT_AUDIO);
 }
 static void audio_scheduling(const char *name){
-    if(!strcmp(name,"audio-default"))check_audio_create(7,0,0);
+    if(!strcmp(name,"audio-default"))check_audio_create(7,1,0);
     else if(!strcmp(name,"audio-create-failure")){
-        check_audio_create(7,0,1);check_audio_create(7,0,2);
+        check_audio_create(7,1,1);check_audio_create(7,1,2);
     }
 #if defined(PET_PRIVATE_MIC_DIAG)
     else if(!strcmp(name,"audio-override")){
         const unsigned priorities[]={0,4,5,6,7,8,UINT32_MAX};
         const int cores[]={-9,-1,0,1,2};
-        check_audio_create(7,0,0); /* no console command */
+        check_audio_create(7,1,0); /* no console command */
         for(unsigned i=0;i<sizeof(priorities)/sizeof(*priorities);i++)
             for(unsigned j=0;j<sizeof(cores)/sizeof(*cores);j++){
                 unsigned p=priorities[i]<5?5:priorities[i]>7?7:priorities[i];
                 int core=cores[j]<0?tskNO_AFFINITY:cores[j]?1:0;
                 bridge_voice_bench_audio(priorities[i],cores[j]);
                 check_audio_create(p,core,0);
-                check_audio_create(7,0,0); /* consumed by the NEXT call only */
+                check_audio_create(7,1,0); /* consumed by the NEXT call only */
             }
         bridge_voice_bench_audio(5,-1);
         check_audio_create(5,tskNO_AFFINITY,2); /* failed create also consumes */
-        check_audio_create(7,0,0);
+        check_audio_create(7,1,0);
     }
 #endif
     else assert(!"unknown audio scheduling case");
