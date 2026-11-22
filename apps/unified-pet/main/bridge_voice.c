@@ -153,7 +153,8 @@ typedef struct {
     bridge_transport_terminal_t transport_terminal;
     char terminal_code[32]; /* first definite host error; owner only under guard */
     bool send_uncertain_seen; /* no wire event proves its resolution during this call */
-    bool send_pending; /* observed asking, not yet followed by ordered answering; per call */
+    bool send_pending; /* replacement fence, held until ordered answering */
+    bool send_accepted; /* ordered working seen for the current pending request */
     bool cleanup_stop_sent,cleanup_close_unconfirmed; /* owner only; unconfirmed close vetoes retry */
     int64_t cleanup_stop_started_at; /* valid only after a full successful pet.stop */
     bool tail_incomplete;
@@ -742,7 +743,8 @@ static void publish(bridge_voice_t *c){
     live_state_t state=view.phase==BR_CAPTURING?LIVE_LISTENING:view.phase==BR_REPLYING?LIVE_SPEAKING:
         view.phase==BR_CONNECTING||view.phase==BR_BEGINNING?LIVE_CONNECTING:view.phase>=BR_CLOSING?LIVE_CLOSING:LIVE_THINKING;
     if(view.phase==BR_CONVERSING)
-        state=view.talk==BR_TALK_ASKING?LIVE_THINKING:view.talk==BR_TALK_ANSWERING?LIVE_SPEAKING:LIVE_LISTENING;
+        state=(view.talk==BR_TALK_ASKING||view.talk==BR_TALK_WORKING)?LIVE_THINKING:
+            view.talk==BR_TALK_ANSWERING?LIVE_SPEAKING:LIVE_LISTENING;
     /* A call being re-established keeps the mic-on look until the host answers. */
     if(c->reconnects&&state==LIVE_CONNECTING){live_voice_bridge_status(LIVE_RECONNECTING,"Reconnecting...");return;}
     live_voice_bridge_status(state,view.status); /* only fixed metadata, NOT target/transcript */
@@ -799,14 +801,16 @@ static bool audio_exited(const bridge_voice_t *c){
  * The gateway admits confirm before enqueueing asking. An observed asking
  * therefore fences replacement until a later ordered answering, even when
  * the frame is consumed after local failure/closing. Listening, unknown state
- * and cleanup do not settle it. Answering never clears sticky uncertainty.
+ * and cleanup do not settle it. Working confirms acceptance for status only;
+ * it does not remove the replacement fence. Answering never clears sticky uncertainty.
  * This cannot detect an asking frame that never reached the device. */
 static void observe_converse_send(bridge_voice_t *c,const bridge_event_t *event){
     if(!c->model.converse)return;
     if(event->kind==BR_EV_CONVERSE_NOTICE&&!strcmp(event->code,"send_uncertain"))
         c->send_uncertain_seen=true;
     if(event->kind==BR_EV_CONVERSE_STATE){
-        if(!strcmp(event->state,"asking"))c->send_pending=true;
+        if(!strcmp(event->state,"asking")){c->send_pending=true;c->send_accepted=false;}
+        else if(c->send_pending&&!strcmp(event->state,"working"))c->send_accepted=true;
         else if(c->send_pending&&!strcmp(event->state,"answering"))c->send_pending=false;
     }
 }
@@ -838,7 +842,7 @@ static unsigned converse_end(bridge_voice_t *c,char *out,size_t cap){
             c->send_uncertain_seen?"; send unconfirmed":"");return BV_END_ERROR;}
     }
     else if(c->send_uncertain_seen)s="Could not confirm it was sent";
-    else if(c->send_pending)s="Send unconfirmed";
+    else if(c->send_pending)s=c->send_accepted?"Accepted; reply not received":"Send unconfirmed";
     else if(c->cleanup_close_unconfirmed)s="Host error: close_unconfirmed";
     else if(link&&c->model.code[0]){
         snprintf(out,cap,"Host error: %s",c->model.code);return BV_END_ERROR;

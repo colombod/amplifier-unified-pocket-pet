@@ -118,7 +118,7 @@ for name in stop-before-active stop-registration stop-reconnect-registration sto
     cleanup-race-json-closed cleanup-race-confirmed cleanup-race-independent-confirmed \
     cleanup-race-bare-loss cleanup-race-muted cleanup-race-uncertain cleanup-race-pending \
     cleanup-race-unconfirmed-only cleanup-race-retained-json cleanup-race-retained-normal cleanup-race-retained-unconfirmed \
-    pending-eof pending-callback pending-1011 pending-close pending-notice pending-listening pending-unknown \
+    pending-eof pending-callback pending-accepted pending-1011 pending-close pending-notice pending-listening pending-unknown \
     pending-muted pending-terminal pending-resolved pending-resolved-listening pending-reasking pending-uncertain-resolved \
     pending-tail-queued pending-tail-post pending-tail-resolved pending-dispose pending-dispose-resolved \
     no-http no-retained retry-boundaries re-budget re-budget-short re-budget-long-cleanup re-budget-short-cleanup re-window-origin terminal-code-matrix re-budget-callback-delay re-budget-close-delay re-ceiling re-no-stale sequence

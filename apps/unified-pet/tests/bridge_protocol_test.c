@@ -46,12 +46,12 @@ static void rejects(const char *json){bridge_event_t e;assert(!bridge_parse(json
 static void conversation_cases(void){
     char wire[64];bridge_event_t e;bridge_view_t v;
     /* Every gateway->device golden frame parses, with the documented meaning. */
-    const char *golden[]={G_BEGAN,G_STATE("listening"),G_STATE("asking"),G_STATE("answering"),
+    const char *golden[]={G_BEGAN,G_STATE("listening"),G_STATE("asking"),G_STATE("working"),G_STATE("answering"),
         G_NOTICE("busy"),G_NOTICE("not_sent"),G_NOTICE("send_uncertain"),G_NOTICE("reply_unavailable"),
-        G_NOTICE("idle_timeout"),G_NOTICE("time_limit")};
+        G_NOTICE("idle_timeout"),G_NOTICE("time_limit"),G_NOTICE("no_words_yet")};
     for(size_t i=0;i<sizeof(golden)/sizeof(*golden);i++){
         assert(bridge_parse(golden[i],strlen(golden[i]),&e));
-        assert(e.kind==(i==0?BR_EV_CONVERSE_BEGAN:i<4?BR_EV_CONVERSE_STATE:BR_EV_CONVERSE_NOTICE));
+        assert(e.kind==(i==0?BR_EV_CONVERSE_BEGAN:i<5?BR_EV_CONVERSE_STATE:BR_EV_CONVERSE_NOTICE));
         bridge_event_clear(&e);
     }
     /* A missing, wrongly typed or extra field is a protocol error, never ignored. */
@@ -78,7 +78,13 @@ static void conversation_cases(void){
     assert(!strcmp(status(),"Listening"));
     assert(feed(AUDIO)==BR_ACT_PLAY);
     assert(feed(G_STATE("listening"))==0&&m.talk==BR_TALK_LISTENING&&!strcmp(status(),"Listening"));
+    assert(feed(G_NOTICE("no_words_yet"))==BR_ACT_NOTICE);
+    bridge_notice_expire(&m);
+    assert(!strcmp(status(),"Listening: no speech recognized"));
+    assert(feed(G_STATE("listening"))==0&&!strcmp(status(),"Listening"));
     assert(feed(G_STATE("asking"))==0&&m.talk==BR_TALK_ASKING&&!strcmp(status(),"Asking Unified..."));
+    assert(feed(G_STATE("working"))==0&&m.talk==BR_TALK_WORKING&&!strcmp(status(),"Accepted. Waiting for reply..."));
+    bridge_view(&m,&v);assert(v.can_stop&&!v.can_send&&!v.can_finish_capture);
     assert(feed(AUDIO)==BR_ACT_PLAY);
     assert(feed(G_STATE("answering"))==0&&m.talk==BR_TALK_ANSWERING&&!strcmp(status(),"Speaking"));
     assert(feed(AUDIO)==BR_ACT_PLAY);

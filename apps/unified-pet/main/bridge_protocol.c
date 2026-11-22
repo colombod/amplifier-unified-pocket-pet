@@ -205,9 +205,9 @@ unsigned bridge_playback_drained(bridge_model_t *m){
     m->draining=false;m->audio_epoch++;m->phase=m->wire_closed?BR_FINISHED:BR_CLOSING;
     return BR_ACT_MUTE|BR_ACT_CLOSE;
 }
-void bridge_notice_expire(bridge_model_t *m){if(m)m->notice_visible=false;}
+void bridge_notice_expire(bridge_model_t *m){if(m&&m->notice!=BR_NOTICE_NO_WORDS_YET)m->notice_visible=false;}
 static bridge_notice_t notice_code(const char *s){
-    static const char *const names[]={"busy","not_sent","send_uncertain","reply_unavailable","idle_timeout","time_limit"};
+    static const char *const names[]={"busy","not_sent","send_uncertain","reply_unavailable","idle_timeout","time_limit","no_words_yet"};
     for(unsigned i=0;i<sizeof(names)/sizeof(*names);i++)if(!strcmp(s,names[i]))return (bridge_notice_t)(i+1);
     return BR_NOTICE_NONE;
 }
@@ -238,8 +238,10 @@ static unsigned converse_step(bridge_model_t *m,const bridge_event_t *e){
     if(e->kind==BR_EV_CONVERSE_STATE&&m->phase==BR_CONVERSING){
         if(!strcmp(e->state,"listening"))m->talk=BR_TALK_LISTENING;
         else if(!strcmp(e->state,"asking"))m->talk=BR_TALK_ASKING;
+        else if(!strcmp(e->state,"working"))m->talk=BR_TALK_WORKING;
         else if(!strcmp(e->state,"answering"))m->talk=BR_TALK_ANSWERING;
-        else m->ignored++; /* unknown value: keep the last known state, stay open */
+        else {m->ignored++;return 0;} /* unknown value: keep the last known state, stay open */
+        if(m->notice==BR_NOTICE_NO_WORDS_YET)m->notice_visible=false;
         return 0;
     }
     if(e->kind==BR_EV_AUDIO&&m->phase==BR_CONVERSING)return BR_ACT_PLAY;
@@ -307,6 +309,7 @@ const char *bridge_notice_text(bridge_notice_t notice){
     case BR_NOTICE_REPLY_UNAVAILABLE:return "No reply yet";
     case BR_NOTICE_IDLE_TIMEOUT:return "Mic off (quiet)";
     case BR_NOTICE_TIME_LIMIT:return "Mic off (time limit)";
+    case BR_NOTICE_NO_WORDS_YET:return "Listening: no speech recognized";
     default:return "Mic off";
     }
 }
@@ -321,6 +324,7 @@ static void converse_status(const bridge_model_t *m,char *out,size_t cap){
     }else if(m->stop_sent)s="Mic off";
     else if(m->phase==BR_CONVERSING){
         if(m->notice_visible)s=bridge_notice_text(m->notice);
+        else if(m->talk==BR_TALK_WORKING)s="Accepted. Waiting for reply...";
         else s=m->talk==BR_TALK_ASKING?"Asking Unified...":m->talk==BR_TALK_ANSWERING?"Speaking":"Listening";
     }else if(m->phase==BR_CONNECTING||m->phase==BR_BEGINNING)s="Connecting...";
     else if(m->end_notice!=BR_NOTICE_NONE)s=bridge_notice_text(m->end_notice);

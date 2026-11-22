@@ -2546,6 +2546,7 @@ static void pending_send_case(const char *name){
     fresh();opened();
     pending_probe=(typeof(pending_probe)){.pending=true,.terminal=""};
     bool eof=!strcmp(name,"pending-eof"),callback=!strcmp(name,"pending-callback");
+    bool accepted=!strcmp(name,"pending-accepted");
     bool close1011=!strcmp(name,"pending-1011"),closed=!strcmp(name,"pending-close");
     bool notice=!strcmp(name,"pending-notice"),listening=!strcmp(name,"pending-listening");
     bool unknown=!strcmp(name,"pending-unknown"),muted=!strcmp(name,"pending-muted");
@@ -2556,7 +2557,7 @@ static void pending_send_case(const char *name){
     pending_probe.tail_post=!strcmp(name,"pending-tail-post");
     pending_probe.tail_resolve=!strcmp(name,"pending-tail-resolved");
     pending_probe.dispose_resolve=!strcmp(name,"pending-dispose-resolved");
-    assert(eof||callback||close1011||closed||notice||listening||unknown||muted||resolved||resolved_listening||
+    assert(eof||callback||accepted||close1011||closed||notice||listening||unknown||muted||resolved||resolved_listening||
         reasking||uncertain||terminal||queued||disposal||pending_probe.tail_post||pending_probe.tail_resolve);
     bool settled=resolved||resolved_listening||pending_probe.tail_resolve||pending_probe.dispose_resolve;
     /* tail-resolved clears pending, but cleanup's valid session.closed still
@@ -2581,6 +2582,7 @@ static void pending_send_case(const char *name){
     }else{
         host_audio(100);
         at(1000,EV_TEXT,G_STATE("asking"));check(1100,pending_armed);
+        if(accepted){at(1400,EV_TEXT,G_STATE("working"));check(1800,pending_armed);}
         if(resolved||resolved_listening||reasking||uncertain){
             if(uncertain)at(1200,EV_TEXT,G_NOTICE("send_uncertain"));
             at(1400,EV_TEXT,G_STATE("answering"));check(1500,pending_settled);
@@ -2606,9 +2608,10 @@ static void pending_send_case(const char *name){
         assert(new_calls==2&&opens==2&&closes==2&&tasks_created==4&&dispose_calls==2&&shown("Reconnecting..."));
     }else{
         assert(new_calls==1&&start_calls==1&&!call_report.again);
+        if(accepted)assert(shown("Accepted. Waiting for reply..."));
         ended(muted||pending_probe.tail_resolve?LIVE_OFF:LIVE_ERROR,
             muted?"Mic off":pending_probe.tail_resolve?"Mic off (call ended)":terminal?"Host error: no_delegation":
-            uncertain?UNCERTAIN_TEXT:PENDING_TEXT);
+            uncertain?UNCERTAIN_TEXT:accepted?"Accepted; reply not received":PENDING_TEXT);
     }
     /* fresh() resets fixtures only, not production statics: a new explicit user
      * activation is immediately usable and cannot inherit a prior call's guard. */

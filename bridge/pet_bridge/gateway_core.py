@@ -1570,6 +1570,8 @@ class PetSession:
         self._replies_rendered = 0
         self._progress_rendered = 0
         self._last_speech = 0.0
+        self._recognition_hint_due: float | None = None
+        self._recognition_hint_shown = False
         self._seen_delegations: set[str] = set()
         self._seen_transcripts: set[str] = set()
         self._transcript_end = -1
@@ -2677,6 +2679,8 @@ class PetSession:
             self._send_accepted = True
             self._send_accept_t = self._clock.now()
             self._state = _AWAIT_REPLY
+            if not self._emit(gs.build_converse_state("working")):
+                return
             self._arm("poll", gs.POLL_INTERVAL_S)
             self._arm("converse_reply", gs.CONVERSE_REPLY_MAX_S)
             return
@@ -2917,6 +2921,7 @@ class PetSession:
             "ack": self._on_ack_timer,
             "silence": self._on_silence_timer,
             "converse_idle": self._converse_idle,
+            "converse_recognition_hint": self._converse_recognition_hint,
             "converse_limit": self._converse_limit,
             "media_limit": self._converse_limit if self._converse else self._on_cap_timer,
             "converse_render": self._converse_render_tick,
@@ -3233,7 +3238,7 @@ class PetSession:
         ), tag="converse_began")
         self._converse_listen()
 
-    def _converse_listen(self) -> None:
+    def _converse_listen(self, *, hint_if_no_words: bool = True) -> None:
         if self._state in (_CLOSING, _CLOSED):
             return
         for timer in ("settle", "poll", "converse_reply", "converse_render", "converse_progress"):
@@ -3263,9 +3268,24 @@ class PetSession:
         self._last_speech = self._clock.now()
         if not self._emit(gs.build_converse_state("listening")):
             return
+        self._recognition_hint_shown = False
+        self._disarm("converse_recognition_hint")
+        self._recognition_hint_due = None
+        if hint_if_no_words:
+            self._recognition_hint_due = self._last_speech + gs.CONVERSE_RECOGNITION_HINT_S
+            self._arm("converse_recognition_hint", gs.CONVERSE_RECOGNITION_HINT_S)
         self._arm("converse_idle", max(
             0.0, self._last_speech + gs.CONVERSE_IDLE_S - self._clock.now()
         ))
+
+    def _converse_recognition_hint(self) -> None:
+        due = self._recognition_hint_due
+        if self._state != _CAPTURING or due is None or self._clock.now() + _EPS < due:
+            return
+        self._recognition_hint_due = None
+        # Silence and unrecognized speech are indistinguishable here. Report
+        # what we know, not a detected utterance, and leave capture running.
+        self._recognition_hint_shown = self._emit(gs.build_converse_notice("no_words_yet"))
 
     def _converse_idle(self) -> None:
         if self._state != _CAPTURING:
@@ -3333,6 +3353,13 @@ class PetSession:
         except gs.GatewayProtocolError as err:
             self._fail(_STAGER_FAIL[err.code])
             return
+        if words:
+            self._recognition_hint_due = None
+            self._disarm("converse_recognition_hint")
+            if self._recognition_hint_shown and self._state == _CAPTURING:
+                self._recognition_hint_shown = False
+                if not self._emit(gs.build_converse_state("listening")):
+                    return
         self._last_delta = self._clock.now()
         if self._state == _SETTLING:
             self._arm_settle()
@@ -3572,9 +3599,12 @@ class PetSession:
                 ))
             return
         if ready:
-            if self._render_kind == "reply":
+            replied = self._render_kind == "reply"
+            if replied:
                 self._replies_rendered += 1
-            self._converse_listen()
+            # Do not replace a concrete refusal or unconfirmed send with a
+            # generic recognition hint after the spoken notice.
+            self._converse_listen(hint_if_no_words=replied)
         elif now - self._render_start >= gs.CONVERSE_RENDER_MAX_S - _EPS:
             # Missing ACK/audio, or speech never ended. Do not admit a new request
             # into an unknown rendering boundary; close normally, never resend.

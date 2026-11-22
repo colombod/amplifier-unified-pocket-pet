@@ -110,6 +110,7 @@ SESSION_WORK_S = 58.0  # same absolute cap; reserve two seconds for close confir
 CONVERSE_LIMIT_S = 600.0
 CONVERSE_WORK_S = 598.0  # reserve two seconds for close within the total cap, as one-turn does
 CONVERSE_IDLE_S = 90.0
+CONVERSE_RECOGNITION_HINT_S = 12.0
 CONVERSE_REPLY_MAX_S = 180.0
 CONVERSE_PROGRESS_FIRST_S = 5.0
 CONVERSE_PROGRESS_REPEAT_S = 30.0
@@ -174,9 +175,10 @@ PET_ERROR_CODES = frozenset(
 SEND_RESULT_STATES = frozenset({"accepted", "rejected", "uncertain"})
 REPLY_DONE_STATES = frozenset({"completed", "unavailable", "stopped"})
 INVALIDATED_REASONS = frozenset({"late_transcript", "stopped", "expired"})
-CONVERSE_STATES = frozenset({"listening", "asking", "answering"})
+CONVERSE_STATES = frozenset({"listening", "asking", "working", "answering"})
 CONVERSE_NOTICES = frozenset({
     "busy", "not_sent", "send_uncertain", "reply_unavailable", "idle_timeout", "time_limit",
+    "no_words_yet",
 })
 
 _RENDERING = "spoken_rendering_not_verbatim"

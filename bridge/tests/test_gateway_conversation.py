@@ -33,6 +33,7 @@ BEGAN = ('{"type":"pet.converse.began","safe_session_label":"Example conversatio
 STATES = (
     '{"type":"pet.converse.state","state":"listening"}',
     '{"type":"pet.converse.state","state":"asking"}',
+    '{"type":"pet.converse.state","state":"working"}',
     '{"type":"pet.converse.state","state":"answering"}',
 )
 NOTICES = (
@@ -42,6 +43,7 @@ NOTICES = (
     '{"type":"pet.converse.notice","code":"reply_unavailable"}',
     '{"type":"pet.converse.notice","code":"idle_timeout"}',
     '{"type":"pet.converse.notice","code":"time_limit"}',
+    '{"type":"pet.converse.notice","code":"no_words_yet"}',
 )
 
 
@@ -212,7 +214,7 @@ class ConversationTest(ConversationCase):
     async def test_two_requests_both_replies_rendered_without_preview_or_tap(self):
         for index in (1, 2):
             await self.request(index)
-            self.assertEqual(self.states()[-1], "asking")
+            self.assertEqual(self.states()[-2:], ["asking", "working"])
             await self.h.clock.advance(1.0)
             self.assertEqual(self.states()[-1], "answering")
             await self.render()
@@ -317,11 +319,34 @@ class ConversationTest(ConversationCase):
         self.assertFalse(self.h.task.done())
         await self.h.clock.advance(1)
         result = await self.h.finish()
-        self.assertEqual(self.notices(), ["idle_timeout"])
+        self.assertEqual(self.notices(), ["no_words_yet", "idle_timeout"])
         self.assertEqual(result.conversation_end, "idle_timeout")
         self.assertTrue(result.close_confirmed)
         self.assertEqual(self.h.device.close_codes, [1000])
         self.assertEqual(self.h.clock.pending, 0)
+
+    async def test_no_recognition_has_one_hint_and_never_sends(self):
+        await self.h.feed(old.audio_frame(480))
+        await self.h.clock.advance(gs.CONVERSE_RECOGNITION_HINT_S - 0.1)
+        self.assertEqual(self.notices(), [])
+        await self.h.clock.advance(0.1)
+        self.assertEqual(self.notices(), ["no_words_yet"])
+        self.assertEqual(self.states(), ["listening"])
+        await self.h.clock.advance(gs.CONVERSE_RECOGNITION_HINT_S)
+        self.assertEqual(self.notices(), ["no_words_yet"])
+        self.assertFalse(self.h.task.done())
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+        self.assertEqual((await self.stop()).requests_submitted, 0)
+
+    async def test_recognition_clears_hint_without_claiming_a_send(self):
+        await self.h.clock.advance(gs.CONVERSE_RECOGNITION_HINT_S)
+        self.assertEqual(self.notices(), ["no_words_yet"])
+        await self.h.push(old.delta("recognized", "hello", 0, 500))
+        self.assertEqual(self.states(), ["listening", "listening"])
+        await self.h.clock.advance(gs.CONVERSE_RECOGNITION_HINT_S)
+        self.assertEqual(self.notices(), ["no_words_yet"])
+        self.assertEqual(self.h.ops.count("confirm"), 0)
+        await self.stop()
 
     async def test_recognised_speech_resets_idle_even_without_delegation(self):
         await self.h.clock.advance(80)
@@ -339,7 +364,7 @@ class ConversationTest(ConversationCase):
         self.assertFalse(self.h.task.done())
         await self.h.clock.advance(0.1)
         result = await self.h.finish()
-        self.assertEqual(self.notices(), ["time_limit"])
+        self.assertEqual(self.notices(), ["no_words_yet", "time_limit"])
         self.assertEqual(result.conversation_end, "time_limit")
         self.assertTrue(result.close_confirmed)
         self.assertEqual(self.h.device.close_codes, [1000])
@@ -351,7 +376,7 @@ class ConversationTest(ConversationCase):
             await self.h.clock.advance(80)
             await self.h.push(old.delta(f"e{index}", "hi", index * 1000, index * 1000 + 500))
         await self.h.clock.advance(38)
-        self.assertEqual(self.notices(), ["time_limit"])
+        self.assertEqual(self.notices(), ["no_words_yet", "time_limit"])
         self.assertFalse(self.h.task.done())
         await self.h.clock.advance(2)
         result = await self.h.finish()
@@ -503,7 +528,7 @@ class ConversationTest(ConversationCase):
         await self.request()
         await self.h.clock.advance(179.9)
         self.assertEqual(self.notices(), [])
-        self.assertEqual(self.states()[-1], "asking")
+        self.assertEqual(self.states()[-1], "working")
         await self.h.clock.advance(0.1)
         self.assertEqual(self.notices(), ["reply_unavailable"])
         self.assertEqual(self.h.ops.count("confirm"), 1)
@@ -523,7 +548,7 @@ class ConversationTest(ConversationCase):
         )
         await self.request()
         await self.h.clock.advance(149)
-        self.assertEqual(self.states()[-1], "asking")
+        self.assertEqual(self.states()[-1], "working")
         self.assertEqual(self.notices(), [])
         self.assertFalse(self.h.task.done())
         await self.h.clock.advance(1)
@@ -544,7 +569,7 @@ class ConversationTest(ConversationCase):
         await self.request()
         await self.h.clock.advance(179.9)
         self.assertEqual(self.notices(), [])
-        self.assertEqual(self.states()[-1], "asking")
+        self.assertEqual(self.states()[-1], "working")
         await self.h.clock.advance(0.1)
         self.assertEqual(self.notices(), ["reply_unavailable"])
         polls = self.h.ops.count("poll")
@@ -565,10 +590,10 @@ class ConversationTest(ConversationCase):
             await self.h.push(old.delta(f"keep{index}", "hi", index * 1000, index * 1000 + 500))
         await self.request(10)  # accepted at 481.5, reply deadline would be 661.5
         await self.h.clock.advance(116.4)
-        self.assertEqual(self.states()[-1], "asking")
-        self.assertEqual(self.notices(), [])
+        self.assertEqual(self.states()[-1], "working")
+        self.assertEqual(self.notices(), ["no_words_yet"])
         await self.h.clock.advance(0.1)  # work stops at 598
-        self.assertEqual(self.notices(), ["time_limit"])
+        self.assertEqual(self.notices(), ["no_words_yet", "time_limit"])
         self.assertFalse(self.h.task.done())
         await self.h.clock.advance(2)  # all close work ends at 600
         result = await self.h.finish()
@@ -606,7 +631,8 @@ class ConversationTest(ConversationCase):
         self.assertEqual((result.transcript_segments, result.requests_sent, result.replies_rendered), (0, 0, 0))
 
     async def test_continuous_audio_in_both_directions_all_states_and_pacing(self):
-        for phase in ("listening", "asking", "answering"):
+        gate = self.h.ops.hold("confirm")
+        for phase in ("listening", "asking", "working", "answering"):
             self.assertEqual(self.states()[-1], phase)
             await self.h.feed(old.audio_frame(100))
             self.h.provider.push_audio(AUDIO_CANARY)
@@ -623,14 +649,17 @@ class ConversationTest(ConversationCase):
                     await self.h.feed(old.audio_frame(2400))
                     await self.h.clock.advance(0.1)
             elif phase == "asking":
+                gate.set()
+                await self.h.quiesce()
+            elif phase == "working":
                 await self.h.clock.advance(1)
         result = await self.stop()
-        self.assertEqual(result.audio_in_bytes, 600 + 15 * 4800)
-        self.assertEqual(result.audio_out_bytes, 3 * (len(AUDIO_CANARY) + 4800))
-        self.assertEqual(self.h.provider.types().count("session.input_audio.append"), 18)
+        self.assertEqual(result.audio_in_bytes, 800 + 15 * 4800)
+        self.assertEqual(result.audio_out_bytes, 4 * (len(AUDIO_CANARY) + 4800))
+        self.assertEqual(self.h.provider.types().count("session.input_audio.append"), 19)
         audio = self.h.device.of_type("session.output_audio.delta")
         self.assertEqual(b"".join(base64.b64decode(f["delta"]) for f in audio),
-                         (AUDIO_CANARY + bytes(4800)) * 3)
+                         (AUDIO_CANARY + bytes(4800)) * 4)
         self.assertLess(self.h.device.types().index("pet.converse.began"),
                         self.h.device.types().index("session.output_audio.delta"))
 
@@ -689,7 +718,8 @@ class ProgressTest(ConversationCase):
             "It's working on your request."
         ])
         self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
-        self.assertEqual(self.states(), ["listening", "asking"])
+        self.assertEqual(self.states(), ["listening", "asking"] if slow_accept else
+                         ["listening", "asking", "working"])
         return gate
 
     async def reply_once(self):
@@ -1457,7 +1487,7 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.quiesce()
         command = self.client.last_command
         self.assertEqual(self.record(command)["state"], "ACCEPTED")
-        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "asking")
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "working")
         self.assertEqual(len(self.client.named("detail")), 0)
         await self.render(fs)
         await self.clock.advance(1)
@@ -2201,7 +2231,7 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.request(fs, 1)
         command = self.client.last_command
         self.assertEqual(fs.device.of_type("pet.converse.notice"), [])
-        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "asking")
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "working")
         await self.clock.advance(1)
         await self.render(fs)
         self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "listening")
@@ -2236,7 +2266,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs2 = await self.begin_conversation()
         await self.request(fs2, 3)
         self.assertEqual(fs2.device.of_type("pet.converse.notice"), [])
-        self.assertEqual(fs2.device.of_type("pet.converse.state")[-1]["state"], "asking")
+        self.assertEqual(fs2.device.of_type("pet.converse.state")[-1]["state"], "working")
         self.assertEqual(len(self.client.posts), 2)
         self.assertNotEqual(self.client.last_command, first)
         self.assertEqual(self.record(first)["state"], "SUPPRESSED")
