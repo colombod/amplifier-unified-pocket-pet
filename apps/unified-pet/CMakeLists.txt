@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-set(PROJECT_VER "0.3.18-voice-buffer")
+set(PROJECT_VER "0.3.19-amoled-boot")
 if(PET_PRIVATE_MIC_DIAG)
-    set(PROJECT_VER "0.3.18-private-micdiag")
+    set(PROJECT_VER "0.3.19-amoled-micdiag")
     # Private configuration must never seed the normal sdkconfig.
     set(SDKCONFIG "${CMAKE_CURRENT_LIST_DIR}/build-bench/sdkconfig")
     set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.bench.defaults")
@@ -20,3 +20,14 @@ if(NOT pet_idf_version STREQUAL "v5.5.4")
 endif()
 idf_component_get_property(touch_lib pet_touch_calibration COMPONENT_LIB)
 target_compile_definitions(${touch_lib} PRIVATE PET_TOUCH_STORE_NAMESPACE="unified_pet")
+
+# Board-scoped software-reset wait. The offline cache and the component
+# manager use different target names for the same pinned Waveshare BSP.
+if(TARGET __idf_waveshare__esp32_s3_touch_amoled_1_8)
+    set(pet_bsp __idf_waveshare__esp32_s3_touch_amoled_1_8)
+elseif(TARGET __idf_esp32_s3_touch_amoled_1_8)
+    set(pet_bsp __idf_esp32_s3_touch_amoled_1_8)
+else()
+    message(FATAL_ERROR "Expected the Waveshare AMOLED 1.8 board component")
+endif()
+target_compile_definitions(${pet_bsp} PRIVATE esp_lcd_panel_reset=pet_amoled_panel_reset)

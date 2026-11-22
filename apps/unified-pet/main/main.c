@@ -10,6 +10,7 @@
 #include "nvs_flash.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
+#include "esp_lcd_panel_ops.h"
 #include "lvgl.h"
 #include "network.h"
 #include "wifi_name.h"
@@ -282,6 +283,22 @@ static void refresh(lv_timer_t *timer) {
     diag_visibility(lv_obj_has_flag(setup_panel,LV_OBJ_FLAG_HIDDEN),panel_requested);
     diag_mark(&input_diag.loop_out);
 }
+/* The V2 BSP has no LCD reset GPIO. CO5300 2.2.0 sends SWRESET and waits
+ * 80 ms. If the panel was awake (e.g. after an MCU-only reset), the CO5300
+ * SWRESET specification requires >=120 ms before the next Sleep Out.
+ * The BSP's 100 ms delay AFTER Sleep Out does not satisfy this requirement.
+ * Only the board component's call is redirected here; keep its command
+ * sequence, touch setup and pinned component sources unchanged. */
+esp_err_t pet_amoled_panel_reset(esp_lcd_panel_handle_t panel) {
+    esp_err_t err = esp_lcd_panel_reset(panel);
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(120) + 1);  /* ~200 ms total; allow for tick phase */
+    } else {
+        ESP_LOGE("pet_display", "CO5300 reset failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 void app_main(void) {
     ESP_ERROR_CHECK(audio_hardware_quiet());
     ESP_LOGI("audio_test","Boot: amplifier held off; codec/microphone not opened");
