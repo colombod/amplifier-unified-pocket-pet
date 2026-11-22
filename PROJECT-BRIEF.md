@@ -172,11 +172,15 @@ were restored and verified. No second leg or paid connection occurred.
    the audio tasks during slow reads; the snapshot alone cannot show how
    long that happened. Compare actual returned sample count, time between
    reads, and time inside reads, rather than retuning the socket buffer.
-   Use the completed provider-free core-0 baseline as the reference.
-   Before proposing any follow-up hardware measurement, verify the stop
-   guard against the saved closure evidence so it does not rely on the
-   optional numerical close code. A provider-free leg on the other audio
-   core needs its own authorization for USB and temporary gateway outage.
+   Use the completed provider-free core-0 baseline as the reference. The
+   retained core-0/priority-7 runs from 20 November reached full capture
+   cadence with LVGL sampled at priority 4 or 6, versus 63% in both
+   22 November observations with LVGL sampled at effective priority 22.
+   These are different runs, not a controlled change in LVGL priority.
+   The corrected Stop check accepted the saved user-stop and peer-closure
+   record (including the empty close payload) and rejected 14 incomplete,
+   abnormal or ambiguous variants offline. The pending decision covers
+   one provider-free leg on the other audio core, not another baseline.
    Hold codec settings, network, priority and silent playback constant.
    Reaching at least 95% of nominal cadence under comparable conditions
    makes placement a useful repair candidate; it does not prove that

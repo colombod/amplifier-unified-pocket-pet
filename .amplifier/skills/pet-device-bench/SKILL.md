@@ -47,6 +47,13 @@ exit reasons are in [references/report-format.md](references/report-format.md).
 - A report covers the first 32 seconds of a call. For longer calls use the other
   end's record.
 - `run` rejects a truncated report. Do not hand-repair one; rerun the leg.
+- Before restoring a paid-capable gateway, verify Mic Off and that the test
+  listener is released. For the supervised single-connection test, use the
+  completed device user-stop report plus the listener's confirmed peer closure
+  after `pet.stop` and `session.close`, with no reopen. An empty close payload
+  can be reported as code `0`; neither that value nor `1000` alone proves Stop.
+  If Stop is uncertain, preserve the records and do not replay or restore in a
+  way that could trigger a paid reconnect.
 
 ## Limits
 
