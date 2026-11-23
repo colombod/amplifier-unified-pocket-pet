@@ -1,7 +1,7 @@
 # Existing-Session Voice Contract — v1 (DRAFT)
 
 **Historical prototype scope, not the current product contract.** The
-[whole-product delivery contract](pocket-assistant-delivery.v1.md) and
+[whole-product delivery contract](../docs/CONTRACT.md) and
 [current brief](../PROJECT-BRIEF.md) supersede this draft's fixed-session,
 one-turn and deferred-portability scope. Preserve existing explicit-send and
 uncertain-delivery behavior until its deliberate implementation change; this
@@ -9,8 +9,8 @@ notice does not silently enable automatic sending or a new paid connection.
 
 **Who builds against this:** the person speaking to the pet, and the person who
 chose its target session; the host bridge (`bridge/`) and the device app
-(`apps/unified-pet/`), which must both keep these promises; reviewers judging the
-[first Unified milestone](../docs/milestones/existing-session-voice.md). Exact
+(`apps/unified-pet/`), which originally built this prototype; reviewers of the
+historical prototype. Exact
 device↔host frames live once in [pet-bridge-wire.v1.md](pet-bridge-wire.v1.md);
 this contract owns what the human experiences. No implementation is accepted yet.
 

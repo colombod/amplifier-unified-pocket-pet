@@ -1,8 +1,8 @@
 # Pocket Assistant — product vision
 
-**Direction:** the user's current product request, restated on 14 November 2026.
-This is the destination, not a claim of delivery. Exact commitments and their
-agreement status live in the [delivery contract](../contracts/pocket-assistant-delivery.v1.md).
+This is the product destination, not a claim of delivery. Observable promises
+and checks live in the [delivery contract](CONTRACT.md); the
+[architecture](ARCHITECTURE.md) explains how the parts fit together.
 
 The pocket pet is the user's portable voice connection to **all their authorized
 Amplifier Unified work**. Away from the computer, the user can ask what is
@@ -40,17 +40,9 @@ shape the first increment; the one-conversation demonstration does not define
 the final architecture. Every increment extends the working experience instead
 of replacing it with another experiment.
 
-## How delivery is recognized
-
-- Speak into two existing conversations in different workspaces, switch back,
-  and hear replies belonging to the right original context.
-- Ask what needs attention and answer the intended source-owned waiting question.
-- Ask for a new workspace and a new chat there; see that the requested work
-  actually starts and hear its result or honest ongoing status.
-- Use those flows on another supported Wi-Fi network over Tailscale, without the
-  private LAN path, while animation and touch remain responsive.
-- Complete repeated interactions and recover from an ordinary interruption
-  without rebooting, losing settings, replaying input or claiming false success.
+A teammate should be able to identify the board, download matching firmware
+without compiling it, set up their own gateway, and go from phone setup to a
+spoken reply. An update should leave the pet they already set up intact.
 
 ## Boundaries and ownership
 
@@ -62,6 +54,6 @@ numeric battery-life promise or new spending/deployment permission is implied.
 Those remain separate choices where genuinely needed.
 
 This follows the concise narrative-vision convention of
-[Microsoft Amplifier Converge](https://github.com/microsoft/amplifier-converge/tree/e39fe7676ba88737319bca21af78dd0f819eb8a3).
+[Microsoft Amplifier Converge](https://github.com/microsoft/amplifier-converge/blob/9c785283c6ef16782ad7847e3ef3ddc8ac7e6462/docs/writing-guide.md).
 The [original quotations](intent.md) remain preserved. This revision replaces the
 older draft's open transport choice: the user now explicitly requires Tailscale.

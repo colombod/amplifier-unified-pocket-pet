@@ -23,7 +23,7 @@ merely to start integration.
 Repository: https://github.com/colombod/amplifier-unified-pocket-pet
 
 - `milestone-1-voice` / fdd783e preserves the first user-confirmed spoken baseline,
-  firmware 0.3.5. Decisions, achievements and lessons: [milestone-1.md](milestone-1.md).
+  firmware 0.3.5. See [Architecture](ARCHITECTURE.md) for the current design.
 - PR #6 contains the device implementation plus subsequent health/review fixes.
   Consult its actual merge state and the current main commit before continuing.
 - The accepted health baseline is **0.3.8-amoled-v2-health**: the user confirmed

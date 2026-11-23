@@ -4,7 +4,7 @@
 
 Ship a portable voice interface to **all authorized Amplifier Unified work**, over Tailscale including away from home: existing conversations/workspaces, status and attention, answering waiting questions, and starting new work/workspaces. The selected-session round trip is one working increment, not a permanent binding or the whole product.
 
-Use the incremental delivery plan in `PROJECT-BRIEF.md` and promises in `contracts/pocket-assistant-delivery.v1.md`. Apply the user's requested Microsoft amplifier-converge conventions through these concise existing documents, not new enforcement machinery. Reuse existing device and Unified capabilities; do not replace the project with a new chatbot, manager runtime or orchestration framework. Each increment must produce a usable integrated outcome. An architectural change needs an evidenced obstacle to that outcome, not a preference for a new design.
+Use `docs/VISION.md` for direction, `docs/ARCHITECTURE.md` for the design and extension points, `docs/CONTRACT.md` for promises, and `PROJECT-BRIEF.md` for sequencing and evidence. Apply Microsoft Amplifier Converge through these concise documents, not new enforcement machinery. Reuse existing device and Unified capabilities; do not replace the project with a new chatbot, manager runtime or orchestration framework. Each increment must produce a usable integrated outcome. An architectural change needs an evidenced obstacle to that outcome, not a preference for a new design.
 
 Keep the normal pet UI free of diagnostic/test controls and extra Stop buttons. One clear voice control, honest state, context choice and useful Settings are sufficient. Cosmetic cleanup must not silently bypass explicit send/approval semantics. Source changes, builds, installation and physical acceptance are distinct; never claim the device changed before installation. Own ordinary repairs/checks and reuse valid evidence instead of returning the user to repeated component tests. Preserve actual Stop, paid/device limits, credentials, backups and uncertain outcomes.
 
@@ -106,11 +106,11 @@ Recheck `amplifier_web/device_pairing.py` `permits_companion` in the Unified rel
 
 ## Current promises and historical prototype references
 
-- `contracts/pocket-assistant-delivery.v1.md`: product promises and agreement
-  status; `PROJECT-BRIEF.md`: current design and delivery sequence.
-- `PINS.md` and the earlier milestone/wire documents retain prototype facts and
-  behavior references. Read relevant wire rules before changing the bridge
-  protocol; current user corrections supersede stale product scope, not actual
+- `docs/CONTRACT.md`: product promises and agreement status;
+  `docs/ARCHITECTURE.md`: component boundaries; `PROJECT-BRIEF.md`: delivery sequence and evidence.
+- `PINS.md` records current facts. `contracts/` contains historical wire drafts.
+  Read the shipped implementations and tests before changing the bridge protocol;
+  current user corrections supersede stale product scope, not actual
   send/permission boundaries. Do not auto-load archives or evidence.
 - Each promise has one home; link rather than restate. Requirements stated by
   the user are not permission to claim their approval of newly drafted wording.

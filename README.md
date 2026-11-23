@@ -29,3 +29,13 @@ The LAN preview is usable with **one selected chat and one request at a time**. 
 **Privacy and cost:** During a call, OpenAI processes microphone audio and the reply text used for speech. Voice and Unified model usage can incur charges. Check the actual chat for consequential details: spoken output is not guaranteed to be verbatim.
 
 Real spoken replies have been verified on the maintainer’s provisioned board. A separate fresh-board and fresh-host install has not yet been verified end to end. See the [delivery brief](PROJECT-BRIEF.md#delivery-sequence) for evidence and the [issue tracker](https://github.com/colombod/amplifier-unified-pocket-pet/issues) for future work.
+
+## Understand or extend Pocket Pet
+
+| Guide | Start here for |
+| --- | --- |
+| [Vision](docs/VISION.md) | The experience Pocket Pet is meant to deliver beyond the LAN preview |
+| [Architecture](docs/ARCHITECTURE.md) | The device, gateway, and Unified boundaries; hardware and build references; where to change and test each part |
+| [Delivery contract](docs/CONTRACT.md) | Product promises, their limits, and how to verify them |
+| [Setup and build guide](docs/team-prototype.md#start-here) | Exact board, firmware build, first install, preserving settings, phone setup, and offline checks |
+| [Gateway deployment](bridge/deploy/README.md) | Running the Linux service and checking the TLS listener |

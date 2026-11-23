@@ -1,22 +1,22 @@
 # Pins — hard facts for this repository
 
-Read before your first command. Facts only; rules live in `AGENTS.md`, promises in
-`contracts/`. Fix a line the moment it drifts.
+Read before your first command. Facts only; rules live in `AGENTS.md`, promises
+in `docs/CONTRACT.md`. Fix a line the moment it drifts.
 
 ## Where things are
 
 | Thing | Exact location |
 | --- | --- |
 | Standing rules | `AGENTS.md`; device app also `apps/unified-pet/AGENTS.md` |
-| Vision (DRAFT) | `docs/VISION.md` |
+| Product vision | `docs/VISION.md` |
 | Original user words | `docs/intent.md` |
-| Contracts (DRAFT) | `contracts/README.md`, `contracts/<name>.v1.md` |
-| Product promises and delivery sequence | `contracts/pocket-assistant-delivery.v1.md`, `PROJECT-BRIEF.md` (earlier single-session milestone is historical) |
-| Historical standalone voice milestone | `docs/milestone-1.md` |
+| Architecture | `docs/ARCHITECTURE.md` |
+| Product promises and delivery sequence | `docs/CONTRACT.md`, `PROJECT-BRIEF.md` |
+| Historical protocol references | `contracts/README.md` |
 | Host bridge source / tests | `bridge/pet_bridge/`, `bridge/tests/` |
 | Device app | `apps/unified-pet/`; `sh scripts/build.sh` builds it from the repository root. Root `main/` is retained for historical regression tests, not installation. |
 | Conformance ledger, kit, pre-push guard | none exist |
-| Current local product integration | `product/integration` in the GitHub-connected repository; `main` is the published base, not the installed product |
+| Published product source | `main` and release tags in the GitHub-connected repository; see `PROJECT-BRIEF.md` for the installed versions |
 | Historical two-answer comparator | Firmware `1004293` (Build 11) and gateway `8857705`; see the dated physical evidence in `PROJECT-BRIEF.md`. Not a supported release. |
 | Unified LAN preview evidence | Stock 0.119.1: four companion request shapes allowed by local package policy; real LAN call with gateway `c3349b4` and normal `0.3.19-amoled-boot`. Stock 0.119.0 was used in the prior LAN preview. Check other releases before pairing; this is not a general compatibility promise. |
 | Provider-free acoustic check | `bridge/tools/pet_link_test_host.py` and its loopback test beside it. Device and Unified voice acceptance are separate. |
@@ -35,8 +35,8 @@ Read before your first command. Facts only; rules live in `AGENTS.md`, promises 
 - Host bridge binds one explicitly selected existing Unified session; Unified and
   provider credentials stay host-side, outside Git, mode 0600.
 - Device ↔ bridge: TLS WebSocket `/v1/pet/live`, RFC 1918 IPv4 dial, FQDN
-  certificate verification, per-pet bearer token. Details:
-  `contracts/pet-bridge-wire.v1.md`.
+  certificate verification, per-pet bearer token. See `docs/ARCHITECTURE.md`
+  for the released path; the wire drafts in `contracts/` are historical.
 - Never in Git: credentials, tokens, session IDs of real sessions, flash backups,
   raw serial logs, raw audio, binaries, build outputs.
 - Builds and offline tests are not physical qualification.
