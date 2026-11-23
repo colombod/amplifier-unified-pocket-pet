@@ -825,7 +825,7 @@ class Bridge:
         if isinstance(claim, CommandResult):
             return claim
         turn, attempted, method, path, body = claim
-        return self._send_and_record(turn, attempted, method, path, body)
+        return self._send_and_record(turn, attempted, method, path, body, only_if_idle)
 
     def _claim_send(
         self, turn_id: str, digest: Any, revision: Any, only_if_idle: bool
@@ -894,12 +894,14 @@ class Bridge:
         method: str,
         path: str,
         body: bytes,
+        only_if_idle: bool,
     ) -> CommandResult:
         """Run the transport call WITHOUT the lock, then record the outcome under it."""
         interrupted: BaseException | None = None
         try:
             receipt = self._classify(
-                self._transport.send(turn.binding, method, path, body), turn
+                self._transport.send(turn.binding, method, path, body), turn,
+                only_if_idle=only_if_idle,
             )
         except Exception:  # noqa: BLE001 - injected transport boundary: any failure is uncertain
             receipt = wire.Receipt("uncertain", "transport_exception", {})
@@ -942,7 +944,7 @@ class Bridge:
         )
 
     @staticmethod
-    def _classify(reply: Any, turn: _Turn) -> wire.Receipt:
+    def _classify(reply: Any, turn: _Turn, *, only_if_idle: bool = False) -> wire.Receipt:
         if (
             not isinstance(reply, tuple)
             or len(reply) != 2
@@ -955,6 +957,7 @@ class Bridge:
             reply[1],
             session_id=turn.binding.session_id,
             command_id=turn.turn_id,
+            only_if_idle=only_if_idle,
         )
 
     def resolve_uncertain(self, command_id: str, *, operator_ack: str) -> None:

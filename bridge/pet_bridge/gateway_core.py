@@ -1598,6 +1598,7 @@ class PetSession:
         self._followups: collections.deque[tuple[gs.TranscriptStager, str | None]] = collections.deque()
         self._followup_ids: set[str] = set()
         self._draining_followup = False
+        self._followup_retried = False
         self._followup_capture = gs.FollowupCapture()
         self._followup_capture_until: float | None = None
         self._followup_audio: collections.deque[bytes] = collections.deque()
@@ -2677,6 +2678,8 @@ class PetSession:
             if isinstance(reason, str) and reason in _KNOWN_UNSENT:
                 return "refused", reason  # proof that nothing was sent
             return "uncertain", reason if isinstance(reason, str) else "unknown"
+        if value.outcome == "rejected" and value.reason == "input_busy" and value.persisted:
+            return "rejected", "input_busy"
         if value.outcome in gs.SEND_RESULT_STATES:
             return value.outcome, None
         return "uncertain", None
@@ -2708,10 +2711,16 @@ class PetSession:
                 self._progress_confirm = (state, reason)
                 return
             if state != "accepted":
+                if self._draining_followup and reason == "input_busy" and not self._followup_retried:
+                    # Unified durably rejected this guarded command with no native
+                    # input reserved. Only this receipt permits one fresh attempt.
+                    self._followup_retried = True
+                    self._arm("followup_retry", gs.POLL_INTERVAL_S)
+                    return
                 self._converse_notice(
                     "send_uncertain"
                     if state == "uncertain" or reason == "uncertain_unresolved" else
-                    "busy" if reason in _REFUSED_CODES else "not_sent"
+                    "busy" if reason in _REFUSED_CODES or reason == "input_busy" else "not_sent"
                 )
                 return
             self._send_accepted = True
@@ -2971,6 +2980,7 @@ class PetSession:
             "converse_reply": self._converse_reply_timeout,
             "converse_progress": self._converse_progress,
             "followup_preflight": self._followup_preflight,
+            "followup_retry": self._retry_followup,
             "followup_render": self._followup_render,
             "followup_capture": self._followup_capture_timeout,
         }.get(name)
@@ -3311,6 +3321,7 @@ class PetSession:
         self._reply_text = None
         self._poll_inflight = False
         self._draining_followup = False
+        self._followup_retried = False
         if self._followups:
             self._stager, delegation = self._followups.popleft()
             self._start_converse_turn(delegation)
@@ -3360,8 +3371,11 @@ class PetSession:
         self._emit(gs.build_converse_notice("queued"))
 
     def _accepts_followup_audio(self) -> bool:
-        return (self._converse and self._state in (_SENDING, _AWAIT_REPLY)
+        return self._converse and (
+            (self._draining_followup and self._state in (_SETTLING, _SENDING))
+            or (self._state in (_SENDING, _AWAIT_REPLY)
                 and self._send_state in ("inflight", "accepted"))
+        )
 
     def _capture_followup_audio(self, pcm: bytes) -> None:
         for item in self._followup_capture.feed(pcm):
@@ -3414,7 +3428,7 @@ class PetSession:
         if not self._accepts_followup_audio():
             return
         if isinstance(text, str) and text.strip():
-            self._on_complete_followup(f"local-followup-{serial}", None, text, 0, duration_ms)
+            self._on_complete_followup(self._new_event_id(), None, text, 0, duration_ms)
         else:
             self._emit(gs.build_converse_notice("not_sent"))
         self._start_followup_transcription()
@@ -3446,6 +3460,20 @@ class PetSession:
     def _followup_preflight(self) -> None:
         if self._draining_followup and self._state == _SENDING and self._send_stage == "preflight":
             self._submit("preflight", self._ops.preflight, "preflight")
+
+    def _retry_followup(self) -> None:
+        if (self._state != _SENDING or not self._draining_followup
+                or not self._followup_retried or self._send_state != "rejected"):
+            return
+        # The old command and its staged event IDs are consumed. Carry only the
+        # already closed text forward, and check the current idle admission again.
+        text = self._stager.text()
+        stager = gs.TranscriptStager()
+        stager.add(self._new_event_id(), text, 0, 1)
+        self._stager = stager
+        self._start_converse_turn(self._delegation_id)
+        self._sealing = self._begin_pending = True
+        self._submit("begin", self._ops.begin, "begin")
 
     def _converse_recognition_hint(self) -> None:
         due = self._recognition_hint_due

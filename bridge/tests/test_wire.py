@@ -201,6 +201,28 @@ class ReceiptAcceptedTest(OfflineTestCase):
             r = self.parse(200, body(accepted=False, delivery=delivery))
             self.assertEqual(r.outcome, "uncertain", delivery)
 
+    def test_only_guarded_explicit_busy_receipt_is_retryable(self):
+        busy = dict(accepted=False, delivery="failed", code="input_busy")
+        r = self.parse(200, body(**busy), command_id=CMD, only_if_idle=True)
+        self.assertEqual((r.outcome, r.reason), ("rejected", "input_busy"))
+        self.assertEqual(self.parse(200, body(**busy)).reason, "delivery_failed")
+        for status, overrides in (
+            (409, {}),
+            (202, {}),
+            (200, {"code": "input_stopped"}),
+            (200, {"code": "idle_only_unsupported"}),
+            (200, {"sessionId": "foreign"}),
+            (200, {"inputId": "foreign"}),
+            (200, {"receipt": {"code": "input_stopped"}}),
+            (200, {"delivery": "unknown"}),
+            (200, {"sessionId": ...}),
+        ):
+            with self.subTest(status=status, overrides=overrides):
+                receipt = self.parse(
+                    status, body(**(busy | overrides)), command_id=CMD, only_if_idle=True
+                )
+                self.assertNotEqual(receipt.reason, "input_busy")
+
     def test_strict_scalar_types(self):
         self.assertEqual(self.parse(200, body(accepted=1)).outcome, "uncertain")
         self.assertEqual(

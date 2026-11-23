@@ -283,6 +283,7 @@ def parse_send_receipt(
     *,
     session_id: str,
     command_id: str | None = None,
+    only_if_idle: bool = False,
 ) -> Receipt:
     """Classify one HTTP response.  Anything not provably accepted or rejected is uncertain.
 
@@ -301,7 +302,7 @@ def parse_send_receipt(
         )
         return _uncertain("runtime_pending" if pending else "gateway_timeout", status)
     if 200 <= status < 300:
-        return _classify_success(status, obj, body, session_id, command_id)
+        return _classify_success(status, obj, body, session_id, command_id, only_if_idle)
     if status in _REJECT_STATUSES:
         return _classify_rejection(status, obj, session_id, command_id)
     return _uncertain("unexpected_status", status)
@@ -333,6 +334,7 @@ def _classify_success(
     body: Any,
     session_id: str,
     command_id: str | None,
+    only_if_idle: bool,
 ) -> Receipt:
     if obj is None:
         too_big = isinstance(body, (bytes, bytearray)) and len(body) > MAX_RECEIPT_BYTES
@@ -351,6 +353,11 @@ def _classify_success(
     if accepted:
         return _success_receipt(obj, delivery, meta, status)
     if delivery == "failed":
+        nested = obj.get("receipt")
+        if (only_if_idle and status == 200 and obj.get("sessionId") == session_id
+                and obj.get("code") == "input_busy"
+                and (nested is None or nested.get("code", "input_busy") == "input_busy")):
+            return Receipt("rejected", "input_busy", meta)
         return Receipt("rejected", "delivery_failed", meta)
     return Receipt("uncertain", f"not_accepted_{delivery or 'none'}", meta)
 

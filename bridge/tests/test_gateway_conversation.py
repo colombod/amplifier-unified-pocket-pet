@@ -273,6 +273,41 @@ class ConversationTest(ConversationCase):
         self.assertEqual(self.h.ops.count("confirm"), 1)
         self.assertFalse(self.h.session._followups)
 
+    async def test_guarded_busy_receipt_retries_same_words_once_under_a_fresh_identity(self):
+        attempts = []
+
+        def confirm(turn, sha, _revision, guarded=False):
+            attempts.append((turn, sha, guarded))
+            if len(attempts) == 2:
+                return core.CommandResult(turn, "rejected", "input_busy", True)
+            return core.CommandResult(turn, "accepted", "test_accepted", True)
+
+        self.h.ops.results["confirm"] = confirm
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "speak", "reply_complete", True, self.h.ops.epoch, f"Answer for {turn}."
+        )
+        await self.request()
+        await self.complete_followup("Second", 2000)
+        await self.complete_followup("Third", 3000)
+        await self.h.clock.advance(1)
+        await self.render()
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.notices(), ["queued", "queued"])
+        await self.h.clock.advance(gs.POLL_INTERVAL_S)
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(attempts[1][1:], attempts[2][1:])
+        self.assertTrue(attempts[2][2])
+        self.assertNotEqual(attempts[1][0], attempts[2][0])
+        await self.h.clock.advance(1)
+        await self.render()
+        self.assertEqual(len(attempts), 4)
+        self.assertNotEqual(attempts[3][1], attempts[2][1])
+        await self.h.clock.advance(1)
+        await self.render()
+        result = await self.stop()
+        self.assertEqual((result.requests_accepted, result.replies_rendered), (3, 3))
+        self.assertEqual(self.notices(), ["queued", "queued"])
+
     async def test_uncertain_send_discards_retained_followups_without_fallback(self):
         self.h.ops.results["confirm"] = core.CommandResult(
             TURN, "uncertain", "transport_exception", False
