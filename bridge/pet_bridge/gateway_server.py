@@ -38,6 +38,7 @@ import dataclasses
 import errno
 import hashlib
 import hmac
+import io
 import os
 import re
 import signal
@@ -46,6 +47,7 @@ import ssl
 import stat
 import time
 import uuid
+import wave
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -732,6 +734,48 @@ async def connect_provider(key: Secret, *, timeout: float) -> AiohttpProviderLin
     raise ProviderError(failure)
 
 
+async def _transcribe_followup(key: Secret, pcm: bytes) -> str | None:
+    """One bounded transcription of an already closed item; no retries or audio files."""
+    if not 0 < len(pcm) <= gs.FOLLOWUP_PCM_MAX or len(pcm) % 2:
+        return None
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as stream:
+        stream.setparams((1, 2, gs.AUDIO_BYTES_PER_S // 2, 0, "NONE", "not compressed"))
+        stream.writeframes(pcm)
+    form = aiohttp.FormData()
+    form.add_field("model", "gpt-4o-transcribe")
+    form.add_field("response_format", "json")
+    form.add_field("file", wav.getvalue(), filename="utterance.wav", content_type="audio/wav")
+    cap = 32768
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=_client_ssl()),
+            timeout=aiohttp.ClientTimeout(total=8),
+            trust_env=False,
+            auto_decompress=False,
+        ) as session:
+            async with session.post(
+                gp.FOLLOWUP_TRANSCRIPTION_URL,
+                headers={"Authorization": "Bearer " + key.reveal(), "Accept-Encoding": "identity"},
+                data=form,
+                allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    return None
+                data = bytearray()
+                async for chunk in response.content.iter_chunked(4096):
+                    if len(data) + len(chunk) > cap:
+                        return None
+                    data.extend(chunk)
+        obj = gs.strict_loads(bytes(data), max_bytes=cap, max_depth=6)
+        text = obj.get("text") if isinstance(obj, dict) else None
+        if isinstance(text, str) and len(text.strip()) <= gs.MAX_TRANSCRIPT_CHARS:
+            return text.strip() or None
+    except (aiohttp.ClientError, TimeoutError, ValueError, gs.GatewayProtocolError):
+        return None
+    return None
+
+
 # -- site ------------------------------------------------------------------------------
 class _NullLogger:
     """Absorbs aiohttp's server logging so nothing request-shaped is ever formatted."""
@@ -1178,8 +1222,12 @@ class _Gateway:
         async def connect() -> Any:
             return await self._connect(remaining=session.provider_start_remaining)
 
+        async def transcribe(pcm: bytes) -> str | None:
+            return await _transcribe_followup(self._key, pcm)
+
         session = PetSession(
-            device, connect, self._runner, self._ops, self._settings, self._deps.clock()
+            device, connect, self._runner, self._ops, self._settings, self._deps.clock(),
+            transcribe_followup=transcribe if self._cfg.queued_followups else None,
         )
         return session
 

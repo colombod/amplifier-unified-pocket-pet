@@ -121,6 +121,107 @@ class ConversationCase(OfflineAsyncCase):
         return result
 
 
+class MicrophoneFollowupTest(ConversationCase):
+    async def pcm(self, sample: int, packets: int) -> None:
+        pcm = sample.to_bytes(2, "little", signed=True) * 2400
+        for _ in range(packets):
+            await self.h.feed({
+                "type": "session.input_audio.append",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            })
+
+    async def test_two_distinct_wire_utterances_enter_fifo_without_competing_live_input(self):
+        import hashlib
+
+        gate = asyncio.Event()
+        items = []
+
+        async def transcribe(pcm):
+            items.append(pcm)
+            if len(items) == 1:
+                await gate.wait()
+                return "Second question"
+            return "Third question"
+
+        self.h.session._transcribe_followup = transcribe
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "speak", "reply_complete", True, self.h.ops.epoch, f"Answer for {turn}."
+        )
+        await self.request()
+        await self.pcm(0, 8)
+        self.assertEqual(items, [])
+        await self.pcm(900, 3)
+        self.assertEqual(items, [])  # no fake completion at the last wire frame
+        await self.pcm(0, 7)
+        await self.pcm(-1200, 3)
+        await self.pcm(0, 7)
+        await self.h.clock.advance(1.2)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertEqual(self.h.provider.of_type("session.commentary.append"), [])
+        self.assertTrue(all(
+            not any(base64.b64decode(row["audio"]))
+            for row in self.h.provider.of_type("session.input_audio.append")
+        ))
+        gate.set()
+        await self.h.quiesce()
+        self.assertEqual(len(items), 2)
+        self.assertIn((900).to_bytes(2, "little", signed=True) * 480, items[0])
+        self.assertIn((-1200).to_bytes(2, "little", signed=True) * 480, items[1])
+        self.assertEqual(self.notices(), ["queued", "queued"])
+        for sends_expected in (2, 3, 3):
+            await self.h.clock.advance(1.2)
+            await self.render()
+            self.assertEqual(self.h.ops.count("confirm"), sends_expected)
+
+        sends = [args for op, args, _ in self.h.ops.calls if op == "confirm"]
+        self.assertEqual([args[1] for args in sends], [
+            hashlib.sha256(text.encode()).hexdigest()
+            for text in ("request 1", "Second question", "Third question")
+        ])
+        self.assertTrue(all(args[3] is True for args in sends[1:]))
+        replies = self.h.provider.of_type("session.commentary.append")
+        self.assertEqual([row["content"] for row in replies], [
+            f"Answer for {args[0]}." for args in sends
+        ])
+        self.assertEqual([row["delegation_id"] for row in replies], ["dlg_1", None, None])
+        result = await self.stop()
+        self.assertEqual((result.requests_accepted, result.replies_rendered), (3, 3))
+
+    async def test_stop_cancels_pending_transcription_and_fences_its_late_result(self):
+        cancelled = asyncio.Event()
+
+        async def finishing_after_cancel(_pcm):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                return "Must never enter the queue"
+
+        self.h.session._transcribe_followup = finishing_after_cancel
+        await self.request()
+        await self.pcm(900, 3)
+        await self.pcm(0, 7)
+        await self.pcm(-1200, 3)
+        await self.pcm(0, 7)
+        await self.stop()
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertNotIn("queued", self.notices())
+        self.assertFalse(self.h.session._followup_audio)
+
+    def test_capture_discards_overlong_audio_not_a_truncated_request(self):
+        capture = gs.FollowupCapture()
+        frame = (900).to_bytes(2, "little") * 2400
+        events = [event for _ in range(95) for event in capture.feed(frame)]
+        self.assertEqual(events, [None])
+        self.assertEqual(capture.feed(bytes(gs.AUDIO_BYTES_PER_S)), [])
+        events = [event for pcm in [frame] * 3 + [bytes(len(frame))] * 7
+                  for event in capture.feed(pcm)]
+        self.assertEqual(len(events), 1)
+        self.assertIsInstance(events[0], bytes)
+
+
 class ConversationTest(ConversationCase):
     async def complete_followup(self, word, start_ms):
         self.h.session._post_external((

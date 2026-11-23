@@ -1463,6 +1463,7 @@ class PetSession:
         clock: LoopClock,
         *,
         new_event_id: Callable[[], str] = gp.new_event_id,
+        transcribe_followup: Callable[[bytes], Awaitable[str | None]] | None = None,
     ) -> None:
         self._device = device
         self._provider_connect = provider_connect
@@ -1471,6 +1472,7 @@ class PetSession:
         self._settings = settings
         self._clock = clock
         self._new_event_id = new_event_id
+        self._transcribe_followup = transcribe_followup
         self._state = _AWAIT_START
         self._closed_for_recovery = threading.Event()
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -1593,13 +1595,19 @@ class PetSession:
         self._request_seq = 0
         self._notice_code: str | None = None
         # Call-local: never loaded from the journal or a prior connection.
-        self._followups: collections.deque[tuple[gs.TranscriptStager, str]] = collections.deque()
+        self._followups: collections.deque[tuple[gs.TranscriptStager, str | None]] = collections.deque()
         self._followup_ids: set[str] = set()
         self._draining_followup = False
+        self._followup_capture = gs.FollowupCapture()
+        self._followup_capture_until: float | None = None
+        self._followup_audio: collections.deque[bytes] = collections.deque()
+        self._followup_job: asyncio.Task[Any] | None = None
+        self._followup_serial = 0
         self._events: dict[str, Callable[..., None]] = {
             "device": self._on_device,
             "provider": self._on_provider,
             "complete_followup": self._on_complete_followup,
+            "followup_transcribed": self._on_followup_transcribed,
             "op": self._on_op,
             "confirm_done": self._on_confirm_done,
             "started_sent": self._on_started_sent,
@@ -2122,6 +2130,7 @@ class PetSession:
             return
         self._closed_for_recovery.set()
         self._followups.clear()
+        self._cancel_followup_capture()
         self._settle_unsent_send()
         now = self._clock.now()
         if self._input_wait_end is None:
@@ -2354,8 +2363,16 @@ class PetSession:
             self._fail("overflow")
             return
         assert frame.b64 is not None
+        b64 = frame.b64
+        if self._converse and self._transcribe_followup is not None:
+            # The recognizer owns busy-time speech. Keep the Live stream clock
+            # advancing without giving its delegation model a second copy.
+            if self._accepts_followup_audio():
+                self._capture_followup_audio(base64.b64decode(b64))
+            if self._state not in (_CAPTURING, _SETTLING) or self._draining_followup:
+                b64 = base64.b64encode(bytes(frame.pcm_len)).decode("ascii")
         sent = self._pout.put(
-            gp.build_provider_audio(frame.b64),
+            gp.build_provider_audio(b64),
             audio=frame.pcm_len,
             tag=f"audio:{frame.pcm_len}",
         )
@@ -2806,6 +2823,11 @@ class PetSession:
             self._finish_reply("unavailable")
             self._begin_close(1000)
             return
+        if self._waiting_for_followup_audio():
+            # A reply must not mask speech already in capture. Keep the
+            # existing absolute reply deadline, including this bounded wait.
+            self._arm("followup_render", 0.1)
+            return
         self._start_speaking()
 
     def _start_speaking(self) -> None:
@@ -2949,6 +2971,8 @@ class PetSession:
             "converse_reply": self._converse_reply_timeout,
             "converse_progress": self._converse_progress,
             "followup_preflight": self._followup_preflight,
+            "followup_render": self._followup_render,
+            "followup_capture": self._followup_capture_timeout,
         }.get(name)
         if handler is not None:
             handler()
@@ -3271,6 +3295,7 @@ class PetSession:
         self._progress_disabled = False
         self._progress_poll = None
         self._progress_confirm = None
+        self._cancel_followup_capture()
         self._request_seq += 1
         self._state = _CAPTURING
         self._stager = gs.TranscriptStager()
@@ -3309,31 +3334,114 @@ class PetSession:
         ))
 
     def _on_complete_followup(
-        self, event_id: str, delegation: str, text: str, start_ms: int, end_ms: int,
+        self, event_id: str, delegation: str | None, text: str, start_ms: int, end_ms: int,
     ) -> None:
-        """Internal recognizer boundary; neither wire parser can emit this event.
-
-        The producer must supply finite utterances in microphone order, with a
-        distinct client delegation for each. A provider delta, quiet timer, or
-        delegation hint alone is deliberately not a producer of this event.
-        """
-        if (not self._converse or self._state not in (_SENDING, _AWAIT_REPLY)
-                or self._send_state not in ("inflight", "accepted")):
+        """Admit only a completed transcription, never Live fragments."""
+        if not self._accepts_followup_audio():
             return
         stager = gs.TranscriptStager()
         try:
             stager.add(event_id, text, start_ms, end_ms)
         except gs.GatewayProtocolError:
             return
-        if (start_ms == end_ms or not text.strip() or not gs.is_event_id(delegation)
-                or delegation == self._delegation_id or delegation in self._followup_ids):
+        if (start_ms == end_ms or not text.strip()
+                or (delegation is not None and (
+                    not gs.is_event_id(delegation) or delegation == self._delegation_id
+                ))):
+            return
+        identity = delegation if delegation is not None else event_id
+        if identity in self._followup_ids:
             return
         if len(self._followups) >= _FOLLOWUP_CAP or len(self._followup_ids) >= 1024:
             self._emit(gs.build_converse_notice("not_sent"))
             return
-        self._followup_ids.add(delegation)
+        self._followup_ids.add(identity)
         self._followups.append((stager, delegation))
         self._emit(gs.build_converse_notice("queued"))
+
+    def _accepts_followup_audio(self) -> bool:
+        return (self._converse and self._state in (_SENDING, _AWAIT_REPLY)
+                and self._send_state in ("inflight", "accepted"))
+
+    def _capture_followup_audio(self, pcm: bytes) -> None:
+        for item in self._followup_capture.feed(pcm):
+            outstanding = len(self._followups) + len(self._followup_audio)
+            outstanding += self._followup_job is not None
+            if (item is None or outstanding >= _FOLLOWUP_CAP
+                    or self._followup_serial + len(self._followup_audio) >= 12):
+                self._emit(gs.build_converse_notice("not_sent"))
+                continue
+            self._followup_audio.append(item)
+            self._start_followup_transcription()
+        if self._followup_capture.active:
+            if self._followup_capture_until is None:
+                self._followup_capture_until = self._clock.now() + 9.0
+                self._arm("followup_capture", 9.0)
+        else:
+            self._followup_capture_until = None
+            self._disarm("followup_capture")
+
+    def _followup_capture_timeout(self) -> None:
+        until = self._followup_capture_until
+        if until is None or self._clock.now() + _EPS < until:
+            return
+        self._followup_capture_until = None
+        self._followup_capture = gs.FollowupCapture()
+        self._emit(gs.build_converse_notice("not_sent"))
+
+    def _start_followup_transcription(self) -> None:
+        if self._followup_job is not None or not self._followup_audio:
+            return
+        pcm = self._followup_audio.popleft()
+        self._followup_serial += 1
+        self._followup_job = self._spawn(self._recognize_followup(self._followup_serial, pcm))
+
+    async def _recognize_followup(self, serial: int, pcm: bytes) -> None:
+        transcribe = self._transcribe_followup
+        assert transcribe is not None
+        try:
+            async with asyncio.timeout(10.0):
+                text = await transcribe(pcm)
+        except Exception:
+            text = None  # Never emit audio, transcript or provider errors in diagnostics.
+        # Honor Stop frames already read before the recognizer returned.
+        self._post_external(("followup_transcribed", serial, text, len(pcm) // 48))
+
+    def _on_followup_transcribed(self, serial: int, text: str | None, duration_ms: int) -> None:
+        if self._followup_job is None or serial != self._followup_serial:
+            return  # result from a cancelled recognition
+        self._followup_job = None
+        if not self._accepts_followup_audio():
+            return
+        if isinstance(text, str) and text.strip():
+            self._on_complete_followup(f"local-followup-{serial}", None, text, 0, duration_ms)
+        else:
+            self._emit(gs.build_converse_notice("not_sent"))
+        self._start_followup_transcription()
+
+    def _cancel_followup_capture(self) -> None:
+        if self._transcribe_followup is None:
+            return
+        self._followup_capture = gs.FollowupCapture()
+        self._followup_capture_until = None
+        self._disarm("followup_capture")
+        self._disarm("followup_render")
+        self._followup_audio.clear()
+        if self._followup_job is not None:
+            self._followup_job.cancel()
+            self._followup_job = None
+
+    def _waiting_for_followup_audio(self) -> bool:
+        return self._followup_capture.active or self._followup_job is not None
+
+    def _followup_render(self) -> None:
+        if self._state != _AWAIT_REPLY or self._reply_text is None:
+            return
+        if self._waiting_for_followup_audio():
+            self._arm("followup_render", 0.1)
+            return
+        epoch = self._reply_epoch
+        self._submit("epoch_current", lambda: self._ops.epoch_current(epoch), "epoch_pre")
 
     def _followup_preflight(self) -> None:
         if self._draining_followup and self._state == _SENDING and self._send_stage == "preflight":
@@ -3448,7 +3556,7 @@ class PetSession:
         self._start_converse_turn(ident)
         self._arm_settle()
 
-    def _start_converse_turn(self, ident: str) -> None:
+    def _start_converse_turn(self, ident: str | None) -> None:
         self._turn_id = None
         self._send_state = None
         self._send_stage = ""
@@ -3506,6 +3614,7 @@ class PetSession:
             self._converse_notice("not_sent")  # delegation without recognised words
 
     def _converse_notice(self, code: str, *, timed_out: bool = False) -> None:
+        self._cancel_followup_capture()
         if self._followups:
             self._followups.clear()
             if not self._emit(gs.build_converse_notice("not_sent")):
@@ -3551,7 +3660,8 @@ class PetSession:
     def _converse_progress(self) -> None:
         # The absolute due time rejects an already-posted timer from an older
         # request. Listening clears it; no progress path can submit Unified work.
-        if (not self._converse or self._progress_disabled or self._progress_due is None
+        if (not self._converse or self._transcribe_followup is not None
+                or self._progress_disabled or self._progress_due is None
                 or self._clock.now() + _EPS < self._progress_due
                 or self._state not in (_SENDING, _AWAIT_REPLY)
                 or self._send_state not in ("inflight", "accepted")
@@ -3601,11 +3711,13 @@ class PetSession:
 
     def _converse_render(self, text: str, *, kind: str) -> None:
         delegation = self._delegation_id
+        if delegation is None and not self._draining_followup:
+            delegation = ""  # retain the provider delegation check for the normal path
         try:
             chunks = gs.chunk_commentary(text)
             ids = tuple(self._new_event_id() for _ in chunks)
             frames = [
-                gp.build_commentary(ident, delegation or "", chunk)
+                gp.build_commentary(ident, delegation, chunk)
                 for ident, chunk in zip(ids, chunks, strict=True)
             ]
         except ValueError:

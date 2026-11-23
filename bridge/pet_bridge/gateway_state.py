@@ -90,6 +90,7 @@ import json
 import math
 import os
 import re
+import struct
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -142,6 +143,7 @@ POLL_MAX_S = 60.0
 ACK_WAIT_S = 10.0
 INBOX_CAP = 256
 MAX_TRANSCRIPT_CHARS = 4000
+FOLLOWUP_PCM_MAX = 8 * AUDIO_BYTES_PER_S
 MAX_SEGMENTS = 128
 COMMENTARY_CHUNK_BYTES = 480
 MAX_COMMENTARY_CHUNKS = 64
@@ -646,6 +648,56 @@ def _is_ms(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
+class FollowupCapture:
+    """Bounded PCM16 capture; only quiet samples (not a packet gap) close an item."""
+
+    _FRAME = AUDIO_BYTES_PER_S // 50
+    _SILENCE = 30  # 600 ms
+
+    def __init__(self) -> None:
+        self._pending = b""
+        self._preroll = b""
+        self._pcm = bytearray()
+        self._voice = self._quiet = self._discard = 0
+
+    @property
+    def active(self) -> bool:
+        return bool(self._pcm)
+
+    def feed(self, pcm: bytes) -> list[bytes | None]:
+        data = self._pending + pcm
+        completed: list[bytes | None] = []
+        end = len(data) // self._FRAME * self._FRAME
+        self._pending = data[end:]
+        for offset in range(0, end, self._FRAME):
+            frame = data[offset:offset + self._FRAME]
+            energy = sum(v * v for (v,) in struct.iter_unpack("<h", frame))
+            voiced = energy >= 220 ** 2 * (self._FRAME // 2)
+            if self._discard:
+                self._discard = self._SILENCE if voiced else self._discard - 1
+                continue
+            if not self._pcm and not voiced:
+                self._preroll = (self._preroll + frame)[-5 * self._FRAME:]
+                continue
+            if not self._pcm:
+                self._pcm.extend(self._preroll)
+                self._preroll = b""
+            self._pcm.extend(frame)
+            self._voice += voiced
+            self._quiet = 0 if voiced else self._quiet + 1
+            if self._quiet == self._SILENCE:
+                if self._voice >= 8:
+                    completed.append(bytes(self._pcm))
+                self._pcm.clear()
+                self._quiet = self._voice = 0
+            elif len(self._pcm) >= FOLLOWUP_PCM_MAX:
+                completed.append(None)
+                self._pcm.clear()
+                self._quiet = self._voice = 0
+                self._discard = self._SILENCE
+        return completed
+
+
 class TranscriptStager:
     """Stage provider transcript deltas before anything reaches the core.
 
@@ -836,7 +888,7 @@ _CONFIG_REQUIRED = frozenset(
 _CONFIG_OPTIONAL = frozenset(
     {
         "model", "voice", "provider_key_file", "provider_key_env", "auth_root",
-        "tailnet_bind_host", "tailnet_fqdn",
+        "tailnet_bind_host", "tailnet_fqdn", "queued_followups",
     }
 )
 _PATH_MAX = 4096
@@ -866,6 +918,7 @@ class GatewayConfig:
     auth_root: str | None = field(default=None, repr=False)
     tailnet_bind_host: str | None = None
     tailnet_fqdn: str | None = None
+    queued_followups: bool = False
 
 
 def _private_ipv4(value: Any) -> bool:
@@ -963,6 +1016,7 @@ def _config_defects(doc: dict[str, Any]) -> bool:
         _tokens_ok(doc["pet_token_sha256"]),
         _matches(_MODEL_RE, doc.get("model", DEFAULT_MODEL)),
         _matches(_VOICE_RE, doc.get("voice", DEFAULT_VOICE)),
+        type(doc.get("queued_followups", False)) is bool,
         _abs_path(doc["provider_key_file"]) if "provider_key_file" in doc else True,
         _matches(_ENV_NAME_RE, doc["provider_key_env"])
         if "provider_key_env" in doc
@@ -1010,6 +1064,7 @@ def parse_config(doc: Any) -> GatewayConfig:
         auth_root=doc.get("auth_root"),
         tailnet_bind_host=doc.get("tailnet_bind_host"),
         tailnet_fqdn=doc.get("tailnet_fqdn"),
+        queued_followups=doc.get("queued_followups", False),
     )
 
 
@@ -1021,6 +1076,7 @@ def parse_config(doc: Any) -> GatewayConfig:
 ENV_PROVIDER_KEY = "POCKET_GATEWAY_PROVIDER_KEY"
 _ENV_TOKENS = "POCKET_GATEWAY_PET_TOKEN_SHA256"
 _ENV_INT = {"POCKET_GATEWAY_CONFIG_VERSION": "version", "POCKET_GATEWAY_PORT": "port"}
+_ENV_FOLLOWUPS = "POCKET_GATEWAY_QUEUED_FOLLOWUPS"
 _ENV_TEXT = {
     "POCKET_GATEWAY_STATE_ROOT": "state_root",
     "POCKET_GATEWAY_AUTH_ROOT": "auth_root",
@@ -1037,7 +1093,9 @@ _ENV_TEXT = {
     "POCKET_GATEWAY_VOICE": "voice",
     "POCKET_GATEWAY_PROVIDER_KEY_FILE": "provider_key_file",
 }
-ENV_CONFIG_NAMES = frozenset(_ENV_TEXT) | frozenset(_ENV_INT) | {_ENV_TOKENS, ENV_PROVIDER_KEY}
+ENV_CONFIG_NAMES = (
+    frozenset(_ENV_TEXT) | frozenset(_ENV_INT) | {_ENV_TOKENS, _ENV_FOLLOWUPS, ENV_PROVIDER_KEY}
+)
 _ENV_LINE_RE = re.compile(r"([A-Z][A-Z0-9_]{0,63})=(.*)")
 _ENV_EDGE = frozenset(" \"'")
 
@@ -1084,6 +1142,10 @@ def env_config_document(text: Any) -> tuple[dict[str, Any], str | None]:
             doc[_ENV_INT[name]] = int(value)
         elif name == _ENV_TOKENS:
             doc["pet_token_sha256"] = value.split(",")
+        elif name == _ENV_FOLLOWUPS:
+            if value not in ("true", "false"):
+                raise invalid
+            doc["queued_followups"] = value == "true"
         elif name == ENV_PROVIDER_KEY:
             doc["provider_key_env"] = ENV_PROVIDER_KEY
             inline_key = value

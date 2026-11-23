@@ -1541,6 +1541,75 @@ class ProviderLinkTest(OfflineAsyncCase):
 # =================================================================================
 # connect_provider
 # =================================================================================
+class FollowupTranscriptionTest(OfflineAsyncCase):
+    async def test_one_fixed_tls_request_carries_the_closed_pcm_as_wav(self):
+        import wave
+
+        pcm = b"\x83\x03" * 2400
+        form = mock.Mock()
+        session = mock.MagicMock()
+        session.__aenter__.return_value = session
+        response = session.post.return_value.__aenter__.return_value
+        response.status = 200
+
+        async def chunks(_size):
+            yield b'{"text":'
+            yield b'" second question "}'
+
+        response.content.iter_chunked = chunks
+        with (
+            mock.patch.object(aiohttp, "FormData", return_value=form),
+            mock.patch.object(aiohttp, "TCPConnector") as connector,
+            mock.patch.object(aiohttp, "ClientSession", return_value=session) as factory,
+            mock.patch.object(gsv, "_client_ssl") as tls,
+        ):
+            text = await gsv._transcribe_followup(gsv.Secret(KEY_CANARY), pcm)
+            self.assertEqual(text, "second question")
+            connector.assert_called_once_with(ssl=tls.return_value)
+            self.assertFalse(factory.call_args.kwargs["trust_env"])
+            self.assertEqual(factory.call_args.kwargs["timeout"].total, 8)
+            session.post.assert_called_once_with(
+                "https://api.openai.com/v1/audio/transcriptions",
+                data=form, allow_redirects=False,
+                headers={"Authorization": "Bearer " + KEY_CANARY, "Accept-Encoding": "identity"},
+            )
+            self.assertEqual(form.add_field.call_args_list[:2], [
+                mock.call("model", "gpt-4o-transcribe"), mock.call("response_format", "json"),
+            ])
+            args, kwargs = form.add_field.call_args_list[2]
+            self.assertEqual(args[0], "file")
+            self.assertEqual(kwargs, {"filename": "utterance.wav", "content_type": "audio/wav"})
+            with wave.open(io.BytesIO(args[1]), "rb") as audio:
+                self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()),
+                                 (1, 2, 24000))
+                self.assertEqual(audio.readframes(2400), pcm)
+
+    async def test_redirect_invalid_json_and_oversize_never_produce_text(self):
+        for status, body in (
+            (307, b'{"text":"never follow a redirect"}'),
+            (200, b'{"text":"a","text":"b"}'),
+            (200, b"x" * 32769),
+        ):
+            with self.subTest(status=status, length=len(body)):
+                session = mock.MagicMock()
+                session.__aenter__.return_value = session
+                response = session.post.return_value.__aenter__.return_value
+                response.status = status
+
+                async def chunks(_size):
+                    yield body
+
+                response.content.iter_chunked = chunks
+                with (
+                    mock.patch.object(aiohttp, "TCPConnector"),
+                    mock.patch.object(aiohttp, "ClientSession", return_value=session),
+                    mock.patch.object(gsv, "_client_ssl"),
+                ):
+                    self.assertIsNone(await gsv._transcribe_followup(gsv.Secret(KEY_CANARY), b"\x01\0"))
+                session.post.assert_called_once()
+                self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
+
+
 class ConnectProviderTest(OfflineAsyncCase):
     def setUp(self) -> None:
         super().setUp()

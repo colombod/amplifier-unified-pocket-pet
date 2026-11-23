@@ -68,6 +68,7 @@ JSON_TO_ENV = {
     "pet_token_sha256": "POCKET_GATEWAY_PET_TOKEN_SHA256",
     "model": "POCKET_GATEWAY_MODEL",
     "voice": "POCKET_GATEWAY_VOICE",
+    "queued_followups": "POCKET_GATEWAY_QUEUED_FOLLOWUPS",
     "provider_key_file": "POCKET_GATEWAY_PROVIDER_KEY_FILE",
 }
 OTHER_HASH = "c" * 64
@@ -80,6 +81,8 @@ def env_text(doc: dict[str, Any], *, inline_key: str | None = None) -> str:
         if key == "provider_key_env":
             continue
         text = ",".join(value) if key == "pet_token_sha256" else str(value)
+        if key == "queued_followups" and type(value) is bool:
+            text = str(value).lower()
         lines.append(f"{JSON_TO_ENV[key]}={text}")
     if inline_key is not None:
         lines.append(f"{INLINE}={inline_key}")
@@ -95,6 +98,7 @@ def full_doc(base: Path, **changes: Any) -> dict[str, Any]:
         tailnet_fqdn="gateway.example.test",
         model="gpt-live-2",
         voice="cedar",
+        queued_followups=True,
         pet_token_sha256=[config_doc(base)["pet_token_sha256"][0], OTHER_HASH],
         **changes,
     )
@@ -270,7 +274,7 @@ class LoadEnvConfigTest(ServerOfflineCase):
                     (set(doc) - {"version"}) | {
                         "session_id_short", "model", "voice", "provider_key_file",
                         "provider_key_env", "auth_root", "tailnet_bind_host",
-                        "tailnet_fqdn"},
+                        "tailnet_fqdn", "queued_followups"},
                 )
 
     def test_the_inline_key_equals_the_json_named_variable_and_is_a_hidden_secret(self):
@@ -1088,6 +1092,7 @@ class EnvExampleTest(ServerOfflineCase):
         "POCKET_GATEWAY_PORT": "9443",
         "POCKET_GATEWAY_MODEL": gs.DEFAULT_MODEL,
         "POCKET_GATEWAY_VOICE": gs.DEFAULT_VOICE,
+        "POCKET_GATEWAY_QUEUED_FOLLOWUPS": "false",
     }
 
     def entries(self) -> list[tuple[bool, str, str, str]]:
@@ -1161,6 +1166,9 @@ class EnvExampleTest(ServerOfflineCase):
         """The example with each placeholder replaced by a synthetic value from ``doc``."""
         by_name = {JSON_TO_ENV[k]: (",".join(v) if isinstance(v, list) else str(v))
                    for k, v in doc.items() if k in JSON_TO_ENV}
+        if "queued_followups" in doc:
+            name = JSON_TO_ENV["queued_followups"]
+            by_name[name] = by_name[name].lower()
         out = []
         for line in EXAMPLE.read_text(encoding="utf-8").split("\n"):
             match = self.ASSIGN.fullmatch(line)

@@ -66,6 +66,7 @@ from . import gateway_state as _state
 from . import wire
 
 PROVIDER_URL = "wss://api.openai.com/v1/live/sessions"
+FOLLOWUP_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions"
 
 _COMMENTARY_MAX_BYTES = 480
 PROVIDER_ERROR_CODE = "provider_error"  # the only error code ever kept (fixed, local)
@@ -179,8 +180,10 @@ def build_provider_audio(b64: str) -> str:
     return _dump({"type": "session.input_audio.append", "audio": b64})
 
 
-def build_commentary(event_id: str, delegation_id: str, content: str) -> str:
-    if not _state.is_event_id(event_id) or not _state.is_event_id(delegation_id):
+def build_commentary(event_id: str, delegation_id: str | None, content: str) -> str:
+    if not _state.is_event_id(event_id) or (
+        delegation_id is not None and not _state.is_event_id(delegation_id)
+    ):
         raise ValueError("invalid id")
     if not isinstance(content, str):
         raise ValueError("invalid content")

@@ -176,11 +176,17 @@ class ProviderBuilderTest(OfflineTestCase):
             ):
                 gp.build_commentary("gw_e1", "d", content)
 
-    def test_t_prov_commentary_requires_both_ids_in_event_id_format(self):
+    def test_t_prov_commentary_allows_null_delegation_for_session_context(self):
+        self.assertEqual(
+            gp.build_commentary("gw_e1", None, "hi"),
+            '{"type":"session.commentary.append","event_id":"gw_e1",'
+            '"delegation_id":null,"content":"hi"}',
+        )
+
+    def test_t_prov_commentary_requires_non_null_ids_in_event_id_format(self):
         for event_id, delegation_id in (
             ("", "d"),
             ("bad id", "d"),
-            ("gw_e1", None),
             ("gw_e1", ""),
             ("gw_e1", "bad id"),
             (None, "d"),
