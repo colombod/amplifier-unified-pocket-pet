@@ -1,0 +1,83 @@
+{
+  "clean": {
+    "about": "Healthy link, 4 ms round trip: listen, a 5 s answer, listen, mic off.",
+    "link": "delay:both:0:0:2",
+    "answers": [
+      {
+        "at_ms": 4000,
+        "ms": 5000
+      }
+    ],
+    "mic_off_ms": 14000,
+    "expect": "survives"
+  },
+  "talk-rtt60": {
+    "about": "60 ms round trip through one answer. f4f5e76: microphone buffer overflows during the answer and the call ends.",
+    "link": "delay:both:0:0:30",
+    "answers": [
+      {
+        "at_ms": 4000,
+        "ms": 5000
+      }
+    ],
+    "mic_off_ms": 14000,
+    "expect": "survives"
+  },
+  "talk-rtt160": {
+    "about": "160 ms round trip through one answer.",
+    "link": "delay:both:0:0:80",
+    "answers": [
+      {
+        "at_ms": 4000,
+        "ms": 5000
+      }
+    ],
+    "mic_off_ms": 14000,
+    "expect": "survives"
+  },
+  "listen-rtt160": {
+    "about": "160 ms round trip, microphone only: no reply traffic and no lock contention.",
+    "link": "delay:both:0:0:80",
+    "answers": [],
+    "mic_off_ms": 10000,
+    "expect": "survives"
+  },
+  "loss-0.5pct": {
+    "about": "10 ms round trip with 0.5% packet loss each way after any radio retries.",
+    "link": "delay:both:0:0:5;loss:both:0:0:5",
+    "answers": [
+      {
+        "at_ms": 4000,
+        "ms": 5000
+      }
+    ],
+    "mic_off_ms": 18000,
+    "expect": "survives"
+  },
+  "blackout-600ms": {
+    "about": "A 0.6 s total blackout while listening. The lost packet is sent again 1.0 to 1.8 s after it first left; the microphone frame waits for it and the same call goes on.",
+    "link": "delay:both:0:0:3;drop:both:11200:11800:0",
+    "answers": [
+      {
+        "at_ms": 4000,
+        "ms": 3000
+      }
+    ],
+    "mic_off_ms": 18000,
+    "accept_calls": 3,
+    "expect": "survives"
+  },
+  "blackout-2500ms": {
+    "about": "A 2.5 s blackout during an answer: the same call survives and delivers the buffered microphone stream, without a hole in the observed input.",
+    "link": "delay:both:0:0:3;drop:both:5500:8000:0",
+    "answers": [
+      {
+        "at_ms": 4000,
+        "ms": 5000
+      }
+    ],
+    "mic_off_ms": 20000,
+    "accept_calls": 3,
+    "expect": "survives"
+  }
+}

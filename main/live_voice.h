@@ -5,4 +5,6 @@ typedef struct { bool active; live_state_t state; unsigned seconds; char message
 void live_voice_init(void);
 void live_voice_start(void); /* Explicit Talk button only. */
 void live_voice_stop(void);
+/* Reclaim only a finished, suspended worker before releasing shared admission. */
+void live_voice_reap_finished(void);
 void live_voice_snapshot(live_status_t *out);

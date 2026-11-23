@@ -5,6 +5,8 @@ typedef struct { bool busy; int volume; char message[112]; } audio_test_status_t
 esp_err_t audio_hardware_quiet(void);
 void audio_tests_init(void);
 void audio_test_request(bool microphone);
+/* Reclaim only a finished, suspended worker before releasing shared admission. */
+void audio_test_reap_finished(void);
 void audio_test_snapshot(audio_test_status_t *out);
 
 void audio_test_set_volume(int percent);

@@ -1,0 +1,15 @@
+{
+  "cmake_utilities": {"files": 36, "tree_sha256": "943b2a65d33f8f397c12cb82c235be624178a4f0ff6a0bf4dbfa55366c856fce"},
+  "esp32_s3_touch_amoled_1_8": {"files": 14, "tree_sha256": "da0ebf6f5d3ecec0a799fac69005353b25eae8064fb3ef4d2dd0cbe22629776f"},
+  "esp_codec_dev": {"files": 95, "tree_sha256": "7db53ebc382f5aca489f4aff6e6f643ad753911a08739079c59d5c60558fed46"},
+  "esp_io_expander": {"files": 13, "tree_sha256": "d4a0e360c4b8e71d7a35720f01599eab7e2ad2ab56d4739f8ae5c98dea4bdf70"},
+  "esp_io_expander_tca9554": {"files": 19, "tree_sha256": "7d929e75ebe94440a4af65d18712c6315adb1b819abf3d0ba00d79c839375bd6"},
+  "esp_lcd_co5300": {"files": 22, "tree_sha256": "5bbf43d234acca837734088291a88d2c9c509f75cc6e9232acce26e01d7d2991"},
+  "esp_lcd_panel_io_additions": {"files": 15, "tree_sha256": "008064f62c84df6f1dc9a1e03f36a295f5b4c07ea72fcdfd2b9a6e3304bc9ec9"},
+  "esp_lcd_touch": {"files": 9, "tree_sha256": "16136c912f4cd909e9bd7ddee10c8e2fa0b0c5a8511aac96e76139b7100589f5"},
+  "esp_lcd_touch_cst816s": {"files": 14, "tree_sha256": "e90b20b6d7321941feff4239fb047eb531181af2da9c0474e2b562eab7e77f16"},
+  "esp_lcd_touch_ft5x06": {"files": 13, "tree_sha256": "4779c62f90e577fc353205cbac2fb2ab492fc4698aaab4200de6488e84a7f8bc"},
+  "esp_lvgl_port": {"files": 109, "tree_sha256": "d58fd580fe286510da8ce35d2f9b4f10ca43042d8e2b341a917d714f05bbeddb"},
+  "esp_websocket_client": {"files": 44, "tree_sha256": "834f9f80cb6b4cdbfdc05cb32752600f8d238a0c7eaec8fde69996212d73bab3"},
+  "lvgl": {"files": 4120, "tree_sha256": "02cc04c8f5a4e3c126e2b1c024c5437777e3b73c7e1e7d93fdf2dc97d774826b"}
+}

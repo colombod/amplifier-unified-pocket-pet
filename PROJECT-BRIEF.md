@@ -1,59 +1,322 @@
 # Pocket assistant implementation brief
 
-## Product destination
+## Outcome and agreement
 
-The upstream [original intent](docs/intent.md) is a portable Wi-Fi voice manager
-across Amplifier Unified workspaces: create workspaces, start new work, continue
-selected existing sessions and attend to genuine waiting questions. The user
-asked this chat on 10 November 2026 to take over this part of the work and publish
-the firmware and implementation record to `colombod/amplifier-unified-pocket-pet`.
-The [vision](docs/VISION.md) remains a draft, not a ratified interaction design.
+Build and ship the [portable whole-Unified voice assistant](docs/VISION.md).
+The [delivery contract](contracts/pocket-assistant-delivery.v1.md) owns product
+promises P1–P9 and their agreement status. This is the one current design and
+delivery plan; saved host tasks own execution status. The earlier fixed-session
+milestone is an integration step, not the product boundary. Current user
+corrections require a clean UI, recovery without ordinary power cycling, and
+starting a new chat in a new workspace as well as continuing existing work.
 
-## Immediate authorized work
+## Design: extend what already exists
 
-The user authorized a separate Mac workspace, Docker-isolated ESP32 tools,
-read-only reuse of their ChatGPT Tachikoma pet, phone-based Wi-Fi and required
-OpenAI-key entry, board backup/firmware installation, audio acceptance tests and
-GPT-Live integration. That authorization supersedes the initial records-only
-and no-hardware repository setup boundaries for this device work. It does not
-authorize unrelated server modifications, arbitrary workspace operations or
-Tailscale enrollment.
+    apps/unified-pet/ — microphone, speaker, Tachikoma, touch, phone setup
+        ↕ authenticated audio and state over Wi-Fi (LAN today)
+    bridge/pet_bridge/ — adapt pet media to voice provider; send and correlate once
+        ↕ supported scoped Unified client interface
+    Amplifier Unified — owns workspaces, conversations, attention, permissions and work
 
-The actual connected board is **ESP32-S3-Touch-AMOLED-1.8 V2**, 368×448,
-CO5300/CST820, ES8311 audio, 16 MiB flash and 8 MiB octal PSRAM. The original
-LCD-1.83 reference led to an incompatible display build; factory recovery was
-exercised and the corrected profile is user-confirmed. Use official AMOLED BSP
-2.0.3, not the LCD/ST7789 pinout.
+`bridge/deploy/` and the team guide belong to the product, as do the portable
+installation and self-check tools; site secrets, deployment state, captures and
+flash backups do not. `bridge/tools/pet_link_test_host.py` is a provider-free
+listener, not the production gateway. Root `main/` is the earlier standalone
+experiment, **not** the firmware to flash for Unified. Keep device-side
+Tailscale as a distinct, unfinished transport for this same product.
 
-## Voice/backend boundary
+- **Pet:** documented Waveshare ESP32-S3-Touch-AMOLED-1.8 V2, CO5300/CST820,
+  ES8311, 16 MiB flash / 8 MiB PSRAM, pinned IDF 5.5.4 and official BSP 2.0.3.
+  Reuse artwork, codec, animation, calibration, saved settings and phone setup.
+  One primary voice control; no extra Stop or normal diagnostic/test screens.
+- **Unified:** owns conversation history/context, execution, work lifecycle,
+  discovery, waiting questions and permissions. Global questions use supported
+  all-work discovery; focused speech reaches the actual chosen conversation.
+  Each action freezes its destination before asynchronous work; switching focus
+  never redirects in-flight input or replies. New workspace and new-chat start
+  are separate supported operations, both verified, not a saved task substitute.
+- **Adapter:** only media/authenticated client adaptation and result correlation.
+  Retain useful bridge code; remove duplicated native routing policy when that
+  is the evidenced obstacle. No second manager/chatbot, transcript store or new
+  orchestration platform. A native Unified overview conversation can support
+  global dialogue; it need not create a separate reasoning runtime.
+- **Authority:** host/provider keys remain host-side. Companion-v1 does not grant
+  arbitrary settings/admin/approval actions. Use supported host authority for
+  management and exact question revisions; do not impersonate human provenance
+  or put a full-control token on the pet to bridge a missing capability.
+- **Send/recovery:** the user decided on 14 November 2026, after trying the
+  explicit-preview prototype on the device, that voice is a running spoken
+  conversation: mic on means the pet listens and answers, mic off means it does
+  not listen. There is no "Done talking", transcript preview or Send tap, so a
+  recognised request goes to Unified without a confirmation tap; it is still
+  sent at most once. The user chose automatic reconnection while the mic is on,
+  knowing a reconnect opens another paid call; do not replay uncertain input.
+  Mic off does not cancel Unified work. Operations such as sending to another
+  chat or creating work still require the applicable confirmation and authority.
 
-The first isolated voice test uses **`gpt-live-1`**, PCM16 mono 24 kHz over the
-documented Live primary WebSocket, and **`gpt-6-luna`** as a separate managed
-Responses reasoning backend. It has no Unified tools or session access. It must
-never claim that a generic spoken answer ran work in Unified. The replaceable
-configuration seam is `main/assistant_config.h`.
+### What the source review changes
 
-Microphone and API start only on Talk. Stop releases audio and requests graceful
-session close. No automatic reconnect starts another billed session. The user requested continuous conversation after Talk; input is replaced with silence during speaker
-playback and a short tail until echo cancellation is tested. This is not proven
-barge-in, wakeword support or a final interaction policy.
+The earlier review of Unified release 0.91 (`29e3f4f`) found conversation-addressed live-first Send:
+the native owner chooses steering/request-boundary/idle delivery. A client-side
+idle-only rule is not a product requirement. Existing native voice already
+submits to the same session and waits by input identity for the completed root
+result. Do not replace this with latest-message polling or separate reasoning.
+That review's 0.90 serving-host observation is historical; the subsequent
+prototype survey inspected Unified 0.98.6. Recheck live versions when needed.
 
-For Unified, qualify the documented installed-host live-session and observation
-contracts cited in docs/intent.md. Preserve genuine human provenance, exact
-session/question identity, revisions and receipts. Do not invent HTTP endpoints
-from action names or replay uncertain commands. A scoped server-side adapter may
-be needed; its design and deployment are not supplied by this voice spike.
+The public voice connect route is WebRTC SDP, **not an ESP raw-PCM WebSocket**.
+Keep necessary hardware media adaptation rather than claiming a native route
+exists. Shared external-agent rooms and the post-release ACP room-history change
+are not needed for this pet and must not trigger a room/runtime migration.
 
-## Historical alternative
+### Historical engineering findings (through the early LAN candidate)
 
-An earlier pasted proposal suggested local Raspberry Pi/OpenClaw task delegation
-and later Slack/cloud transport. It was background to the initial narrowed
-pet/setup/voice implementation. After reading the upstream goal, that alternative
-is not treated as the selected destination. No Pi, OpenClaw, Slack, Vercel, cloud
-queue or distributed orchestration was implemented.
+1. Build 11 was installed and used for two multi-exchange calls; its mic
+   catch-up fix held over the longest call, about seven minutes. On 16 November
+   a later call gave one heard answer and then "Microphone stream interrupted":
+   its capture buffer overflowed. The physical trigger is unknown. Offline, the
+   production voice path on the pinned network stack reproduces that overflow
+   whenever the round trip to the host passes about 60 ms during an answer,
+   because lwIP's default TCP buffers were smaller than one audio message
+   ([link rig](apps/unified-pet/tests/link_rig/README.md)). Firmware
+   `0.3.9-voice-link` enlarges them (rig-tested, not physically verified). A
+   physical test of it was reported to reconnect repeatedly while the user
+   spoke; the rig reproduces that with packet loss from the pet.
+   `0.3.10-send-wait` (built and rig-tested, not installed) lets a microphone
+   frame wait up to 1.8 s, which keeps the call through a 0.6 s blackout.
+   Sustained loss or a blackout of seconds still ends the call and replaces it
+   while the mic is on. Never free under a live callback or replay a prior
+   uncertain send.
+2. Existing Tailscale evidence proves a bounded device TLS/HTTP exchange with
+   retained identity, not voice. The current spike excludes audio, and the
+   bridge validates RFC1918-only dial addresses. Its native socket path is not
+   automatically routed through TailTiny's user-space TCP/TLS path. Integrate
+   that path with audio/UI and test the real combined resource/throughput budget.
+   Removing an address check alone cannot deliver off-site operation.
+3. Multi-work context, attention/answer authority and workspace/chat creation
+   must join the voice path. Implement those on current supported interfaces;
+   identify a real capability gap before changing host architecture.
+   `/api/companion` is an active-or-pinned preview, not the all-work catalog.
+   An opt-in observation-v1 adapter exists. The early inspected host denied
+   scoped session listing. By Unified 0.114.5/0.116.0 the observed situation
+   had reversed: `GET /api/sessions?view=observation` worked for the paired
+   client and `/api/companion` was denied. Listing is not send, focus or answer
+   authority. Do not require pinning every chat or widen the device credential.
+   Global discovery, attention and management therefore belong in the existing
+   configured Unified manager and its supported host tools; the media adapter
+   delivers the request and correlated result, never executes parsed action
+   prose. Direct catalog/focus controls wait for supported scoped access.
+   Selecting an existing management conversation for physical use remains
+   explicit; this does not retarget the pending I1 diagnostic or create a
+   second manager runtime.
+4. GPT-Live's primary WebSocket has no output-audio-done event. Commentary,
+   captions, packet quiet and an empty playback queue do not independently prove
+   the user heard a complete answer. Multi-exchange conversation has been used
+   successfully on build 11; its speech-end heuristic, interruption behavior,
+   recovery and physical repeatability remain limits to verify.
 
-## Evidence standard
+## Delivery sequence
 
-Keep build success, physical behavior, API access and Unified integration
-separate. See docs/device-bringup.md and docs/device-evidence.json. The factory
-backup, raw serial logs and local binaries remain private and uncommitted.
+**As of 23 November 2026: the installed normal firmware has demonstrated
+spoken Unified replies on LAN in one selected chat. The full release is not
+qualified.** The PR #7 snapshot is the baseline for the opt-in LAN source
+preview, not acceptance of the full product.
+The [original request](docs/intent.md#1-objective) and
+[delivery contract](contracts/pocket-assistant-delivery.v1.md#essential-promises)
+require useful screen-off voice across **all authorized Unified work**. A
+conversation in one selected chat is the first recovery milestone, not the
+product. Live state and private evidence are indexed in the workspace `SCRATCH.md`.
+
+### What is done, and what the evidence does not prove
+
+| Work | Verified result and limit |
+| --- | --- |
+| Display and safe install | App-only update to `0.3.19-amoled-micdiag` (`a17bf56`, image `8536bcf3…`) was read back exactly; the settings region was unchanged before reboot. The user saw Tachikoma and opened Settings on that boot, with no power cycle. This passes display and touch on that boot, not all future boots or voice. |
+| Running gateway | `cea016b` is deployed. One 9.3 s check recovered all eight words of host-generated speech in a preview. It did not use the pet microphone or speaker or send to Unified. |
+| Two-turn LAN call on the pet | On 22 November at 23:01–23:04 UTC, core‑1 diagnostic firmware (`4457f09`, app `aa4cc39f…`) and gateway `cea016b` handled a question for the selected chat title and a follow-up about interruption. Both distinct requests were accepted once and matched to replies in the same Unified chat. The operator heard the title, progress speech and the follow-up answer, then turned the mic off. The gateway counted five progress renders and one reply render as complete, and confirmed a device-initiated close. This proves the observed interaction, not interruption, repeatability or two independently confirmed render completions. The byte-verified app-only install preserved the settings region. |
+| Normal firmware on LAN | From 22 November 23:57 to 23 November 00:07 UTC, the operator saw the display and heard replies on `0.3.19-amoled-boot` (`4457f09`, app `ce87dcba…`, diagnostics off), using gateway `cea016b` with Unified `0.119.0`. The app-only install verified unchanged settings and saved a private rollback. Five distinct submissions were accepted in the same Unified chat: three replies were claimed for rendering, one late reply was not spoken, and one accepted request had no claimed reply by close. The gateway counted three completed reply renders and ten progress renders, and confirmed a close at the call time limit. Five other delegations were refused while work was pending, not queued; audible speech alone did not establish submission. These aggregate counts do not identify the audio heard on each refused attempt. |
+| Voice transport repairs | Firmware `13ff037` preserved marked samples through tested transient socket stalls; paired gateway `d0c18d2` preserved one complete scripted request in the matched offline replay. These repairs do not explain or clear the current capture deficit. |
+| Useful historical baseline | Build 11 (`1004293`, image `fadafa58…`) with gateway `8857705` produced two answers the user heard on 16 November; that call later lost the device. Keep the pair for comparison, not automatic rollback. |
+| Teammate tools and routing | `1d9a514` generated a valid systemd unit in a clean local environment; `8fac599` validated the portable app updater with simulated flash. `86c3df7` verified restricted HTTPS pairing and workspace-filtered A → B → A binding in a disposable Unified 0.117.0 host. None proves a fresh-board install, independent teammate setup, or in-call voice switching. |
+| Feedback repair | `79c18bf` distinguishes no recognized speech, sending, accepted/waiting, and speaking; an accepted send with a lost reply keeps the no-redial fence. All 142 gateway conversation tests, the device protocol/status check and eight focused production-owner cases passed offline. The installed firmware includes the device changes; the running `cea016b` gateway predates the matching gateway changes. This does not queue follow-ups. |
+
+### Immediate recovery: make the next real call useful
+
+On **22 November 15:38–15:40 UTC** the user spoke twice. The pet stayed on
+Listening, gave no useful feedback, and the call ended after about 92.5 s.
+The gateway admitted 56.84 s worth of PCM, produced zero recognized segments,
+and sent zero requests to Unified. In the first 32 s the pet reported 20.32 s
+worth of capture and 20.12 s worth of completed sends, with no read errors,
+good recorded signal (−60 to −51 dBm), and a sampled capture queue peak of
+13,440 bytes. The shortfall was already visible before the send queue. These
+are byte counts, not proof of intelligible speech. Long codec reads and
+writes and a snapshot of LVGL at effective priority 22 on audio's core are
+leads, not proof of scheduling as the root cause. The failed call and its
+saved device report have already been collected; do not repeat them.
+
+An approved provider-free baseline on the same build reproduced the deficit
+with silent playback and the default placement of the audio tasks: **63.0%
+of nominal capture cadence over 21 full steady seconds**. The send rate was
+63.2%, the sampled capture queue peaked at 3,840 bytes, the longest read was
+121.7 ms, and there were no reported read errors. LVGL again appeared at
+effective priority 22 on core 0, with audio tasks at priority 7. This
+reproduces the timing failure without the voice provider but does not
+identify the cause or test intelligibility. The supervisory close check
+stopped the run before the second leg: the listener confirmed peer closure
+but did not report the expected numerical WebSocket close code. Review of
+the completed device user-stop report and the single listener closure with
+no reopen established Mic Off. The original gateway and USB access policy
+were restored and verified. The baseline window closed without a second leg.
+
+1. **Compare audio task placement (completed, timing only).** A separately
+   authorized provider-free run used the same installed firmware, silent
+   playback, and priority 7, but moved the microphone and playback tasks to
+   core 1 for that call. Task records verified both placements and that
+   the voice owner stayed on core 1 at priority 6. Over 21 steady seconds
+   in each run, capture rose from **63.0% to 100%** of nominal and
+   completed sends from **63.2% to 100%**. The longest measured steady
+   codec read fell from **121.7 ms to 23.0 ms**. Neither run reported read
+   errors or playback underruns. Channel and bandwidth matched; the minimum
+   Wi-Fi signal was stronger in the core-1 run (−48 vs −60 dBm). The result
+   makes core 1 the leading repair candidate, not proof that LVGL caused
+   the deficit or that real speech is restored. The completed device Stop,
+   listener closure, and zero reopens confirmed Mic Off; the unchanged
+   gateway was verified running idle and USB permissions were restored.
+   No flash, intentional reset, paid call, or repeated baseline.
+2. **Build one matched candidate.** Change audio placement without also
+   changing priority, codec settings, or buffers. Retain the display repair
+   and finish the feedback change. Keep the observed Wi-Fi difference in
+   mind when qualifying capture.
+   Exercise the device parser/owner and gateway offline: no-recognition
+   feedback without a send, pending send versus acknowledged acceptance,
+   correlated reply, refusal, and loss without replay. Verify that the capture
+   shortfall no longer reproduces under the same conditions before spending
+   on another product call. Do not guess at Wi-Fi, buffer size, or task
+   priority changes.
+3. **Demonstrate one real diagnostic-build conversation (observed).** The
+   operator’s call above and the matching Unified records supersede the
+   synthetic audio checks. Do not repeat this diagnostic call or substitute a
+   tone test for the next increment.
+4. **Qualify LAN reuse on an exact normal build and gateway pairing (partly demonstrated).** Build
+   the normal counterpart with the demonstrated display and audio placement,
+   without the diagnostic controls. Record the firmware image, gateway commit
+   and running Unified version. Preserve app rollback, settings and identity
+   for any authorized installation. Verify three consecutive attributable
+   responses overall, including a contextual pair and one after power-up.
+   Check that listening, not sent, accepted work and the actual reply are
+   distinguishable. Verify the two turn-to-reply matches in the journal and
+   chat and that mute never cancels accepted work.
+   Confirm visible UI, working touch, an ordinary interruption and another
+   interaction without a power cycle, duplicated work, or an unresolved
+   cleanup. Confirm the live gateway follows an authorized Unified restart.
+   Stop at the first failed boundary, preserve evidence and do not retry
+   automatically. Do not claim this gate on the diagnostic build alone.
+
+**Next LAN increment: queued follow-ups.** The operator chose to keep distinct
+spoken follow-ups addressed to the same conversation while an answer is pending,
+rather than requiring them to be repeated. First check whether the restricted
+Unified companion can explicitly queue an input without steering the active turn.
+Verify that each retained turn is visible or acknowledged accurately, enters
+the same chat in order, and gets its own correlated reply. Do not replay an
+uncertain submission or confuse provider speech with acceptance. Keep this
+experiment separate from the working normal-firmware checkpoint.
+
+### Remaining release gates, in order
+
+| Gate | Delivery proof |
+| --- | --- |
+| 1. LAN conversation and recovery | Complete the immediate recovery above with one named, reusable normal combination. Honest status must distinguish listening, not sent, accepted work and the actual answer. |
+| 2. Whole-Unified on LAN | Discover work, use the original chats in two workspaces, switch A → B → A by voice and keep context. Read real waiting questions and answer only the intended current one. Create a real workspace and a distinct chat there, then verify that the requested work starts. Use supported authority and never widen the device credential to bridge a missing capability. |
+| 3. Independent teammate setup | A second operator uses one clean checkout or approved package, a fresh board, their own host and phone: install, compatibility/trust check, pair, provider-free self-check, real interaction and safe update/rollback/removal. Repeatable maintainer tests are prerequisites, not acceptance. A teammate LAN pilot can ship only as LAN-only and only after its demonstrated scope and publication are approved. |
+| 4. Off-home use and final release | After LAN acceptance and the separate transport decision below, demonstrate real voice on another Wi-Fi with the home-LAN path unavailable, including reconnect, correct context and real work. Publish the reviewed combination only with authority. Record exact revisions, image hashes and evidence; exclude private history, credentials and captures. |
+
+One integration owner, one product checkout. Run only the check that can
+change the next decision. No repeated paid probes, new architecture, or
+off-home implementation while normal LAN use is unqualified. The audit's
+historical cost telemetry was partial; it does not verify a current bill or
+support a ship date.
+
+### Off-home transport: preliminary scope for the post-LAN decision
+
+The host already has an optional authenticated tailnet listener. The missing
+link is **inside the pet**: the voice call takes exclusive audio ownership and
+opens the LAN transport, while the diagnostic tunnel requires a different
+owner. A listener on the host, or accepting a tailnet IP in the settings form,
+does not join those paths.
+
+Reuse the recovered prototypes rather than rewriting or merging whole branches.
+`3638a72` adds streaming TLS over a borrowed socket; `8471e3c` adds the transport
+constructor and explicit route selection to the Build 11 code. Across the 19
+distinct device source trees at the reviewed local branch tips, that constructor
+had a definition but no production caller. `307e2e0` and `08e4a05` contain a
+tunnel worker-exit fix and its regression tests; `ba5575f` contains the packet
+self-loop guard. These are candidate changes to port and review, not evidence
+that the current firmware can run a voice call through Tailscale.
+
+| Work after LAN acceptance | Exit condition | Planning allowance |
+| --- | --- | --- |
+| Port the teardown and borrowed-socket pieces onto the accepted firmware. Keep LAN the default and preserve the provisioned identity and settings. | Stop or failed setup releases only resources whose workers have exited. A tailnet selection never silently falls back to LAN. | 1–2 engineer-days |
+| Connect the voice call to the tunnel. Reuse the same gateway protocol, certificate verification, send journal and reply correlation. | A device on a different Wi-Fi sustains both audio directions and a responsive screen. Measure direct and relayed paths where available: 24 kHz PCM16 needs 48 kB/s **each way**, about 64 kB/s after base64 before protocol overhead. Check actual memory headroom, lag and missing audio, not just bytes received. | 2–5 engineer-days |
+| Qualify the user journey and recovery on the normal build. | With the home-LAN route unavailable, hear the right answer and a follow-up, switch workspaces, interrupt the link and resume without a power cycle or duplicate work. Record which paths were actually exercised. | 2–3 engineer-days |
+
+**Preliminary total: 5–10 engineer-days for the transport increment, not a ship
+date.** This assumes a working LAN voice baseline, available off-home Wi-Fi, a
+qualified trust path and authorized hardware access. It excludes implementing
+the cross-workspace and new-work features themselves. If the joined tunnel,
+codec and UI cannot fit or sustain the measured rate, stop at that finding and
+re-estimate before changing the architecture. No tunnel, enrollment, install,
+or paid test is authorized by this estimate.
+
+### Follow-up: investigate a more native gateway connection
+
+The user asked to track an architecture investigation, including ACP. After the
+working prototype increment, compare the supported Unified ACP launcher and
+scoped native HTTP/SSE with the existing companion gateway's text/result seam.
+Inspect the then-current host, not just the older 0.98.6 survey. Measure useful
+streaming/latency and recovery against the same front-door user experience.
+Check exact-session/workspace scope, cross-workspace discovery, approvals,
+host-restart handling and uncertainty after disconnect. ACP's inspected version
+uses broader owner-control credentials and does not itself provide pet audio or
+all-work discovery; a request ID is not yet proven to deduplicate a prompt.
+Keep credentials on the host, never replay an uncertain send, and do not silently
+switch authority or cancel accepted work when audio ends. First use synthetic
+tests, then qualify any candidate through an authorized real voice journey.
+Adopt a change only if the verified benefit justifies its authority and recovery
+cost; otherwise keep the existing path and record the finding.
+
+## Verification and release boundary
+
+- Maintain focused regressions for changed risks. Reuse valid A6 microphone/Stop,
+  setup, audio and device identity evidence while relevant inputs are unchanged.
+- Before physical use, check the joined actual SDK-client/adapter/runtime path
+  with real local TLS and synthetic remote/provider seams where feasible. This
+  catches integration errors but is explicitly not paid-provider/hardware proof.
+- For each delivered increment retain exact source/build/app/host identities,
+  observed journey, command/result correlation, conditions, failures and limits.
+  Source-only, built, installed and physically demonstrated are different states.
+- Preserve current settings, credentials, backups, source and uncertain attempts.
+  Reuse the verified app-only backup and readback procedure only for an
+  explicitly authorized operation on a verified device. Do not rerun or repin
+  a consumed one-shot installation, or substitute the simulated updater
+  result for qualification on the board. No
+  bootloader/table write, automatic rollback, old NVS restore or token regeneration.
+- Earlier demonstrated device boundary (15–16 November): build 11 completed two multi-exchange
+  calls through the Unified front door. A later call through the installed,
+  independent gateway yielded one user-heard answer with the exact input matched
+  to the chat; it ended normally on quiet. Survival across Unified restart and
+  automatic reconnect remain unverified. A later post-upgrade test reached the
+  front-door chat, but the call had closed before its answer was ready; the
+  reason for the device-side stop is unknown. Do not resend that request. The
+  original host's LAN service subsequently ran the pre-dial safeguard; see the
+  dated recovery decision above for the later physical outcome. Any
+  firmware update requires a concrete candidate, a reviewed safe app-only
+  installation path and applicable device authority. Do not replay prior
+  one-shot operations.
+
+## Provenance
+
+[Original user words](docs/intent.md); current conversation's explicit whole-work,
+Tailscale, clean-experience, recoverability and new-workspace/new-chat corrections.
+Method: [Microsoft Amplifier Converge](https://github.com/microsoft/amplifier-converge/tree/e39fe7676ba88737319bca21af78dd0f819eb8a3).
+Existing standalone GPT-Live/Responses and earlier milestone documents are retained
+as implementation/evidence history, not substitutes for this Unified product.

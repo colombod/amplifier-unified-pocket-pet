@@ -7,15 +7,15 @@ No private flash dump, credentials, raw serial capture or recorded speech is inc
 
 ## Environment and artwork
 
-The user authorized `/Users/colombod/workspaces/esp32-pet` and Docker-isolated
+The user authorized a local workspace (path redacted) and Docker-isolated
 tooling. ESP-IDF 5.5.4 runs in the official Linux ARM64 image pinned to
 `sha256:f3bc9daebfd8cb4e0afbdced7caac4431c7a862326a5e5587d65c31439549bb5`.
 CMake, Ninja, Xtensa compiler and managed dependencies stay in Docker. Pillow
 11.3.0 is container-only. The Mac `.host-tools` venv contains esptool 4.11.0 and
 pyserial 3.5 for USB access; no global ESP-IDF install was made.
 
-The existing ChatGPT Tachikoma (`pet_6abe2e4dd1f48191bbbc9389b55e641e`) was
-downloaded read-only. Its selection and artwork were not changed. Source PNG
+The existing ChatGPT Tachikoma was downloaded read-only. Its selection and
+artwork were not changed. Source PNG
 SHA256: `51264950be47d773608a5b521309626a462fd3b0c1bf2a76daee261e1bccc103`.
 The source is 1536×2288 with 192×208 cells. Decoding the whole RGBA sheet would
 require 14,057,472 bytes, exceeding 8 MiB PSRAM. `scripts/export_pet.py` instead
