@@ -110,8 +110,13 @@ class ArrivalReplayTest(OfflineAsyncCase):
                 self.assertIsNone(at, "submitted a prefix on irrecoverably late input")
                 self.assertEqual(h.session.outcome.conversation_end, "not_sent")
                 self.assertEqual(h.session.outcome.requests_submitted, 0)
-                self.assertEqual(h.device.of_type("pet.converse.notice"),
-                                 [{"type": "pet.converse.notice", "code": "not_sent"}])
+                # At these late injection points no words have arrived by the
+                # 12-second recognition hint. It is informational, not a send.
+                expected = ["not_sent"]
+                if name.endswith("--blackout-600ms") and point == 13.0005:
+                    expected.insert(0, "no_words_yet")
+                self.assertEqual([notice["code"] for notice in
+                                  h.device.of_type("pet.converse.notice")], expected)
             else:
                 self.assertIsNotNone(at, "working-link settle missed before input ended")
                 if name in EXACT:

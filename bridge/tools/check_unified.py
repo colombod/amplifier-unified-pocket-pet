@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 # Admission to this read-only package check is not a release compatibility pin.
-POLICY_CHECKED_VERSIONS = ("0.116.0", "0.117.0")
+POLICY_CHECKED_VERSIONS = ("0.116.0", "0.117.0", "0.119.0")
 SESSION = "pocket-check"
 COMMAND = "11111111-1111-4111-8111-111111111111"
 
@@ -63,8 +63,8 @@ def main():
         print("No amplifier-unified distribution in this interpreter. Use your Unified service's Python.")
         return 2
     if dist.version not in POLICY_CHECKED_VERSIONS:
-        print("Not a policy-checked version (expected "
-              + " or ".join(POLICY_CHECKED_VERSIONS) + "); this installation is unqualified.")
+        print("Not a policy-checked version (expected one of "
+              + ", ".join(POLICY_CHECKED_VERSIONS) + "); this installation is unqualified.")
         return 1
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     try:

@@ -193,7 +193,10 @@ Nothing here is automatic, and the JSON file keeps working if you do nothing.
 ## Install and start
 
 1. On a **new installation**, after pairing and binding, use a stable checkout
-   and the gateway venv's Python. From the repo root, check the filled settings
+   and the gateway venv's Python. If you set a private `XDG_CONFIG_HOME` in the
+   pairing shell, exit that shell. Run the installer in the user manager's
+   normal login environment, passing the absolute path of the settings file
+   created for the private pairing state. From the repo root, check the settings
    without writing or opening network connections:
 
    ```sh

@@ -1,12 +1,12 @@
 # Pocket assistant team prototype
 
-This guide describes an **early, maintainer-assisted prototype**, not a turnkey
-release. Build 11 completed multi-exchange calls through an Amplifier
-Unified front-door chat on a home LAN. That historical result does not qualify
-the installed `0.3.18-private-micdiag` pilot or its uninstalled normal twin.
-A teammate has not yet been walked through
-a fresh board and server setup. Firmware installation, TLS setup, the independent
-service and reconnect must be verified for the particular package being used.
+This guide describes a **LAN source preview**, not a turnkey release. Normal
+`0.3.19-amoled-boot` firmware produced spoken replies on a home LAN in one
+selected conversation (gateway `cea016b`, Unified `0.119.0`). See the
+[physical call record and limits](../PROJECT-BRIEF.md#what-is-done-and-what-the-evidence-does-not-prove).
+The preview source includes additional offline-checked gateway feedback.
+A separate operator has not yet completed a fresh board and server setup.
+Follow-ups spoken while a request is pending are not queued.
 
 The goal is a voice interface to the user's authorized work across Unified, not
 another chatbot or a permanently limited single-project assistant. The current
@@ -24,8 +24,8 @@ conversation for consequential details.
 **Before pairing:** on the Unified host, from the product checkout, run
 `"$UNIFIED_PYTHON" -I -B bridge/tools/check_unified.py`, where `UNIFIED_PYTHON`
 is the absolute path of the Python interpreter used by your Unified installation.
-It recognizes the two packages inspected during recovery (0.116.0 and the pilot
-host's 0.117.0). It asks the installed package's actual companion policy about
+It recognizes the inspected packages (0.116.0, 0.117.0, and 0.119.0).
+It asks the installed package's actual companion policy about
 the gateway's attach, list, read and send request shapes, entirely
 in memory. No token, board, service stop, provider call or real send is involved.
 An unknown version is reported as unqualified, not as a broken installation.
@@ -63,8 +63,14 @@ without arranging the window with its owner.
   gateway. Unified itself needs its normal model configuration. The gateway's
   default voice is `marin`; do not assume another model is protocol-compatible.
 - A certificate chain trusted by the firmware's ESP-IDF certificate bundle, a
-  matching private key and an FQDN for the gateway. Certificate issuance, renewal
-  and a repeatable second-device trust procedure are not yet established.
+  matching private key and an FQDN for the gateway. For a LAN-only listener,
+  one option is a publicly trusted certificate for a DNS name you control,
+  issued with ACME DNS-01 validation. This does not require a public inbound
+  port on the gateway. Use the issued leaf-plus-intermediates chain and the
+  matching private key in the gateway configuration; give the phone that exact
+  name and the gateway's separate LAN IPv4. Keep the key private and renew
+  before expiry. Choose a CA present in the firmware bundle; a public certificate
+  is not by itself proof that the board trusts it.
 
 Each voice connection is paid provider usage, including time spent listening or
 waiting; Unified model usage is separate. There is no gateway daily spending cap.
@@ -74,10 +80,11 @@ reconnect behavior.**
 
 ## 1. Obtain a matched build and preserve the board
 
-Ask the maintainer for a matched, checkpointed gateway and `unified_pet` firmware
-package with its exact versions, hashes and flash manifest. There is not yet a
-published release package or validated fresh-board flashing procedure. The root
-app's older `esp32_pet` image is **not** the Unified app.
+For this source preview, use the gateway and build `unified_pet` from the
+same tagged release source. The build below produces a flash manifest.
+A fresh-board flash has not been physically qualified; use a spare matching
+board and follow the preservation guidance below. The root app's older
+`esp32_pet` image is **not** the Unified app.
 
 The independent app's build script is `apps/unified-pet/scripts/build.sh`. It
 requires a reachable Docker daemon (`docker info`) and a locally cached ESP-IDF
@@ -143,13 +150,63 @@ The build above also generates `apps/unified-pet/sdkconfig` from the tracked
 including the link rig and the historical isolation boundary check, **after**
 the build. Do not copy an `sdkconfig` from a different checkout into a clean one.
 
-A maintainer must identify the actual board and port, preserve and verify the
-board's existing flash before replacing firmware, use the exact matching manifest,
-and verify both the write and a cold boot. Opening serial can reset the device.
-Existing-board app-only updates and a first full flash are different operations;
-never restore another board's NVS or credentials. Flash backups can contain
-secrets and must not be shared. The current fresh-board workflow is **not yet
-physically verified**; do not use another person's device-specific installer.
+**First install on a spare, unprovisioned V2 board only.** Do not follow these
+steps on a board that holds settings, credentials or a device identity you need
+to keep. A change of partition layout can make old settings unreadable even
+without a chip erase. Use the exact V2 board and identify its USB serial port
+before opening it; opening serial can reset the board. Close any serial monitor.
+Use esptool 4.11.0 (from a local environment with pyserial 3.5 or the ESP-IDF
+image if it reports the same version). Use stable power and stop on any error.
+
+1. From `apps/unified-pet/build/`, inspect `flash_args` alongside
+   `flasher_args.json`. For this target they must name the same three images
+   and offsets below, with `dio`, `80m`, and `16MB`. Record the checksums of the
+   three local build artifacts:
+
+   ```sh
+   sha256sum bootloader/bootloader.bin partition_table/partition-table.bin unified_pet.bin
+   ```
+
+2. In the same directory, set `PET_TOOLS_PYTHON` to your esptool environment's
+   Python, `PET_PORT` to the identified port, and `PET_BACKUP` to a new absolute
+   directory under a private parent outside Git. Before writing, require ESP32-S3
+   with detected 16 MB flash and neither secure boot nor flash encryption. If the
+   state is unclear, stop. Make and compare two independent full reads; keep the
+   backup and checksums private. Do not share a dump or restore another board's
+   flash. Run each block only if the preceding one succeeds.
+
+   ```sh
+   pet_flash() { "$PET_TOOLS_PYTHON" -B -m esptool --chip esp32s3 --port "$PET_PORT" "$@"; }
+   pet_flash version
+   pet_flash flash_id
+   pet_flash get_security_info
+   ```
+
+   ```sh
+   (umask 077 &&
+     mkdir -m 700 "$PET_BACKUP" &&
+     pet_flash read_flash 0x0 0x1000000 "$PET_BACKUP/factory.bin" &&
+     pet_flash read_flash 0x0 0x1000000 "$PET_BACKUP/factory-check.bin" &&
+     test "$(wc -c < "$PET_BACKUP/factory.bin")" -eq 16777216 &&
+     cmp "$PET_BACKUP/factory.bin" "$PET_BACKUP/factory-check.bin" &&
+     sha256sum "$PET_BACKUP/factory.bin" > "$PET_BACKUP/factory.sha256")
+   ```
+
+3. Only after the checked backup, write the matching build manifest (no
+   `erase_flash` or `--force`), then verify the three offsets. If any step fails,
+   stop and keep the dump. Use the vendor's recovery procedure for that same
+   board; don't use a full-image restore as an app update.
+
+   ```sh
+   pet_flash write_flash @flash_args &&
+   pet_flash verify_flash 0x0 bootloader/bootloader.bin \
+     0x8000 partition_table/partition-table.bin 0x10000 unified_pet.bin
+   ```
+
+4. Power the spare board off and back on. Require the pet display and working
+   touch in **Settings → Phone setup** before entering any credentials. If the
+   screen doesn't come up, stop rather than reflash or erase. This first-board
+   procedure has not yet been qualified on a spare V2 in a physical test.
 
 **Already provisioned board — offline app update plan:** the repository
 includes [`update_app.py`](../apps/unified-pet/scripts/update_app.py). Use a
@@ -327,8 +384,11 @@ have not yet been tested.
    gateway's HTTPS child. The child has a deliberately stripped environment:
    a parent-shell or systemd `SSL_CERT_FILE` override is **not passed to it**.
    The child's Python/OpenSSL default trust store must trust the Unified server's
-   certificate chain and the origin hostname must match. Ask the maintainer for a
-   verified host-trust setup; never disable verification.
+   certificate chain and the origin hostname must match. Use a Unified server
+   certificate issued by a CA already trusted by that system Python/OpenSSL, or
+   have its administrator install the organization's CA in that system trust
+   store. Verify with the same Python and exact HTTPS origin before pairing.
+   Never disable verification.
    Open the printed address in your signed-in Unified browser, compare the code
    on both screens, and approve only the matching request. Then run
    `"$PET_PYTHON" -B -m pet_bridge pair-poll` once. **A zero exit status alone is not
@@ -644,8 +704,15 @@ check is not a pass.
 Start only one gateway against a given state and listener. The repository's
 [fresh user-service installer](../bridge/deploy/README.md#install-and-start)
 checks your configuration and generates the Linux user unit without hand-editing.
-It does not start a listener or pair a device. Follow the start and verification
-steps after checking the dependencies and certificate. Unified must remain available
+It does not start a listener or pair a device. Save the **absolute** path of the
+gateway settings file and the gateway Python interpreter, then leave the
+private pairing shell from step 2. Run the installer and `systemctl --user`
+from a normal login shell with the user manager's own XDG settings, **not** the
+private pairing `XDG_CONFIG_HOME`. Use the saved absolute paths for
+`PET_ENV_FILE` and `PET_PYTHON`. The settings file's absolute `state_root` still
+points at the private pairing directory; do not move the credentials.
+Follow the start and verification steps after checking the dependencies and
+certificate. Unified must remain available
 separately. Systemd ordering is not proof that the network is ready. The service
 was installed on the original host; its TLS listener returned the expected
 unauthenticated `401`, and the user heard a real Unified reply through it. The

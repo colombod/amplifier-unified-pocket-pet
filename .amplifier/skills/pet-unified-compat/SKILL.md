@@ -10,10 +10,10 @@ that list changes between releases. Older gateways misreported a denied listing
 as "busy"; see the current conversation-mode behavior in `AGENTS.md`.
 Unified 0.114.5 and 0.116.0 had matching inspected device-facing files and
 passed the read-only check. At the pilot switch, 0.117.0's in-memory
-companion policy also allowed the four request shapes below. That is not a
-live credential, handler, context or voice test. The November 15–16 exchanges and one later
-November 20 answer predate 0.114.5. None of those newer versions has a demonstrated
-end-to-end spoken send and reply in the retained record.
+companion policy also allowed the four request shapes below. Unified 0.119.0
+passes the same in-memory check and was used in the normal-firmware LAN call
+recorded in `PROJECT-BRIEF.md`. The policy check itself does not exercise a
+live credential, handler, context or voice.
 
 ## The gateway's requests
 
@@ -62,4 +62,4 @@ Every listing page must name the attached host identity and instance.
 - The gateway follows a Unified restart by itself (`host_restart_follow`).
 
 Done when: the release is named, each row is confirmed against that release's
-`permits_companion`, and the read-only check's three results are quoted.
+`permits_companion`, and the read-only check's results are recorded.

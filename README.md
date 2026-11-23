@@ -6,38 +6,26 @@ The animated Tachikoma, microphone, speaker and touch display provide a screen-o
 companion. [Original intent](docs/intent.md) and the [draft vision](docs/VISION.md)
 retain the distinction between the goal and a proven integration.
 
-## Unified voice prototype
+## Unified LAN voice preview
 
-**Release status (21 November 2026): not ready to hand to a team.** The last
-normal firmware tested (`0.3.17`) connected but recognized no speech in the
-reported call. The `0.3.18` diagnostic pilot is installed with gateway `d0c18d2`;
-there was no completed voice call as of the 22:04 UTC deployment log check.
-The earlier audible results below are a baseline, not acceptance of this checkout.
-Start with the [recovery decision and product architecture](PROJECT-BRIEF.md#delivery-sequence).
+The independent app in `apps/unified-pet` talks to the Linux gateway in
+`bridge/`, which routes voice to one selected Amplifier Unified conversation.
+Normal firmware `0.3.19-amoled-boot` on a Waveshare ESP32-S3-Touch-AMOLED-1.8 V2
+produced spoken replies on a home LAN with gateway `cea016b` and Unified
+`0.119.0`. The preview also contains gateway feedback changes checked offline;
+that exact gateway revision was not part of the physical call.
 
-The independent app in `apps/unified-pet` connects the pet to a host-side
-gateway in `bridge/`. The gateway sends spoken requests to a dedicated Unified
-front-door conversation, which can use the user's authorized Unified actions.
-The goal remains access to all authorized work, not just one fixed conversation.
+Start with the [LAN installation guide](docs/team-prototype.md). This is a
+source preview for technically comfortable operators, not a turnkey release.
+It requires the matching board, your own Unified and GPT-Live access, a trusted
+TLS certificate for the gateway, and a LAN. Independent fresh-board setup,
+off-home Tailscale, and cross-workspace voice actions are not qualified.
 
-One pet running build 11 has been used for two real multi-exchange calls on a
-home LAN: five requests and replies in the first call and three in the second.
-The user reported hearing the replies. Specific cross-workspace voice actions
-have not been independently verified; creating a workspace and chat was
-exercised by text, not voice.
-
-This is an early prototype, **not yet a turnkey team release**. First-time
-installation on a fresh board, another person's setup, a waiting-question answer
-by voice, automatic reconnect and off-home voice over Tailscale remain to be
-demonstrated. The service template is source code, not proof of an installed
-service. See [the delivery brief](PROJECT-BRIEF.md) and
-[team prototype guide](docs/team-prototype.md).
-
-When the microphone is on, the pet listens and speaks in a running conversation;
-tap it again to mute. There is no transcript preview or Send tap. The user has
-chosen automatic reconnect while the mic is on: each reconnect may start another
-paid provider connection, but uncertain actions must never be replayed. The
-demonstrated build 11 does not yet implement that reconnect behavior.
+Tap the microphone to start and again to mute. Wait for the spoken reply before
+asking another question: follow-ups spoken while a request is pending are not
+queued. Muting ends the audio, not work already accepted by Unified. A call or
+eligible reconnect can incur provider charges. See the
+[delivery brief](PROJECT-BRIEF.md#delivery-sequence) for the evidence and limits.
 
 ## Earlier milestone — standalone spoken conversation
 

@@ -119,7 +119,8 @@ are not needed for this pet and must not trigger a room/runtime migration.
 
 **As of 23 November 2026: the installed normal firmware has demonstrated
 spoken Unified replies on LAN in one selected chat. The full release is not
-qualified.** PR #7 is the review checkpoint, not a release.
+qualified.** The PR #7 snapshot is the baseline for the opt-in LAN source
+preview, not acceptance of the full product.
 The [original request](docs/intent.md#1-objective) and
 [delivery contract](contracts/pocket-assistant-delivery.v1.md#essential-promises)
 require useful screen-off voice across **all authorized Unified work**. A
