@@ -117,9 +117,10 @@ are not needed for this pet and must not trigger a room/runtime migration.
 
 ## Delivery sequence
 
-**As of 22 November 2026: one two-turn LAN call demonstrated on the diagnostic
-build; normal firmware and the whole-Unified release are not qualified.**
-PR #7 is held. The [original request](docs/intent.md#1-objective) and
+**As of 23 November 2026: the installed normal firmware has demonstrated
+spoken Unified replies on LAN in one selected chat. The full release is not
+qualified.** PR #7 is the review checkpoint, not a release.
+The [original request](docs/intent.md#1-objective) and
 [delivery contract](contracts/pocket-assistant-delivery.v1.md#essential-promises)
 require useful screen-off voice across **all authorized Unified work**. A
 conversation in one selected chat is the first recovery milestone, not the
@@ -132,10 +133,11 @@ product. Live state and private evidence are indexed in the workspace `SCRATCH.m
 | Display and safe install | App-only update to `0.3.19-amoled-micdiag` (`a17bf56`, image `8536bcf3…`) was read back exactly; the settings region was unchanged before reboot. The user saw Tachikoma and opened Settings on that boot, with no power cycle. This passes display and touch on that boot, not all future boots or voice. |
 | Running gateway | `cea016b` is deployed. One 9.3 s check recovered all eight words of host-generated speech in a preview. It did not use the pet microphone or speaker or send to Unified. |
 | Two-turn LAN call on the pet | On 22 November at 23:01–23:04 UTC, core‑1 diagnostic firmware (`4457f09`, app `aa4cc39f…`) and gateway `cea016b` handled a question for the selected chat title and a follow-up about interruption. Both distinct requests were accepted once and matched to replies in the same Unified chat. The operator heard the title, progress speech and the follow-up answer, then turned the mic off. The gateway counted five progress renders and one reply render as complete, and confirmed a device-initiated close. This proves the observed interaction, not interruption, repeatability or two independently confirmed render completions. The byte-verified app-only install preserved the settings region. |
+| Normal firmware on LAN | From 22 November 23:57 to 23 November 00:07 UTC, the operator saw the display and heard replies on `0.3.19-amoled-boot` (`4457f09`, app `ce87dcba…`, diagnostics off), using gateway `cea016b` with Unified `0.119.0`. The app-only install verified unchanged settings and saved a private rollback. Five distinct submissions were accepted in the same Unified chat: three replies were claimed for rendering, one late reply was not spoken, and one accepted request had no claimed reply by close. The gateway counted three completed reply renders and ten progress renders, and confirmed a close at the call time limit. Five other delegations were refused while work was pending, not queued; audible speech alone did not establish submission. These aggregate counts do not identify the audio heard on each refused attempt. |
 | Voice transport repairs | Firmware `13ff037` preserved marked samples through tested transient socket stalls; paired gateway `d0c18d2` preserved one complete scripted request in the matched offline replay. These repairs do not explain or clear the current capture deficit. |
 | Useful historical baseline | Build 11 (`1004293`, image `fadafa58…`) with gateway `8857705` produced two answers the user heard on 16 November; that call later lost the device. Keep the pair for comparison, not automatic rollback. |
 | Teammate tools and routing | `1d9a514` generated a valid systemd unit in a clean local environment; `8fac599` validated the portable app updater with simulated flash. `86c3df7` verified restricted HTTPS pairing and workspace-filtered A → B → A binding in a disposable Unified 0.117.0 host. None proves a fresh-board install, independent teammate setup, or in-call voice switching. |
-| Feedback repair, source only | `79c18bf` distinguishes no recognized speech, sending, accepted/waiting, and speaking; an accepted send with a lost reply keeps the no-redial fence. All 142 gateway conversation tests, the device protocol/status check and eight focused production-owner cases passed offline. There is no new firmware image or deployment. It does not repair capture. |
+| Feedback repair | `79c18bf` distinguishes no recognized speech, sending, accepted/waiting, and speaking; an accepted send with a lost reply keeps the no-redial fence. All 142 gateway conversation tests, the device protocol/status check and eight focused production-owner cases passed offline. The installed firmware includes the device changes; the running `cea016b` gateway predates the matching gateway changes. This does not queue follow-ups. |
 
 ### Immediate recovery: make the next real call useful
 
@@ -194,7 +196,7 @@ were restored and verified. The baseline window closed without a second leg.
    operator’s call above and the matching Unified records supersede the
    synthetic audio checks. Do not repeat this diagnostic call or substitute a
    tone test for the next increment.
-4. **Qualify LAN reuse on an exact normal build and gateway pairing.** Build
+4. **Qualify LAN reuse on an exact normal build and gateway pairing (partly demonstrated).** Build
    the normal counterpart with the demonstrated display and audio placement,
    without the diagnostic controls. Record the firmware image, gateway commit
    and running Unified version. Preserve app rollback, settings and identity
@@ -208,6 +210,15 @@ were restored and verified. The baseline window closed without a second leg.
    cleanup. Confirm the live gateway follows an authorized Unified restart.
    Stop at the first failed boundary, preserve evidence and do not retry
    automatically. Do not claim this gate on the diagnostic build alone.
+
+**Next LAN increment: queued follow-ups.** The operator chose to keep distinct
+spoken follow-ups addressed to the same conversation while an answer is pending,
+rather than requiring them to be repeated. First check whether the restricted
+Unified companion can explicitly queue an input without steering the active turn.
+Verify that each retained turn is visible or acknowledged accurately, enters
+the same chat in order, and gets its own correlated reply. Do not replay an
+uncertain submission or confuse provider speech with acceptance. Keep this
+experiment separate from the working normal-firmware checkpoint.
 
 ### Remaining release gates, in order
 
