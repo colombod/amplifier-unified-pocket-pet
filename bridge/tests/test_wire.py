@@ -63,6 +63,19 @@ class RequestShapeTest(OfflineTestCase):
         _m, _p, raw = send_command_request(SESSION, CMD, "hi", expected_revision=None)
         self.assertNotIn("expectedRevision", json.loads(raw))
 
+    def test_idle_only_send_opts_in_without_using_a_listing_revision(self):
+        _m, _p, raw = send_command_request(SESSION, CMD, "follow-up", only_if_idle=True)
+        parsed = json.loads(raw)
+        self.assertIs(parsed["args"].pop("onlyIfIdle"), True)
+        _m, _p, legacy = send_command_request(SESSION, CMD, "follow-up")
+        self.assertEqual(parsed, json.loads(legacy))
+
+    def test_invalid_idle_only_option_cannot_become_an_ordinary_send(self):
+        for value in (None, 1, 0, "true"):
+            with self.subTest(value=value), self.assertRaises(WireError) as ctx:
+                send_command_request(SESSION, CMD, "hi", only_if_idle=value)
+            self.assertEqual(ctx.exception.code, "invalid_admission")
+
     def test_text_is_sent_verbatim_with_no_provenance_prefix(self):
         _m, _p, raw = send_command_request(SESSION, CMD, "  spaced  ")
         self.assertEqual(json.loads(raw)["args"]["text"], "  spaced  ")

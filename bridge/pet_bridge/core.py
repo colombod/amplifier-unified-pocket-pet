@@ -806,6 +806,7 @@ class Bridge:
         *,
         expected_text_sha256: str,
         expected_revision: int | None = None,
+        only_if_idle: bool = False,
     ) -> CommandResult:
         """Send the sealed turn once, only if the caller confirms its exact digest.
 
@@ -813,23 +814,29 @@ class Bridge:
         claim) and again to record the outcome; it is NOT held across the transport
         call, so ``stop``/``status``/``epoch_current`` stay responsive and no
         second send can start meanwhile.
+
+        ``only_if_idle`` requires a qualified Unified host that guarantees
+        non-steering admission. A refusal never falls back to an ordinary send.
         """
         with self._lock:
-            claim = self._claim_send(turn_id, expected_text_sha256, expected_revision)
+            claim = self._claim_send(
+                turn_id, expected_text_sha256, expected_revision, only_if_idle
+            )
         if isinstance(claim, CommandResult):
             return claim
         turn, attempted, method, path, body = claim
         return self._send_and_record(turn, attempted, method, path, body)
 
     def _claim_send(
-        self, turn_id: str, digest: Any, revision: Any
+        self, turn_id: str, digest: Any, revision: Any, only_if_idle: bool
     ) -> CommandResult | tuple[_Turn, dict[str, Any], str, str, bytes]:
         turn, refused = self._confirmable(turn_id, digest, revision)
         if turn is None:
             return refused or self._refuse(turn_id, "unknown_turn")
         try:
             method, path, body = wire.send_command_request(
-                turn.binding.session_id, turn_id, turn.text, expected_revision=revision
+                turn.binding.session_id, turn_id, turn.text,
+                expected_revision=revision, only_if_idle=only_if_idle,
             )
             self._gate()
             self._ensure_capacity()

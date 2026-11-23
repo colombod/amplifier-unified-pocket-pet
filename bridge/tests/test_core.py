@@ -438,6 +438,28 @@ class ConfirmGateTest(CoreCase):
         )
         self.assertEqual(len(self.transport.calls), 1)
 
+    def test_idle_only_send_never_falls_back_on_refusal_or_unknown_outcome(self):
+        for response, expected in (
+            ((403, b"{}"), "rejected"),
+            ((200, b'{"accepted":false,"delivery":"failed"}'), "rejected"),
+            ((504, b'{"code":"runtime_pending"}'), "uncertain"),
+        ):
+            with self.subTest(response=response):
+                self.setUp()
+                turn, preview = self.sealed()
+                self.transport.responses.append(response)
+                result = self.bridge.confirm_send(
+                    turn, expected_text_sha256=preview.text_sha256, only_if_idle=True
+                )
+                again = self.bridge.confirm_send(turn, expected_text_sha256=preview.text_sha256)
+                self.assertEqual(result.outcome, expected)
+                self.assertEqual(again.outcome, "refused")
+                self.assertEqual(len(self.transport.calls), 1)
+                _binding, _method, _path, raw = self.transport.calls[0]
+                request = json.loads(raw)
+                self.assertEqual(request["id"], turn)
+                self.assertIs(request["args"]["onlyIfIdle"], True)
+
     def test_duplicate_confirm_across_restart_sends_at_most_once(self):
         turn, _ = self.send(response=ok())
         self.restart()

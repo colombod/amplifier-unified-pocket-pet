@@ -118,8 +118,9 @@ def send_command_request(
     text: str,
     *,
     expected_revision: int | None = None,
+    only_if_idle: bool = False,
 ) -> tuple[str, str, bytes]:
-    """Build the exact ``conversation.send`` request as ``(method, path, body)``."""
+    """Build one send. Opt in to idle-only admission on a qualified host only."""
     if not valid_session_id(session_id):
         raise WireError("invalid_session_id")
     if not is_canonical_uuid4(command_id):
@@ -129,6 +130,8 @@ def send_command_request(
         type(expected_revision) is not int or expected_revision < 0
     ):
         raise WireError("invalid_revision")
+    if type(only_if_idle) is not bool:
+        raise WireError("invalid_admission")
     payload: dict[str, Any] = {
         "id": command_id,
         "action": "conversation.send",
@@ -141,6 +144,8 @@ def send_command_request(
     }
     if expected_revision is not None:
         payload["expectedRevision"] = expected_revision
+    if only_if_idle:
+        payload["args"]["onlyIfIdle"] = True
     raw = json.dumps(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     )
