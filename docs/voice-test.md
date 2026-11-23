@@ -75,5 +75,6 @@ or an audible response. No live API call is made by the automated checks.
 The user confirmed on 10 November 2026 that they can talk with the assistant and
 called this milestone 1. This is physical user acceptance of the standalone
 spoken path. It does not imply durable memory, a Unified connection, a measured
-latency/resource envelope, full-duplex AEC or long-duration robustness. See
-[milestone-1.md](milestone-1.md). New Talk sessions currently start fresh.
+latency/resource envelope, full-duplex AEC or long-duration robustness.
+Standalone Talk sessions started fresh; the current Unified path is described
+in [Architecture](ARCHITECTURE.md).

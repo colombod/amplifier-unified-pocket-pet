@@ -3,9 +3,10 @@
 ## Outcome and agreement
 
 Build and ship the [portable whole-Unified voice assistant](docs/VISION.md).
-The [delivery contract](contracts/pocket-assistant-delivery.v1.md) owns product
-promises P1–P9 and their agreement status. This is the one current design and
-delivery plan; saved host tasks own execution status. The earlier fixed-session
+The [delivery contract](docs/CONTRACT.md) owns product promises P1–P9 and their
+agreement status. [Architecture](docs/ARCHITECTURE.md) explains the current
+design; this brief owns sequencing and evidence. Saved host tasks own execution
+status. The earlier fixed-session
 milestone is an integration step, not the product boundary. Current user
 corrections require a clean UI, recovery without ordinary power cycling, and
 starting a new chat in a new workspace as well as continuing existing work.
@@ -122,7 +123,7 @@ spoken Unified replies on LAN in one selected chat. The full release is not
 qualified.** The PR #7 snapshot is the baseline for the opt-in LAN source
 preview, not acceptance of the full product.
 The [original request](docs/intent.md#1-objective) and
-[delivery contract](contracts/pocket-assistant-delivery.v1.md#essential-promises)
+[delivery contract](docs/CONTRACT.md#essential-promises)
 require useful screen-off voice across **all authorized Unified work**. A
 conversation in one selected chat is the first recovery milestone, not the
 product. Live state and private evidence are indexed in the workspace `SCRATCH.md`.

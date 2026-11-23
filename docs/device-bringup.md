@@ -250,9 +250,8 @@ explicitly identified its limitation: it is a private chat without memory. No
 new USB observer was opened at that point, because opening the port can reset an
 active voice conversation. The user's audible acceptance and the installation
 record are kept distinct from automated startup/protocol evidence. The baseline
-is tagged milestone-1-voice; [the milestone record](milestone-1.md) captures the
-core decisions, achievements, limitations and lessons. The next work is Unified
-integration and persistent host-owned conversation, not a replacement chatbot.
+is tagged `milestone-1-voice`. For the current Unified integration and hardware
+boundaries, see [Architecture](ARCHITECTURE.md).
 
 
 ### Post-restart health and PR review, 0.3.6
