@@ -1,5 +1,8 @@
 # Handoff: turn the working voice pet into a Unified assistant
 
+This is a historical record of the standalone app. For the supported firmware,
+use the [Pocket Pet setup guide](team-prototype.md#start-here).
+
 ## User direction
 
 The user has a working standalone voice pet and wants a useful portable interface
@@ -122,18 +125,10 @@ cloud queue or distributed orchestration is required or implemented here.
 
 ## Reproduction and recovery
 
-```sh
-docker compose build
-sh scripts/build.sh
-node tests/setup_page_test.mjs
-docker compose run --rm idf bash -c 'set -e; for name in setup_address live_protocol touch_alignment network_retry; do cc -Wall -Wextra -Werror -I main tests/${name}_test.c -lm -o /tmp/${name}_test; /tmp/${name}_test; done'
-```
-
-Host USB tools are project-local; the actual port must be identified before use.
-App-only writes use 0x10000 and preserve NVS. A complete private factory backup
-was digest-verified and restored successfully; `scripts/restore_factory.sh`
-requires that original local backup and the actual port. Never commit or transmit
-it: it can contain credentials. Read the local AGENTS.md before work.
+The standalone build commands live in Git history. The full factory backup for
+the original board was digest-verified and restored successfully at the time;
+that recovery was not a firmware update. Keep backups private: they can contain
+credentials. For current installation guidance, see the [setup guide](team-prototype.md#start-here).
 
 Opening USB serial can reset this board even with nominal no-reset flags. Start
 one bounded observer before a physical test and keep it open. Do not reopen it

@@ -13,7 +13,7 @@ turnkey install on a second person's hardware.
 
 1. **Get the correct board.** Order the **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**
    (CO5300/CST820, 16 MB flash, 8 MB PSRAM, ES8311 audio), not the LCD-1.83 or the
-   earlier AMOLED revision. Use a USB-C data cable and a spare, unprovisioned board.
+   earlier AMOLED revision. Use a USB-C data cable.
 2. **Get one release.** From [Pocket releases](https://github.com/colombod/amplifier-unified-pocket-pet/releases),
    choose `v0.3.19-lan-preview.2` and use its tagged source throughout. Check
    [host, account, Wi-Fi and TLS requirements](#what-to-get) before you write anything.
@@ -22,9 +22,11 @@ turnkey install on a second person's hardware.
    it to your own dedicated Unified chat. Start and verify the gateway using
    [the service checks](../bridge/deploy/README.md#check-the-current-start). Stop if the free
    compatibility or listener check fails; don't diagnose this with paid calls.
-4. **Prepare the spare board.** Follow [the matched build and flash instructions](#1-obtain-a-matched-build-and-preserve-the-board).
-   Back up and verify the board before writing; never use the fresh flash procedure
-   on a provisioned pet. Require a visible pet and working touch before setup.
+4. **Install Pocket Pet firmware.** Follow [the build instructions](#1-obtain-a-matched-build-and-preserve-the-board).
+   Use [first install](#first-install-on-a-new-board) on an unprovisioned board
+   and [app-only update guidance](#update-a-pet-thats-already-set-up) on a pet with
+   saved settings. Both start with checking the board and preserving a backup
+   before any write.
 5. **Provision by phone, then try one question.** Follow [phone setup](#3-configure-from-a-phone),
    then use the [first-call checklist](#first-spoken-check). The phone needs only
    Wi-Fi and this pet's gateway token. Your Unified and OpenAI keys stay on your host.
@@ -107,15 +109,13 @@ reconnect behavior.**
 
 ## 1. Obtain a matched build and preserve the board
 
-For this source preview, use the gateway and build `unified_pet` from the
-same tagged release source. The build below produces a flash manifest.
-A fresh-board flash has not been physically qualified; use a spare matching
-board and follow the preservation guidance below. The root app's older
-`esp32_pet` image is **not** the Unified app.
+For this source preview, use the gateway and build Pocket Pet firmware from the
+same tagged release source. The build produces `unified_pet.bin` and a flash manifest.
+There is no prebuilt download yet. See the separate instructions below for a
+first install or an update that preserves existing settings.
 
-The independent app's build script is `apps/unified-pet/scripts/build.sh`. It
-requires a reachable Docker daemon (`docker info`) and a locally cached ESP-IDF
-5.5.4 image with Pillow 11.3.0. Its explicit `--offline-cache` mode also requires
+The build requires a reachable Docker daemon (`docker info`) and a locally
+cached ESP-IDF 5.5.4 image with Pillow 11.3.0. Its explicit `--offline-cache` mode also requires
 the matching component cache. The build deliberately
 does not download an SDK or components during the build.
 
@@ -160,8 +160,7 @@ docker build --platform linux/amd64 --pull --no-cache \
 On the maintainer's Linux AMD64 host, Docker resolved the pinned image index,
 reused local base layers, and ran the architecture and Python checks and a
 fresh, hash-checked Pillow install. This did not test an empty Docker base-image
-store or ARM64. The root `compose.yaml` selects ARM64 for the older root app;
-it is not the Unified app's build command.
+store or ARM64.
 
 Then use the new image and the `PET_COMPONENT_CACHE` exported above to run
 the offline build from the same checkout:
@@ -177,11 +176,14 @@ The build above also generates `apps/unified-pet/sdkconfig` from the tracked
 including the link rig and the historical isolation boundary check, **after**
 the build. Do not copy an `sdkconfig` from a different checkout into a clean one.
 
-**First install on a spare, unprovisioned V2 board only.** Do not follow these
-steps on a board that holds settings, credentials or a device identity you need
-to keep. A change of partition layout can make old settings unreadable even
-without a chip erase. Use the exact V2 board and identify its USB serial port
-before opening it; opening serial can reset the board. Close any serial monitor.
+### First install on a new board
+
+Use an unprovisioned V2 board. A first install writes the bootloader, partition
+table (the map of flash storage), and app. Changing that map can make saved
+settings unreadable even without erasing the chip. If the pet already has
+settings you want to keep, use the update guidance below. Use the exact V2 board
+and identify its USB serial port before opening it; opening serial can reset the
+board. Close any serial monitor.
 Use esptool 4.11.0 (from a local environment with pyserial 3.5 or the ESP-IDF
 image if it reports the same version). Use stable power and stop on any error.
 
@@ -235,8 +237,12 @@ image if it reports the same version). Use stable power and stop on any error.
    screen doesn't come up, stop rather than reflash or erase. This first-board
    procedure has not yet been qualified on a spare V2 in a physical test.
 
-**Already provisioned board — offline app update plan:** the repository
-includes [`update_app.py`](../apps/unified-pet/scripts/update_app.py). Use a
+### Update a pet that’s already set up
+
+An update should replace only the app and leave the bootloader, partition table,
+and settings storage alone. The portable tool's write mode has not been
+qualified on a physical board: **keep your current firmware and use the dry run
+only**. Run [`update_app.py`](../apps/unified-pet/scripts/update_app.py) with a
 local Linux Python environment with `esptool==4.11.0` and `pyserial==3.5`.
 Use a firmware SHA-256 from an independently trusted, matched build. From the
 repo root, with `PET_TOOLS_PYTHON`, `APP_IMAGE` and `APP_SHA256` set:
