@@ -3964,10 +3964,15 @@ class RepairCloseTest(FlowCase):
         self.provider.auto_close = False
         self.assertTrue(self.device.of_type("pet.converse.began"))
         await self.clock.advance(27.9)
-        self.assertFalse(self.device.of_type("pet.converse.notice"))
+        # The recognition hint is informational. It neither ends the call
+        # early nor shifts the original absolute deadline.
+        self.assertEqual([notice["code"] for notice in
+                          self.device.of_type("pet.converse.notice")], ["no_words_yet"])
+        self.assertFalse(self.h.task.done())
         await self.clock.advance(0.1)
-        self.assertEqual(self.device.of_type("pet.converse.notice"),
-                         [{"type": "pet.converse.notice", "code": "time_limit"}])
+        self.assertEqual([notice["code"] for notice in
+                          self.device.of_type("pet.converse.notice")],
+                         ["no_words_yet", "time_limit"])
         await self.clock.advance(2)
         outcome = await self.h.finish()
         self.assertAlmostEqual(self.clock.now() - t0, 45)
