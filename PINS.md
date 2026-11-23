@@ -14,7 +14,7 @@ Read before your first command. Facts only; rules live in `AGENTS.md`, promises 
 | Product promises and delivery sequence | `contracts/pocket-assistant-delivery.v1.md`, `PROJECT-BRIEF.md` (earlier single-session milestone is historical) |
 | Historical standalone voice milestone | `docs/milestone-1.md` |
 | Host bridge source / tests | `bridge/pet_bridge/`, `bridge/tests/` |
-| Device app | `apps/unified-pet/` (root `main/` is the older conversation app) |
+| Device app | `apps/unified-pet/`; `sh scripts/build.sh` builds it from the repository root. Root `main/` is retained for historical regression tests, not installation. |
 | Conformance ledger, kit, pre-push guard | none exist |
 | Current local product integration | `product/integration` in the GitHub-connected repository; `main` is the published base, not the installed product |
 | Historical two-answer comparator | Firmware `1004293` (Build 11) and gateway `8857705`; see the dated physical evidence in `PROJECT-BRIEF.md`. Not a supported release. |
@@ -26,7 +26,7 @@ Read before your first command. Facts only; rules live in `AGENTS.md`, promises 
 - Board: Waveshare ESP32-S3-Touch-AMOLED-1.8 V2; 368×448 AMOLED CO5300, touch
   CST820, audio ES8311; 16 MiB flash; 8 MiB octal PSRAM. Not the LCD-1.83 board.
 - BSP `waveshare/esp32_s3_touch_amoled_1_8` 2.0.3; ESP-IDF 5.5.4 pinned by Docker
-  image digest; versions locked in `dependencies.lock`.
+  image digest; versions locked in `apps/unified-pet/dependencies.lock`.
 - Device NVS namespace for the new app: `unified_pet`. Never restore old NVS over
   the current Wi-Fi settings.
 
@@ -51,5 +51,5 @@ node tests/setup_page_test.mjs                                                  
 node tests/setup_unified_page_test.mjs                                              # Unified target setup page
 sh tests/run_native.sh <output-dir>                                                 # root native suites, inside pinned SDK
 sh tests/run_shared.sh <output-dir>                                                 # shared TLS/touch components, inside pinned SDK
-sh apps/unified-pet/scripts/build.sh                                                # device app build, offline cached image
+sh scripts/build.sh --offline-cache                                                # Pocket Pet build, offline tools image and component cache
 ```

@@ -65,10 +65,12 @@ Vendored TailTiny v3.1.0 provenance/patches are in `components/tailtiny/source-m
 
 Run both Node suites (`setup_page_test.mjs`, `setup_unified_page_test.mjs`) and `sh tests/run_native.sh <output-dir>` inside the pinned SDK image; native suites use actual production helpers, cJSON/X25519 and ASan/UBSan. `tailnet_tls_test.py` drives the production TLS implementation with real host mbedTLS and synthetic certificates over socketpairs; `tls_host` stubs only hardware seams. Offline build receipts, exact USB path, caps and unexercised physical/lifecycle boundaries belong to `working-files/tailnet-connectivity` in the workspace, not tracked source. Passing these checks is not enrollment, reset persistence, measured device memory, direct/DERP delivery or device TLS trust.
 
-## Independent app/shared components
+## Supported firmware and shared components
 
-Root remains the conversation app. `apps/unified-pet` owns its own behavior,
-config/assets/output and writes only `unified_pet`; never import root `main`.
+`apps/unified-pet` is the only supported firmware build. Use `sh scripts/build.sh`
+from the repository root. Root `main/` holds historical standalone source still
+used by regression tests. Never import it into the supported firmware or restore
+it as a product build target.
 TLS/HTTP and full calibration live once in `components/pet_tls` and
 `components/pet_touch_calibration`. Keep root calibration's `pet_touch/map` and
 probe API unchanged; only new-app builds select the private touch store define.

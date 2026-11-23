@@ -32,7 +32,7 @@ if [ "${1:-}" != --inside-sdk ]; then
     offline=1
     test -n "${PET_COMPONENT_CACHE:-}" || { printf '%s\n' 'PET_COMPONENT_CACHE is required' >&2; exit 2; }
   fi
-  # Use the actual local image platform, not the root Compose's Mac arm64 host pin.
+  # Use the actual local image platform.
   # Target remains ESP32-S3. Root is read-only; only this app can receive outputs.
   set -- docker create --pull never --network none \
     --memory 4g --memory-swap 4g --cpus 3 --pids-limit 512 \

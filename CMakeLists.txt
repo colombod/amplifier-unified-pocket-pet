@@ -1,5 +1,0 @@
-cmake_minimum_required(VERSION 3.16)
-set(PROJECT_VER "0.3.8-amoled-v2-health")
-list(APPEND EXTRA_COMPONENT_DIRS "components/tailtiny/components/wireguard_lwip")
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(esp32_pet)

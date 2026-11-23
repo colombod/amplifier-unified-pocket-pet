@@ -114,8 +114,9 @@ and attention-round-trip spikes #1/#2/#4.
 The complete original backup remains private at
 `private-backups/factory-20261110/factory-flash.bin` with its local digest manifest.
 It can contain credentials and is deliberately excluded from Git. Recovery was
-exercised successfully. `scripts/restore_factory.sh ACTUAL_PORT` restores it at
-0x0; do not run it as an environment test. Verify the actual port/device first.
+exercised successfully on the original board. The old board-specific restore
+script is no longer part of the install path; see the
+[Pocket Pet setup guide](team-prototype.md#start-here) for current instructions.
 The last user-accepted audio app is also retained privately for app-only rollback.
 
 Current incremental installations write only the app at **0x10000** with the
