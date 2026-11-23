@@ -1,138 +1,31 @@
 # Amplifier Unified Pocket Pet
 
-A portable Wi-Fi voice interface to a personal manager across Amplifier Unified:
-start work, continue existing sessions, and answer things waiting on the human.
-The animated Tachikoma, microphone, speaker and touch display provide a screen-off
-companion. [Original intent](docs/intent.md) and the [draft vision](docs/VISION.md)
-retain the distinction between the goal and a proven integration.
+**A pocket-sized voice companion for the work you already do in Amplifier Unified.** Tap the mic, ask your Unified chat a question, and hear the answer from the pet without opening your laptop.
 
-## Unified LAN voice preview
+<img src="assets/tachikoma-preview.png" width="192" height="195" alt="Tachikoma, the animated Pocket Pet character" />
 
-The independent app in `apps/unified-pet` talks to the Linux gateway in
-`bridge/`, which routes voice to one selected Amplifier Unified conversation.
-Normal firmware `0.3.19-amoled-boot` on a Waveshare ESP32-S3-Touch-AMOLED-1.8 V2
-produced spoken replies on a home LAN. In the latest physical call, gateway
-`c3349b4` and stock Unified `0.119.1` recorded six accepted requests, six reply
-renders and one follow-up refused while work was pending.
+[**Set up your first Pocket Pet**](docs/team-prototype.md#start-here) · [Download the LAN preview source](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.2) · [Report a problem or request a feature](https://github.com/colombod/amplifier-unified-pocket-pet/issues)
 
-Start with the [teammate setup checklist](docs/team-prototype.md#start-here).
-It lists the exact board, gateway prerequisites, safe flashing, phone provisioning
-and a first spoken check. The preview requires your own Unified and GPT-Live
-access, trusted gateway TLS and a LAN. Independent fresh-board setup, off-home
-Tailscale and cross-workspace voice actions are not qualified.
+## How it works
 
-Tap the microphone to start and again to mute. Wait for the spoken reply before
-asking another question: follow-ups spoken while a request is pending are not
-queued. Muting ends the audio, not work already accepted by Unified. A call or
-eligible reconnect can incur provider charges. See the
-[delivery brief](PROJECT-BRIEF.md#delivery-sequence) for the evidence and limits.
+1. **The pet** is a Waveshare ESP32-S3 board with a touchscreen, microphone, and speaker. Tap the mic to start a call over Wi-Fi.
+2. **The Pocket gateway** runs on your Linux host. It uses OpenAI GPT-Live for voice and a paired companion credential to send requests to the Unified chat you selected during setup.
+3. **Your existing Unified chat** does the work. The pet shows **Accepted** when Unified accepts a request, then speaks the reply when it comes back. Pocket is a companion, not a separate assistant or a replacement for Unified.
 
-## Earlier milestone — standalone spoken conversation
+The LAN preview is usable with **one selected chat and one request at a time**. Wait for the spoken answer before asking another question; follow-ups are not queued, and progress reminders may repeat during long waits. **Mic Off** ends the audio, not work Unified already accepted. There is no background playback, remote mic reopening, off-home device access, or on-device workspace switching in this release.
 
-On 10 November 2026 the user confirmed they can talk with the assistant. Firmware
-**0.3.5-amoled-v2-live** is the milestone baseline. This is a standalone voice
-conversation: it has no persistent memory or Amplifier Unified access yet.
-[Decisions, achievements and device lessons](docs/milestone-1.md).
+## Install, deploy, and configure
 
-## Historical standalone implementation — 10 November 2026
+**You’ll need:** a **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2** (not the LCD-1.83 or earlier AMOLED version), a USB-C data cable, a phone, and a 2.4 GHz LAN. The gateway needs a Linux host with stock Amplifier Unified, a TLS certificate the pet trusts, and your own OpenAI API key with `gpt-live-1` access. The live voice path was verified with stock Unified `0.119.1`; run the guide’s compatibility check before pairing a different release.
 
-The following table describes the older root app, **not** the current independent
-Unified app or its setup.
-
-| Capability | Actual evidence |
+| Step | What to do |
 | --- | --- |
-| Correct display and touch profile | Connected board is **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**, 368×448 CO5300/CST820. Original LCD-1.83 link was mismatched. User confirmed factory recovery and corrected pet QR screen. |
-| Animated Tachikoma | Existing user-owned ChatGPT artwork preserved; 73 RGB565 frames mapped in flash. Idle, tap-wave and thinking animations implemented. |
-| Phone provisioning | Password-protected device Wi-Fi, QR join, phone page at `http://192.168.4.1`, 2.4 GHz scan, required OpenAI key, checked persistence, retry feedback and installed-version labels implemented. Successful save and restart reconnection observed; the user confirmed reconfiguration edits stay intact and the saved key is recognized. iPhone automatic captive-page opening remains unconfirmed. |
-| Wi-Fi status and touch alignment | Home/Settings show link status and RSSI separately from voice state. Four-point affine touch alignment is implemented with independent center validation and NVS persistence; physical accuracy is pending. |
-| Local audio and volume | User confirmed both speaker tone and recorded playback audible at about 70%. Volume persists. Microphone playback is quieter than the tone, with occasional clipped peaks; gain/fidelity still needs tuning. |
-| GPT-Live voice baseline | `0.3.8-amoled-v2-health` builds with Talk/Stop, secure WebSocket streaming, visible states and managed Responses reasoning. Build and protocol checks pass. The first runtime trial authenticated and received audio, then overflowed its playback buffer. The user has confirmed working spoken conversation. Fresh sessions do not retain prior conversations; long-duration reliability and Unified integration remain unverified. See [voice test](docs/voice-test.md). |
-| Unified / remote access | No Unified connector, Tailscale enrollment, cross-workspace operations or attention-answer round trip implemented. The direct OpenAI voice test is an isolated hardware spike. |
+| **1. Get the release** | Download [the LAN preview](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.2). Use the same tagged source for the gateway and firmware. This is a source release, not a pre-flashed kit. |
+| **2. Deploy the gateway** | [Set up the Linux service](bridge/deploy/README.md), [pair it with stock Unified](docs/team-prototype.md#2-prepare-unified-and-the-gateway), and select a chat. Verify the [TLS LAN listener](bridge/deploy/README.md#check-the-current-start) before making a paid call. |
+| **3. Install the firmware** | Follow the [build, backup, and flash guide](docs/team-prototype.md#1-obtain-a-matched-build-and-preserve-the-board) for `unified_pet`, not the repository’s older root app. Use a spare board for the fresh-install steps; do not erase a provisioned pet or overwrite its saved settings. |
+| **4. Configure the pet** | In **Settings → Phone setup**, scan the QR code. [Enter the gateway address, TLS name, and pet token, then save Wi-Fi](docs/team-prototype.md#3-configure-from-a-phone). Your Unified and OpenAI credentials stay on the host. |
+| **5. Hear a reply** | Tap the mic, wait for **Listening**, and ask: **“Ask Unified what this chat is called.”** Wait for **Accepted** and the spoken answer, then check that the request landed once in the selected chat. See the [first-call checklist](docs/team-prototype.md#first-spoken-check) if it doesn’t. |
 
-The [bring-up record](docs/device-bringup.md) includes the failed display route,
-factory recovery, pairing fixes, audio changes and validation boundaries.
-[Sanitized evidence](docs/device-evidence.json) records artifact identities.
-Historical Linux toolkit evidence remains in [development-toolkit.md](docs/development-toolkit.md);
-the Mac firmware workspace uses the Docker workflow below.
+**Privacy and cost:** During a call, OpenAI processes microphone audio and the reply text used for speech. Voice and Unified model usage can incur charges. Check the actual chat for consequential details: spoken output is not guaranteed to be verbatim.
 
-## Historical standalone device use
-
-These instructions are for the older standalone root app, not the Unified
-prototype. In bridge mode the OpenAI key belongs on the host, not the pet.
-
-1. Open the gear icon, choose **Wi-Fi & OpenAI key**, and scan the QR to join its password-protected `Tachikoma-…-Setup` network.
-2. If no page opens automatically, browse to `http://192.168.4.1` while still on that Wi-Fi.
-3. Select a 2.4 GHz network and enter its password and your required OpenAI API key.
-4. Wait until settings are confirmed saved, then choose Done. Subsequent network changes can retain the saved key.
-5. If touch positions are offset, open **Settings → Touch alignment**, tap each ring center and lift, then check the fourth center point.
-6. In **Settings → Audio / volume**, adjust speaker level and run the local tone or three-second record/playback test.
-7. On the pet screen, the round **microphone** starts the voice session; the square **Stop** ends it.
-
-The setup page is reachable only through the device AP; it never returns the saved
-key. Provisioning changes require a per-boot token. Failed joins keep setup
-available; an interrupted response is shown as uncertain until a confirmed save.
-The prototype uses standard NVS, without encrypted flash or secure boot. Do not
-share flash dumps. No API call or microphone capture starts on boot.
-
-## Build the historical root app on the Mac
-
-Requires Docker Desktop. No global ESP-IDF install is used.
-For the Unified app, see `apps/unified-pet/scripts/build.sh`; this root-app
-procedure produces a different firmware image.
-
-```sh
-docker compose build
-sh scripts/build.sh
-```
-
-ESP-IDF **5.5.4** is pinned by image digest. Managed versions are locked in
-`dependencies.lock`: Waveshare AMOLED BSP **2.0.3**, LVGL **9.3.0**,
-esp_lvgl_port **2.6.2**, esp_websocket_client **1.6.1**. Pillow **11.3.0** lives
-only in the image. The exporter recreates ignored generated assets from the
-unchanged source sheet; the output is `build-amoled/esp32_pet.bin`.
-
-```sh
-node tests/setup_page_test.mjs
-docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/setup_address_test.c -o /tmp/setup_address_test && /tmp/setup_address_test'
-docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/live_protocol_test.c -o /tmp/live_protocol_test && /tmp/live_protocol_test'
-docker compose run --rm idf bash -c 'cc -Wall -Wextra -Werror -I main tests/touch_alignment_test.c -lm -o /tmp/touch_alignment_test && /tmp/touch_alignment_test'
-```
-
-These checks cover setup retry/save behavior, AP address checks including mapped
-IPv6, and bounded WebSocket reassembly across TCP splits and continuation frames.
-Touch-transform native tests also cover offset, scale/swap and rejected degenerate points. These checks do not call OpenAI or prove physical audio quality.
-
-For macOS USB flashing, reproduce the allowed project-local tools with:
-
-```sh
-python3 -m venv .host-tools
-.host-tools/bin/pip install esptool==4.11.0 pyserial==3.5
-.host-tools/bin/python -m serial.tools.list_ports
-```
-
-Identify the actual Espressif device before opening it. Docker Desktop does not
-directly expose macOS `/dev/cu.*` ports. A verified complete factory backup and
-restore script exist locally; see [recovery](docs/device-bringup.md#recovery-and-installation).
-Backups, secrets, raw logs, binaries and generated outputs are excluded from Git.
-
-The installed health baseline is **0.3.8-amoled-v2-health**. After the streaming
-and startup-sequencing fixes, the user confirmed two clean voice starts/stops
-with clean speech. The original milestone tag preserves the first spoken
-baseline; long-duration reliability remains unmeasured.
-
-The post-restart health/review record is [PR #6 review](docs/pr-6-review.md).
-The next implementation context is [Unified handoff](docs/unified-handoff.md);
-the user chose the shared LAN for the first connection.
-
-## Experiments toward the Unified goal
-
-The existing questions remain open; none is closed by the standalone voice test.
-
-| Spike | Remaining qualification |
-| --- | --- |
-| [#1 Native Tailscale](https://github.com/colombod/amplifier-unified-pocket-pet/issues/1) | Runtime reachability, reconnect, direct/DERP behavior and resource measurements on the corrected board. |
-| [#2 Unified integration](https://github.com/colombod/amplifier-unified-pocket-pet/issues/2) | Installed-host capabilities, scoped authentication, exact-session continuity and broader manager operations through supported contracts. |
-| [#3 Voice and concurrency](https://github.com/colombod/amplifier-unified-pocket-pet/issues/3) | First live speech reply, latency/dropout/resource measurements, touch/animation under load, then voice through the intended Unified session. |
-| [#4 Attention round trip](https://github.com/colombod/amplifier-unified-pocket-pet/issues/4) | Real waiting-question cue and human answer to the correct revision, including stale/duplicate/reconnect cases. |
-
-Current implementation scope and authorization are recorded in [PROJECT-BRIEF.md](PROJECT-BRIEF.md).
+Real spoken replies have been verified on the maintainer’s provisioned board. A separate fresh-board and fresh-host install has not yet been verified end to end. See the [delivery brief](PROJECT-BRIEF.md#delivery-sequence) for evidence and the [issue tracker](https://github.com/colombod/amplifier-unified-pocket-pet/issues) for future work.
