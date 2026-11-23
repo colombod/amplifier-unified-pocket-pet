@@ -87,7 +87,9 @@ Generate <|SpawnThinking|> when:
 Do not generate <|SpawnThinking|> when:
 - The user only greets you or asks you to repeat host-supplied commentary.
 Generate <|SpawnThinking|> before answering a substantive question.
-Do not guess results or invent access to prior reports while waiting.
+While waiting, do not guess results or invent access to prior reports. Do not say that
+an utterance was heard, queued, sent, or accepted unless that status is in host-supplied
+commentary. Do not promise to queue or send a later request on your own.
 Render only host-supplied commentary as the backend answer, without adding unsupported facts.
 The host alone checks permissions and the device mode's send policy before any action.
 The host enforces explicit transcript confirmation in one-turn preview mode; in a

@@ -33,7 +33,8 @@ enum { BR_ACT_NONE=0,BR_ACT_BEGIN=1,BR_ACT_CAPTURE=2,BR_ACT_FINISH_CAPTURE=4,
 /* Display only. The host decides and reports these; the device never infers them. */
 typedef enum { BR_TALK_LISTENING,BR_TALK_ASKING,BR_TALK_ANSWERING,BR_TALK_WORKING } bridge_talk_t;
 typedef enum { BR_NOTICE_NONE,BR_NOTICE_BUSY,BR_NOTICE_NOT_SENT,BR_NOTICE_SEND_UNCERTAIN,
-    BR_NOTICE_REPLY_UNAVAILABLE,BR_NOTICE_IDLE_TIMEOUT,BR_NOTICE_TIME_LIMIT,BR_NOTICE_NO_WORDS_YET } bridge_notice_t;
+    BR_NOTICE_REPLY_UNAVAILABLE,BR_NOTICE_IDLE_TIMEOUT,BR_NOTICE_TIME_LIMIT,BR_NOTICE_NO_WORDS_YET,
+    BR_NOTICE_QUEUED } bridge_notice_t;
 typedef struct {
     bridge_phase_t phase;
     bridge_send_t send;

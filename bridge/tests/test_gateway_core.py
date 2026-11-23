@@ -1371,7 +1371,7 @@ class Harness:
             for _ in range(20):
                 await asyncio.sleep(0)
 
-    async def open(self) -> None:
+    async def open(self, *, transcribe_followup=None, acceptance_cue=b"") -> None:
         settings = gc.SessionSettings(self.model, "marin", LABEL, SHORT8)
         self.runner.start()
         self.session = gc.PetSession(
@@ -1382,6 +1382,8 @@ class Harness:
             settings,
             self.clock,
             new_event_id=self.new_id,
+            transcribe_followup=transcribe_followup,
+            acceptance_cue=acceptance_cue,
         )
 
     async def aclose(self) -> None:

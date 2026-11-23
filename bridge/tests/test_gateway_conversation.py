@@ -81,10 +81,15 @@ class ConversationCase(OfflineAsyncCase):
     async def asyncSetUp(self):
         self.h = old.Harness()
         self.addAsyncCleanup(self.h.aclose)
-        await self.h.open()
+        await self.h.open(
+            transcribe_followup=self.transcribe_followup, acceptance_cue=self.acceptance_cue
+        )
         self.h.ops.results["begin"] = IdFactory(500)
         await self.h.boot()
         await self.h.feed(BEGIN)
+
+    transcribe_followup = None
+    acceptance_cue = b""
 
     def states(self):
         return [f["state"] for f in self.h.device.of_type("pet.converse.state")]
@@ -122,6 +127,9 @@ class ConversationCase(OfflineAsyncCase):
 
 
 class MicrophoneFollowupTest(ConversationCase):
+    async def transcribe_followup(self, pcm):
+        return await self.recognize(pcm)
+
     async def pcm(self, sample: int, packets: int) -> None:
         pcm = sample.to_bytes(2, "little", signed=True) * 2400
         for _ in range(packets):
@@ -129,6 +137,37 @@ class MicrophoneFollowupTest(ConversationCase):
                 "type": "session.input_audio.append",
                 "audio": base64.b64encode(pcm).decode("ascii"),
             })
+
+    async def test_waiting_provider_audio_never_plays_over_followup_capture(self):
+        items = []
+
+        async def transcribe(pcm):
+            items.append(pcm)
+            return "Second question"
+
+        self.recognize = transcribe
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "pending", False, self.h.ops.epoch, None
+        )
+        await self.request()
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_FIRST_S)
+        self.assertEqual(self.h.provider.of_type("session.commentary.append"), [])
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.pcm(900, 3)
+        self.assertTrue(self.h.session._followup_capture.active)
+        # Live PCM has no render identifier. Test unsolicited/delayed output both
+        # before the utterance and after it has started, not just timer admission.
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(0.3)
+        self.assertEqual(self.h.device.of_type("session.output_audio.delta"), [])
+        await self.pcm(900, 3)
+        await self.pcm(0, 7)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(self.notices(), ["queued"])
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        await self.stop()
 
     async def test_two_distinct_wire_utterances_enter_fifo_without_competing_live_input(self):
         import hashlib
@@ -143,7 +182,7 @@ class MicrophoneFollowupTest(ConversationCase):
                 return "Second question"
             return "Third question"
 
-        self.h.session._transcribe_followup = transcribe
+        self.recognize = transcribe
         self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
             turn, "speak", "reply_complete", True, self.h.ops.epoch, f"Answer for {turn}."
         )
@@ -198,7 +237,7 @@ class MicrophoneFollowupTest(ConversationCase):
                 cancelled.set()
                 return "Must never enter the queue"
 
-        self.h.session._transcribe_followup = finishing_after_cancel
+        self.recognize = finishing_after_cancel
         await self.request()
         await self.pcm(900, 3)
         await self.pcm(0, 7)
@@ -220,6 +259,48 @@ class MicrophoneFollowupTest(ConversationCase):
                   for event in capture.feed(pcm)]
         self.assertEqual(len(events), 1)
         self.assertIsInstance(events[0], bytes)
+
+
+class AcceptanceCueTest(ConversationCase):
+    acceptance_cue = (2100).to_bytes(2, "little", signed=True) * 24000
+    pcm = MicrophoneFollowupTest.pcm
+
+    async def transcribe_followup(self, _pcm):
+        return "Second question"
+
+    async def test_cue_waits_for_capture_and_never_admits_live_pcm(self):
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "pending", False, self.h.ops.epoch, None
+        )
+        confirm = self.h.ops.hold("confirm")
+        await self.request()
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_FIRST_S)
+        self.assertNotIn("working", self.states())
+        self.assertEqual(self.h.device.of_type("session.output_audio.delta"), [])
+        confirm.set()
+        await self.h.quiesce()
+        self.assertIn("working", self.states())
+        await self.pcm(900, 3)
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_FIRST_S)
+        self.assertTrue(self.h.session._followup_capture.active)
+        self.assertEqual(self.h.device.of_type("session.output_audio.delta"), [])
+        await self.pcm(0, 7)
+        await self.h.clock.advance(0.15)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        for _ in range(15):
+            await self.h.clock.advance(0.1)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(gs.CONVERSE_SPEECH_QUIET_S + gs.CONVERSE_PROGRESS_REPEAT_S)
+        audio = self.h.device.of_type("session.output_audio.delta")
+        self.assertEqual(b"".join(base64.b64decode(row["delta"]) for row in audio),
+                         self.acceptance_cue)
+        self.assertEqual(self.notices(), ["queued"])
+        self.assertEqual(self.h.provider.of_type("session.commentary.append"), [])
+        self.assertNotIn("answering", self.states())
+        result = await self.stop()
+        self.assertEqual((result.progress_attempted, result.progress_rendered), (1, 1))
 
 
 class ConversationTest(ConversationCase):
@@ -386,6 +467,18 @@ class ConversationTest(ConversationCase):
         self.assertEqual(self.h.ops.count("confirm"), 1)
         self.assertEqual(self.states()[-1], "listening")
         await self.stop()
+
+    async def test_unqueued_busy_followup_is_reported_without_interrupting_first_reply(self):
+        await self.request()
+        await self.h.push(old.delegation("later"))
+        self.assertEqual(self.notices(), ["not_sent"])
+        self.assertEqual(self.states()[-1], "working")
+        await self.h.clock.advance(1)
+        await self.render()
+        self.assertEqual(self.states()[-1], "listening")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        result = await self.stop()
+        self.assertEqual((result.refused_pending, result.replies_rendered), (1, 1))
 
     async def test_conflicting_current_transcript_fails_closed_without_send(self):
         await self.h.push(old.delta("same", "hello", 0, 500))
@@ -1100,7 +1193,11 @@ class ProgressTest(ConversationCase):
         self.assertEqual(len(self.lines()), 1)  # disabled for this request
         self.h.provider.auto_ack = True
         await self.reply_once()
-        self.assertEqual((await self.stop()).progress_rendered, 0)
+        result = await self.stop()
+        self.assertEqual(result.progress_attempted, 1)
+        self.assertEqual(result.progress_rendered, 0)
+        self.assertEqual(result.progress_unconfirmed, 0 if ack else 1)
+        self.assertEqual(result.progress_silent, 1 if ack and not audio else 0)
 
     async def test_no_ack_or_audio_abandoned_at_bound_no_more_hints_reply_works(self):
         await self.missing_hint_response(ack=False, audio=False)

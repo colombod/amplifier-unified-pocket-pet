@@ -69,6 +69,7 @@ JSON_TO_ENV = {
     "model": "POCKET_GATEWAY_MODEL",
     "voice": "POCKET_GATEWAY_VOICE",
     "queued_followups": "POCKET_GATEWAY_QUEUED_FOLLOWUPS",
+    "acceptance_cue_file": "POCKET_GATEWAY_ACCEPTANCE_CUE_FILE",
     "provider_key_file": "POCKET_GATEWAY_PROVIDER_KEY_FILE",
 }
 OTHER_HASH = "c" * 64
@@ -274,7 +275,7 @@ class LoadEnvConfigTest(ServerOfflineCase):
                     (set(doc) - {"version"}) | {
                         "session_id_short", "model", "voice", "provider_key_file",
                         "provider_key_env", "auth_root", "tailnet_bind_host",
-                        "tailnet_fqdn", "queued_followups"},
+                        "tailnet_fqdn", "queued_followups", "acceptance_cue_file"},
                 )
 
     def test_the_inline_key_equals_the_json_named_variable_and_is_a_hidden_secret(self):

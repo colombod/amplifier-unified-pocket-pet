@@ -48,7 +48,8 @@ class ProviderBuilderTest(OfflineTestCase):
         for required in (
             "Backchannel policy:", "Interruption policy:", "Delegation policy:",
             "Backend tools:", "Generate <|SpawnThinking|> when:",
-            "Do not guess", "confirmation", "host-supplied commentary",
+            "do not guess", "confirmation", "host-supplied commentary",
+            "Do not promise to queue or send",
         ):
             self.assertIn(required, instructions)
         self.assertNotIn(DEVICE_INSTRUCTIONS_CANARY, instructions)

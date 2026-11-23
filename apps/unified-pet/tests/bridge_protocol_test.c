@@ -48,7 +48,7 @@ static void conversation_cases(void){
     /* Every gateway->device golden frame parses, with the documented meaning. */
     const char *golden[]={G_BEGAN,G_STATE("listening"),G_STATE("asking"),G_STATE("working"),G_STATE("answering"),
         G_NOTICE("busy"),G_NOTICE("not_sent"),G_NOTICE("send_uncertain"),G_NOTICE("reply_unavailable"),
-        G_NOTICE("idle_timeout"),G_NOTICE("time_limit"),G_NOTICE("no_words_yet")};
+        G_NOTICE("idle_timeout"),G_NOTICE("time_limit"),G_NOTICE("no_words_yet"),G_NOTICE("queued")};
     for(size_t i=0;i<sizeof(golden)/sizeof(*golden);i++){
         assert(bridge_parse(golden[i],strlen(golden[i]),&e));
         assert(e.kind==(i==0?BR_EV_CONVERSE_BEGAN:i<5?BR_EV_CONVERSE_STATE:BR_EV_CONVERSE_NOTICE));
@@ -84,6 +84,13 @@ static void conversation_cases(void){
     assert(feed(G_STATE("listening"))==0&&!strcmp(status(),"Listening"));
     assert(feed(G_STATE("asking"))==0&&m.talk==BR_TALK_ASKING&&!strcmp(status(),"Asking Unified..."));
     assert(feed(G_STATE("working"))==0&&m.talk==BR_TALK_WORKING&&!strcmp(status(),"Accepted. Waiting for reply..."));
+    /* Queued is a host receipt, not acceptance by Unified or a new audio phase. */
+    unsigned work_epoch=m.audio_epoch;
+    assert(feed(G_NOTICE("queued"))==BR_ACT_NOTICE&&m.phase==BR_CONVERSING);
+    assert(!strcmp(status(),"Follow-up queued"));
+    assert(m.talk==BR_TALK_WORKING&&m.audio_epoch==work_epoch&&m.end_notice==BR_NOTICE_NONE);
+    bridge_notice_expire(&m);
+    assert(!strcmp(status(),"Accepted. Waiting for reply..."));
     bridge_view(&m,&v);assert(v.can_stop&&!v.can_send&&!v.can_finish_capture);
     assert(feed(AUDIO)==BR_ACT_PLAY);
     assert(feed(G_STATE("answering"))==0&&m.talk==BR_TALK_ANSWERING&&!strcmp(status(),"Speaking"));

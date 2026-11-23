@@ -105,6 +105,7 @@ MAX_AUDIO_APPEND_BYTES = 4800
 AUDIO_CHUNK_BYTES = 4800
 AUDIO_BYTES_PER_S = 48000
 AUDIO_QUEUE_CAP = 1048576
+ACCEPTANCE_CUE_MAX_BYTES = 2 * AUDIO_BYTES_PER_S
 CAPTURE_QUEUE_CAP = 96000
 SESSION_CAP_S = 60.0
 SESSION_WORK_S = 58.0  # same absolute cap; reserve two seconds for close confirmation
@@ -888,7 +889,7 @@ _CONFIG_REQUIRED = frozenset(
 _CONFIG_OPTIONAL = frozenset(
     {
         "model", "voice", "provider_key_file", "provider_key_env", "auth_root",
-        "tailnet_bind_host", "tailnet_fqdn", "queued_followups",
+        "tailnet_bind_host", "tailnet_fqdn", "queued_followups", "acceptance_cue_file",
     }
 )
 _PATH_MAX = 4096
@@ -919,6 +920,7 @@ class GatewayConfig:
     tailnet_bind_host: str | None = None
     tailnet_fqdn: str | None = None
     queued_followups: bool = False
+    acceptance_cue_file: str | None = field(default=None, repr=False)
 
 
 def _private_ipv4(value: Any) -> bool:
@@ -1017,6 +1019,8 @@ def _config_defects(doc: dict[str, Any]) -> bool:
         _matches(_MODEL_RE, doc.get("model", DEFAULT_MODEL)),
         _matches(_VOICE_RE, doc.get("voice", DEFAULT_VOICE)),
         type(doc.get("queued_followups", False)) is bool,
+        ("acceptance_cue_file" not in doc
+         or (doc.get("queued_followups") is True and _abs_path(doc["acceptance_cue_file"]))),
         _abs_path(doc["provider_key_file"]) if "provider_key_file" in doc else True,
         _matches(_ENV_NAME_RE, doc["provider_key_env"])
         if "provider_key_env" in doc
@@ -1065,6 +1069,7 @@ def parse_config(doc: Any) -> GatewayConfig:
         tailnet_bind_host=doc.get("tailnet_bind_host"),
         tailnet_fqdn=doc.get("tailnet_fqdn"),
         queued_followups=doc.get("queued_followups", False),
+        acceptance_cue_file=doc.get("acceptance_cue_file"),
     )
 
 
@@ -1091,6 +1096,7 @@ _ENV_TEXT = {
     "POCKET_GATEWAY_TLS_KEY_FILE": "tls_key_file",
     "POCKET_GATEWAY_MODEL": "model",
     "POCKET_GATEWAY_VOICE": "voice",
+    "POCKET_GATEWAY_ACCEPTANCE_CUE_FILE": "acceptance_cue_file",
     "POCKET_GATEWAY_PROVIDER_KEY_FILE": "provider_key_file",
 }
 ENV_CONFIG_NAMES = (

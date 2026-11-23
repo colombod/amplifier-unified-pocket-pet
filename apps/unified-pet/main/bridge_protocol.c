@@ -207,7 +207,7 @@ unsigned bridge_playback_drained(bridge_model_t *m){
 }
 void bridge_notice_expire(bridge_model_t *m){if(m&&m->notice!=BR_NOTICE_NO_WORDS_YET)m->notice_visible=false;}
 static bridge_notice_t notice_code(const char *s){
-    static const char *const names[]={"busy","not_sent","send_uncertain","reply_unavailable","idle_timeout","time_limit","no_words_yet"};
+    static const char *const names[]={"busy","not_sent","send_uncertain","reply_unavailable","idle_timeout","time_limit","no_words_yet","queued"};
     for(unsigned i=0;i<sizeof(names)/sizeof(*names);i++)if(!strcmp(s,names[i]))return (bridge_notice_t)(i+1);
     return BR_NOTICE_NONE;
 }
@@ -310,6 +310,7 @@ const char *bridge_notice_text(bridge_notice_t notice){
     case BR_NOTICE_IDLE_TIMEOUT:return "Mic off (quiet)";
     case BR_NOTICE_TIME_LIMIT:return "Mic off (time limit)";
     case BR_NOTICE_NO_WORDS_YET:return "Listening: no speech recognized";
+    case BR_NOTICE_QUEUED:return "Follow-up queued";
     default:return "Mic off";
     }
 }

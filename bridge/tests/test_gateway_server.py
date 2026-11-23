@@ -265,6 +265,37 @@ class LoadConfigTest(ServerOfflineCase):
         self.assertEqual((cfg.session_id_short, cfg.port), (SHORT8, 8941))
         self.assertEqual(cfg.session_label, LABEL)
 
+    def test_acceptance_cue_is_opt_in_and_only_loads_bounded_private_pcm(self):
+        import io
+        import wave
+
+        pcm = (2100).to_bytes(2, "little", signed=True) * 2400
+
+        def wav(sample_rate, samples):
+            dest = io.BytesIO()
+            with wave.open(dest, "wb") as audio:
+                audio.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
+                audio.writeframes(samples)
+            return dest.getvalue()
+
+        path = self.write("cue.wav", wav(24000, pcm))
+        doc = config_doc(self.base)
+        doc["acceptance_cue_file"] = str(path)
+        with self.assertRaises(gsv.StartupError):
+            gsv.load_config(self.put(doc))
+        doc["queued_followups"] = True
+        cfg = gsv.load_config(self.put(doc, name="cue.json"))
+        self.assertEqual(gsv._load_acceptance_cue(cfg.acceptance_cue_file), pcm)
+        for name, invalid in (
+            ("wrong-rate.wav", wav(16000, pcm)),
+            ("truncated.wav", wav(24000, pcm)[:-16]),
+            ("silence.wav", wav(24000, bytes(len(pcm)))),
+            ("too-long.wav", wav(24000, pcm * 21)),
+        ):
+            with self.subTest(name=name), self.assertRaises(gsv.StartupError) as ctx:
+                gsv._load_acceptance_cue(str(self.write(name, invalid)))
+            self.assertEqual(str(ctx.exception), "config_invalid")
+
     def test_t_srv_cfg_every_failure_is_one_fixed_startup_code(self):
         cases: dict[str, tuple[Any, str]] = {
             "bad json": ("{not json", "config_invalid"),

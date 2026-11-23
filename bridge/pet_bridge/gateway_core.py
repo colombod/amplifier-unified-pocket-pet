@@ -1263,6 +1263,10 @@ class SessionOutcome:
     # ACKed commentary + audible output followed by quiet, not proof of hearing.
     replies_rendered: int = 0
     progress_rendered: int = 0
+    progress_attempted: int = 0
+    progress_unconfirmed: int = 0
+    progress_silent: int = 0
+    progress_unfinished: int = 0
     conversation_end: str | None = None
     # Why nothing was submitted: counts and one coarse duration only, never
     # words, audio or identifiers. Each refusal is counted under exactly one
@@ -1464,6 +1468,7 @@ class PetSession:
         *,
         new_event_id: Callable[[], str] = gp.new_event_id,
         transcribe_followup: Callable[[bytes], Awaitable[str | None]] | None = None,
+        acceptance_cue: bytes = b"",
     ) -> None:
         self._device = device
         self._provider_connect = provider_connect
@@ -1473,6 +1478,8 @@ class PetSession:
         self._clock = clock
         self._new_event_id = new_event_id
         self._transcribe_followup = transcribe_followup
+        self._acceptance_cue = acceptance_cue
+        self._playing_acceptance_cue = False
         self._state = _AWAIT_START
         self._closed_for_recovery = threading.Event()
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -1546,6 +1553,7 @@ class PetSession:
         self._gate_check_pending = False
         self._ran = False  # run() is once only
         self._audio_token: int | None = None  # gate token from open(hold=True)
+        self._converse_answering_sent = False
         self._commentary_committed = False  # capture eligibility, never playback permission
         self._send_stage = ""  # "" | "preflight" | "confirm" | "settled" | "unsent"
         self._send_result_emitted = False  # at most ONE pet.turn.send_result
@@ -1575,6 +1583,10 @@ class PetSession:
         self._input_wait_end: float | None = None
         self._replies_rendered = 0
         self._progress_rendered = 0
+        self._progress_attempted = 0
+        self._progress_unconfirmed = 0
+        self._progress_silent = 0
+        self._progress_unfinished = 0
         self._last_speech = 0.0
         self._recognition_hint_due: float | None = None
         self._recognition_hint_shown = False
@@ -1702,6 +1714,10 @@ class PetSession:
             requests_refused=self._requests_refused,
             replies_rendered=self._replies_rendered,
             progress_rendered=self._progress_rendered,
+            progress_attempted=self._progress_attempted,
+            progress_unconfirmed=self._progress_unconfirmed,
+            progress_silent=self._progress_silent,
+            progress_unfinished=self._progress_unfinished,
             conversation_end=self._converse_end,
             delegations=self._delegations,
             delegations_repeated=self._delegations_repeated,
@@ -1951,14 +1967,15 @@ class PetSession:
                 self._arm_settle()  # recovery quiet starts after the actual drain
         elif tag is not None:
             # Commit synchronously AFTER send_text returned, before yielding to
-            # the reader/dispatcher. Only a one-turn reply opens a held queue
-            # here (its ACK gates playback); conversation renders reuse the
-            # existing stream and this boundary for audible-output accounting.
+            # the reader/dispatcher. The queue pilot also opens a fresh epoch
+            # here: outside a terminal render the microphone owns the stream.
             if (self._render_active() and self._chunk_ids
                     and tag == self._chunk_ids[0] and not self._commentary_committed):
                 self._commentary_committed = True
                 if not self._converse:
                     self._audio_token = self._audio.open(hold=True)
+                elif self._transcribe_followup is not None:
+                    self._audio_token = self._audio.open(hold=not self._converse_answering_sent)
             self._post(("sent", tag))
 
     def _provider_send_failed(self) -> None:
@@ -2728,6 +2745,9 @@ class PetSession:
             self._state = _AWAIT_REPLY
             if not self._emit(gs.build_converse_state("working")):
                 return
+            if self._transcribe_followup is not None and self._acceptance_cue:
+                self._progress_due = self._send_accept_t + gs.CONVERSE_PROGRESS_FIRST_S
+                self._arm("converse_progress", gs.CONVERSE_PROGRESS_FIRST_S)
             self._arm("poll", gs.POLL_INTERVAL_S)
             self._arm("converse_reply", gs.CONVERSE_REPLY_MAX_S)
             return
@@ -2935,6 +2955,10 @@ class PetSession:
             self._post(("started_sent",))
         elif tag == "converse_began":
             self._converse_audio_ready = True
+            if self._audio_token is not None:
+                self._audio.release(self._audio_token)
+        elif tag == "converse_answering" and self._state == _SPEAKING:
+            self._converse_answering_sent = True
             if self._audio_token is not None:
                 self._audio.release(self._audio_token)
 
@@ -3266,8 +3290,8 @@ class PetSession:
     def _on_audio_sent(self, pcm: bytes) -> None:
         # Observe only completed paced device sends, not provider arrival time:
         # queued/backpressured speech must not admit a new request too early.
-        if (not self._converse or not self._render_active()
-                or not self._converse_audio_ready or not self._commentary_committed):
+        if (not self._converse or not self._render_active() or not self._converse_audio_ready
+                or not (self._commentary_committed or self._playing_acceptance_cue)):
             return
         if any(abs(int.from_bytes(pcm[i:i + 2], "little", signed=True)) > 256
                for i in range(0, len(pcm), 2)):
@@ -3286,9 +3310,11 @@ class PetSession:
         self._arm("converse_limit", max(
             0.0, self._accepted_t + gs.CONVERSE_WORK_S - self._clock.now()
         ))
-        # Hold until began has actually reached the device. Audio received before
-        # begin has no token and cannot retroactively enter this stream.
-        self._audio_token = self._audio.open(hold=True)
+        # The sequential preview uses continuous provider output. The queue
+        # pilot admits output only in a terminal render; PCM has no render ID
+        # and unsolicited output during capture can mute the physical mic.
+        if self._transcribe_followup is None:
+            self._audio_token = self._audio.open(hold=True)
         self._emit(gs.build_converse_began(
             self._settings.label, self._settings.short8
         ), tag="converse_began")
@@ -3297,6 +3323,9 @@ class PetSession:
     def _converse_listen(self, *, hint_if_no_words: bool = True) -> None:
         if self._state in (_CLOSING, _CLOSED):
             return
+        if self._transcribe_followup is not None:
+            self._audio_token = None
+            self._audio.close_and_drain()
         for timer in ("settle", "poll", "converse_reply", "converse_render", "converse_progress"):
             self._disarm(timer)
         self._render_kind = None
@@ -3580,6 +3609,12 @@ class PetSession:
             window[0] != self._request_seq or window[1] != _CAPTURING
         )):
             self._refuse("pending")
+            if (self._transcribe_followup is None
+                    and self._state in (_SENDING, _AWAIT_REPLY)
+                    and (window is None or window[0] == self._request_seq)):
+                # This request was refused, not queued. A display notice must not
+                # abandon or interrupt the first request.
+                self._emit(gs.build_converse_notice("not_sent"))
             return  # never queued or replayed after the pending request
         self._start_converse_turn(ident)
         self._arm_settle()
@@ -3688,13 +3723,23 @@ class PetSession:
     def _converse_progress(self) -> None:
         # The absolute due time rejects an already-posted timer from an older
         # request. Listening clears it; no progress path can submit Unified work.
-        if (not self._converse or self._transcribe_followup is not None
-                or self._progress_disabled or self._progress_due is None
+        if (not self._converse or self._progress_disabled or self._progress_due is None
                 or self._clock.now() + _EPS < self._progress_due
                 or self._state not in (_SENDING, _AWAIT_REPLY)
                 or self._send_state not in ("inflight", "accepted")
                 or self._render_kind == "progress"
                 or self._speak_pending or self._reply_text is not None):
+            return
+        if self._transcribe_followup is not None:
+            if not self._acceptance_cue or self._send_state != "accepted":
+                return
+            if self._waiting_for_followup_audio():
+                # An utterance already in progress owns the microphone. The
+                # answer or the absolute reply deadline can still overtake us.
+                self._arm("converse_progress", 0.1)
+                return
+            self._progress_due = None  # at most once for this accepted request
+            self._play_acceptance_cue()
             return
         accepted = self._send_state == "accepted"
         repeated = accepted in self._progress_stages
@@ -3706,10 +3751,28 @@ class PetSession:
         self._progress_stages.add(accepted)
         self._progress_due = self._clock.now() + gs.CONVERSE_PROGRESS_REPEAT_S
         self._arm("converse_progress", gs.CONVERSE_PROGRESS_REPEAT_S)
+        self._progress_attempted += 1
         self._converse_render(line, kind="progress")
+
+    def _play_acceptance_cue(self) -> None:
+        # The private cue is finite, validated PCM. Do not give Live its token.
+        # Keep the existing progress overlay so a ready reply cannot interleave.
+        self._render_kind = "progress"
+        self._playing_acceptance_cue = True
+        self._render_start = self._clock.now()
+        self._last_audible = -math.inf
+        self._render_audible = False
+        self._progress_attempted += 1
+        self._audio.open()
+        self._audio.offer(self._acceptance_cue)
+        self._audio.seal()
+        self._arm("converse_render", 0.1)
 
     def _stop_progress(self) -> None:
         if self._render_kind == "progress":
+            if self._playing_acceptance_cue:
+                self._playing_acceptance_cue = False
+                self._audio.close_and_drain()
             self._disarm("converse_render")
             self._pout.discard_tags(self._chunk_ids)
             self._chunk_ids = ()
@@ -3724,12 +3787,20 @@ class PetSession:
         # Keep the real waiting state throughout the hint: Stop/loss/caps retain
         # their existing semantics, and acceptance starts its deadline immediately.
         confirm, poll = self._progress_confirm, self._progress_poll
-        self._stop_progress()
         if audible:
             self._progress_rendered += 1
         else:
+            if self._playing_acceptance_cue:
+                self._progress_unfinished += 1
+            elif not self._all_acked():
+                self._progress_unconfirmed += 1
+            elif self._render_audible:
+                self._progress_unfinished += 1
+            else:
+                self._progress_silent += 1
             self._progress_disabled = True
             self._disarm("converse_progress")
+        self._stop_progress()
         if confirm is not None:
             self._on_confirm_done(*confirm)
         elif poll is not None:
@@ -3750,6 +3821,7 @@ class PetSession:
             ]
         except ValueError:
             if kind == "progress":
+                self._progress_unconfirmed += 1
                 self._progress_disabled = True
                 self._disarm("converse_progress")
             elif kind == "reply":
@@ -3772,8 +3844,11 @@ class PetSession:
         self._chunk_ids = ids
         self._chunks_sent.clear()
         self._acked.clear()
-        if kind != "progress" and not self._emit(gs.build_converse_state("answering")):
-            return
+        if kind != "progress":
+            self._converse_answering_sent = False
+            answering_tag = "converse_answering" if self._transcribe_followup is not None else None
+            if not self._emit(gs.build_converse_state("answering"), tag=answering_tag):
+                return
         for ident, frame in zip(ids, frames, strict=True):
             if not self._pout.put(frame, tag=ident):
                 if kind == "progress":
@@ -3787,6 +3862,16 @@ class PetSession:
         if not self._render_active():
             return
         now = self._clock.now()
+        if self._playing_acceptance_cue:
+            complete = (
+                self._audio.drained.is_set() and self._render_audible
+                and now - self._last_audible >= gs.CONVERSE_SPEECH_QUIET_S - _EPS
+            )
+            if complete or now - self._render_start >= gs.CONVERSE_PROGRESS_RENDER_MAX_S - _EPS:
+                self._finish_progress(complete)
+            else:
+                self._arm("converse_render", 0.1)
+            return
         ready = (
             self._all_acked() and len(self._chunks_sent) == len(self._chunk_ids)
             and self._render_audible

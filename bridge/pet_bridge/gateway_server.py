@@ -233,6 +233,29 @@ def check_private_file(
         os.close(fd)
 
 
+def _load_acceptance_cue(path: str | None) -> bytes:
+    """Read a short, operator-approved WAV once, without logging its path or contents."""
+    if path is None:
+        return b""
+    try:
+        data = check_private_file(Path(path), max_bytes=gs.ACCEPTANCE_CUE_MAX_BYTES + 4096, read=True)
+        with wave.open(io.BytesIO(data), "rb") as stream:
+            frames = stream.getnframes()
+            if (stream.getnchannels(), stream.getsampwidth(), stream.getframerate()) != (1, 2, 24000):
+                raise ValueError
+            if not 0 < 2 * frames <= gs.ACCEPTANCE_CUE_MAX_BYTES:
+                raise ValueError
+            pcm = stream.readframes(frames)
+            if len(pcm) != 2 * frames or not any(
+                abs(int.from_bytes(pcm[i:i + 2], "little", signed=True)) > 256
+                for i in range(0, len(pcm), 2)
+            ):
+                raise ValueError
+            return pcm
+    except (OSError, EOFError, ValueError, wave.Error):
+        raise StartupError("config_invalid") from None
+
+
 def load_config(path: Path) -> gs.GatewayConfig:
     """Load the explicit private gateway config.  Fixed ``StartupError`` codes only."""
     failure = "config_invalid"
@@ -1099,8 +1122,10 @@ class _Gateway:
         | None = None,
         follow_host_restart: Callable[[], tuple[str, str] | None] | None = None,
         event_log: EventLog | None = None,
+        acceptance_cue: bytes = b"",
     ) -> None:
         self._cfg = cfg
+        self._acceptance_cue = acceptance_cue
         self._key = key
         self._registry = registry
         self._runner = runner
@@ -1228,6 +1253,7 @@ class _Gateway:
         session = PetSession(
             device, connect, self._runner, self._ops, self._settings, self._deps.clock(),
             transcribe_followup=transcribe if self._cfg.queued_followups else None,
+            acceptance_cue=self._acceptance_cue,
         )
         return session
 
@@ -1632,6 +1658,7 @@ async def _startup(
         cfg, inline = load_env_config(config_path)
     else:
         cfg = load_config(config_path)
+    acceptance_cue = _load_acceptance_cue(cfg.acceptance_cue_file)
     cert, key_path = _check_tls_files(cfg)
     if env_file:
         provider_key = _env_file_provider_key(cfg, inline)
@@ -1677,6 +1704,7 @@ async def _startup(
             lambda current: _follow_host_restart(held, cfg, deps, bridge, current)
         ),
         event_log=held.event_log,
+        acceptance_cue=acceptance_cue,
     )
     try:
         held.closer = await deps.start_site(_make_handler(held.gateway), cfg, ctx)
