@@ -830,18 +830,21 @@ class UnifiedOps:
         except CompanionError as err:
             return Preflight(session, -1, False, err.code)
 
-    def confirm(self, turn_id: str, sha: str, revision: int) -> core.CommandResult:
+    def confirm(
+        self, turn_id: str, sha: str, revision: int, *, only_if_idle: bool = False,
+    ) -> core.CommandResult:
         """Send an ordinary native-client message, not an app-global CAS mutation.
 
         ``revision`` is the observed listing revision for adapter compatibility;
         it is NOT a session admission token. Preflight rejects observed busy work,
-        but Companion-v1 cannot atomically prevent a later steering race.
+        but only the host's opt-in admission can prevent a later steering race.
         """
         _attachment, reason = self._attachment()
         if reason is not None:
             return core.CommandResult(turn_id, "refused", reason, False)
         result = self._bridge.confirm_send(
-            turn_id, expected_text_sha256=sha, expected_revision=None
+            turn_id, expected_text_sha256=sha, expected_revision=None,
+            only_if_idle=only_if_idle,
         )
         if result.outcome == "uncertain" and turn_id in self._reconcile():
             # The acknowledgement was lost but the conversation shows this exact input.
@@ -1310,6 +1313,7 @@ _INVALID_PROVIDER_KINDS = frozenset({"invalid", "invalid_audio", "invalid_transc
 _GRACE_TURNS = 128
 _DEVICE_OUTBOX_CAP = 64
 _PROVIDER_OUTBOX_CAP = 512
+_FOLLOWUP_CAP = 2
 _CLOSE_CODES = {
     "unknown_command": 1008,
     "model_mismatch": 1008,
@@ -1588,9 +1592,14 @@ class PetSession:
         self._converse_audio_ready = False
         self._request_seq = 0
         self._notice_code: str | None = None
+        # Call-local: never loaded from the journal or a prior connection.
+        self._followups: collections.deque[tuple[gs.TranscriptStager, str]] = collections.deque()
+        self._followup_ids: set[str] = set()
+        self._draining_followup = False
         self._events: dict[str, Callable[..., None]] = {
             "device": self._on_device,
             "provider": self._on_provider,
+            "complete_followup": self._on_complete_followup,
             "op": self._on_op,
             "confirm_done": self._on_confirm_done,
             "started_sent": self._on_started_sent,
@@ -2112,6 +2121,7 @@ class PetSession:
         if self._state in (_CLOSING, _CLOSED):
             return
         self._closed_for_recovery.set()
+        self._followups.clear()
         self._settle_unsent_send()
         now = self._clock.now()
         if self._input_wait_end is None:
@@ -2575,6 +2585,12 @@ class PetSession:
     def _on_preflight_result(self, ok: bool, value: Any) -> None:
         if self._state != _SENDING:
             return
+        if (self._draining_followup and ok and isinstance(value, Preflight)
+                and value.reason == "activity"):
+            # Retry a read only. No send has been attempted, and this wait
+            # cannot outlive the existing conversation deadline or Stop.
+            self._arm("followup_preflight", gs.POLL_INTERVAL_S)
+            return
         if not ok or not getattr(value, "idle", False):
             self._known_unsent("preflight")  # read-only: nothing was submitted
             if self._converse:
@@ -2589,10 +2605,15 @@ class PetSession:
         assert sha is not None
         turn, revision = self._turn_str(), value.revision
         self._send_stage = "confirm"
+        only_if_idle = self._draining_followup
+
+        def confirm():
+            if only_if_idle:
+                return self._ops.confirm(turn, sha, revision, only_if_idle=True)
+            return self._ops.confirm(turn, sha, revision)
+
         try:
-            ticket = self._runner.submit(
-                "confirm", lambda: self._ops.confirm(turn, sha, revision)
-            )  # the ONE retained job: its real outcome is never lost
+            ticket = self._runner.submit("confirm", confirm)
         except RunnerError:  # not admitted: provably nothing was sent
             self._send_stage = "unsent"
             self._send_state = "refused"
@@ -2927,6 +2948,7 @@ class PetSession:
             "converse_render": self._converse_render_tick,
             "converse_reply": self._converse_reply_timeout,
             "converse_progress": self._converse_progress,
+            "followup_preflight": self._followup_preflight,
         }.get(name)
         if handler is not None:
             handler()
@@ -3263,6 +3285,14 @@ class PetSession:
         self._speak_pending = False
         self._reply_text = None
         self._poll_inflight = False
+        self._draining_followup = False
+        if self._followups:
+            self._stager, delegation = self._followups.popleft()
+            self._start_converse_turn(delegation)
+            self._draining_followup = True
+            self._sealing = self._begin_pending = True
+            self._submit("begin", self._ops.begin, "begin")
+            return
         # Pending work/rendering is not idle. Start a fresh listening interval,
         # rather than immediately expiring on the speech that began a long request.
         self._last_speech = self._clock.now()
@@ -3277,6 +3307,37 @@ class PetSession:
         self._arm("converse_idle", max(
             0.0, self._last_speech + gs.CONVERSE_IDLE_S - self._clock.now()
         ))
+
+    def _on_complete_followup(
+        self, event_id: str, delegation: str, text: str, start_ms: int, end_ms: int,
+    ) -> None:
+        """Internal recognizer boundary; neither wire parser can emit this event.
+
+        The producer must supply finite utterances in microphone order, with a
+        distinct client delegation for each. A provider delta, quiet timer, or
+        delegation hint alone is deliberately not a producer of this event.
+        """
+        if (not self._converse or self._state not in (_SENDING, _AWAIT_REPLY)
+                or self._send_state not in ("inflight", "accepted")):
+            return
+        stager = gs.TranscriptStager()
+        try:
+            stager.add(event_id, text, start_ms, end_ms)
+        except gs.GatewayProtocolError:
+            return
+        if (start_ms == end_ms or not text.strip() or not gs.is_event_id(delegation)
+                or delegation == self._delegation_id or delegation in self._followup_ids):
+            return
+        if len(self._followups) >= _FOLLOWUP_CAP or len(self._followup_ids) >= 1024:
+            self._emit(gs.build_converse_notice("not_sent"))
+            return
+        self._followup_ids.add(delegation)
+        self._followups.append((stager, delegation))
+        self._emit(gs.build_converse_notice("queued"))
+
+    def _followup_preflight(self) -> None:
+        if self._draining_followup and self._state == _SENDING and self._send_stage == "preflight":
+            self._submit("preflight", self._ops.preflight, "preflight")
 
     def _converse_recognition_hint(self) -> None:
         due = self._recognition_hint_due
@@ -3384,6 +3445,10 @@ class PetSession:
         )):
             self._refuse("pending")
             return  # never queued or replayed after the pending request
+        self._start_converse_turn(ident)
+        self._arm_settle()
+
+    def _start_converse_turn(self, ident: str) -> None:
         self._turn_id = None
         self._send_state = None
         self._send_stage = ""
@@ -3393,7 +3458,6 @@ class PetSession:
         self._state = _SETTLING
         self._stop_t = self._clock.now()
         self._disarm("converse_idle")
-        self._arm_settle()
 
     def _converse_settle(self) -> None:
         if self._state != _SETTLING or self._sealing:
@@ -3442,6 +3506,10 @@ class PetSession:
             self._converse_notice("not_sent")  # delegation without recognised words
 
     def _converse_notice(self, code: str, *, timed_out: bool = False) -> None:
+        if self._followups:
+            self._followups.clear()
+            if not self._emit(gs.build_converse_notice("not_sent")):
+                return
         self._stop_progress()
         self._progress_due = None
         self._disarm("converse_progress")

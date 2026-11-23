@@ -431,8 +431,11 @@ class FakeOps:
         scripted = self._enter("preflight", ())
         return Preflight(SESSION, 7, True, "idle") if scripted is None else scripted
 
-    def confirm(self, turn_id: str, sha: str, revision: int) -> core.CommandResult:
-        scripted = self._enter("confirm", (turn_id, sha, revision))
+    def confirm(
+        self, turn_id: str, sha: str, revision: int, *, only_if_idle: bool = False,
+    ) -> core.CommandResult:
+        args = (turn_id, sha, revision, True) if only_if_idle else (turn_id, sha, revision)
+        scripted = self._enter("confirm", args)
         if scripted is None:
             return core.CommandResult(turn_id, "accepted", "accepted", True)
         return scripted

@@ -178,7 +178,7 @@ INVALIDATED_REASONS = frozenset({"late_transcript", "stopped", "expired"})
 CONVERSE_STATES = frozenset({"listening", "asking", "working", "answering"})
 CONVERSE_NOTICES = frozenset({
     "busy", "not_sent", "send_uncertain", "reply_unavailable", "idle_timeout", "time_limit",
-    "no_words_yet",
+    "no_words_yet", "queued",
 })
 
 _RENDERING = "spoken_rendering_not_verbatim"

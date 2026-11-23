@@ -122,6 +122,73 @@ class ConversationCase(OfflineAsyncCase):
 
 
 class ConversationTest(ConversationCase):
+    async def complete_followup(self, word, start_ms):
+        self.h.session._post_external((
+            "complete_followup", f"event-{word}", f"followup-{word}", word,
+            start_ms, start_ms + 500,
+        ))
+        await self.h.quiesce()
+
+    async def test_complete_followups_wait_for_earlier_reply_and_drain_in_order(self):
+        import hashlib
+
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "speak", "reply_complete", True, self.h.ops.epoch, f"Answer for {turn}."
+        )
+        await self.request()
+        await self.complete_followup("Second", 2000)
+        await self.complete_followup("Second", 2000)
+        await self.complete_followup("Third", 3000)
+        await self.complete_followup("Over-capacity", 4000)
+        self.assertEqual(self.notices(), ["queued", "queued", "not_sent"])
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        for expected_sends in (2, 3, 3):
+            await self.h.clock.advance(1)
+            await self.render()
+            self.assertEqual(self.h.ops.count("confirm"), expected_sends)
+        sends = [args for op, args, _ in self.h.ops.calls if op == "confirm"]
+        self.assertEqual([len(args) for args in sends], [3, 4, 4])
+        self.assertTrue(all(args[3] is True for args in sends[1:]))
+        self.assertEqual([args[1] for args in sends], [
+            hashlib.sha256(text.encode()).hexdigest() for text in ("request 1", "Second", "Third")
+        ])
+        self.assertEqual(len({args[0] for args in sends}), 3)
+        commentary = "".join(
+            row["content"] for row in self.h.provider.of_type("session.commentary.append")
+        )
+        replies = [f"Answer for {args[0]}." for args in sends]
+        self.assertTrue(all(commentary.count(reply) == 1 for reply in replies))
+        self.assertEqual([commentary.index(reply) for reply in replies],
+                         sorted(commentary.index(reply) for reply in replies))
+        self.assertEqual(self.states()[-1], "listening")
+        result = await self.stop()
+        self.assertEqual((result.requests_accepted, result.replies_rendered), (3, 3))
+
+    async def test_stop_discards_retained_followups_without_replay(self):
+        await self.request()
+        await self.complete_followup("Never-send", 2000)
+        self.assertEqual(self.notices(), ["queued"])
+        await self.stop()
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        self.assertFalse(self.h.session._followups)
+
+    async def test_uncertain_send_discards_retained_followups_without_fallback(self):
+        self.h.ops.results["confirm"] = core.CommandResult(
+            TURN, "uncertain", "transport_exception", False
+        )
+        gate = self.h.ops.hold("confirm")
+        try:
+            await self.request()
+            await self.complete_followup("Never-replay", 2000)
+            self.assertEqual(self.notices(), ["queued"])
+        finally:
+            gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.notices(), ["queued", "not_sent", "send_uncertain"])
+        self.assertFalse(self.h.session._followups)
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+        await self.stop()
+
     async def test_provider_end_while_listening_has_expected_device_close(self):
         await self.h.push({"type": "session.closed", "reason": "expired"})
         result = await self.h.finish()
