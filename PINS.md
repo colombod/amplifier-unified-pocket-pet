@@ -18,7 +18,7 @@ Read before your first command. Facts only; rules live in `AGENTS.md`, promises 
 | Conformance ledger, kit, pre-push guard | none exist |
 | Current local product integration | `product/integration` in the GitHub-connected repository; `main` is the published base, not the installed product |
 | Historical two-answer comparator | Firmware `1004293` (Build 11) and gateway `8857705`; see the dated physical evidence in `PROJECT-BRIEF.md`. Not a supported release. |
-| Unified versions checked during recovery | 0.116.0: listing/detail reads observed. 0.117.0: installed at the gateway switch; the four required request shapes pass the local package-policy check. Neither is a released voice compatibility pin. |
+| Unified LAN preview evidence | Stock 0.119.1: four companion request shapes allowed by local package policy; real LAN call with gateway `c3349b4` and normal `0.3.19-amoled-boot`. Stock 0.119.0 was used in the prior LAN preview. Check other releases before pairing; this is not a general compatibility promise. |
 | Provider-free acoustic check | `bridge/tools/pet_link_test_host.py` and its loopback test beside it. Device and Unified voice acceptance are separate. |
 
 ## Hardware

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 # Admission to this read-only package check is not a release compatibility pin.
-POLICY_CHECKED_VERSIONS = ("0.116.0", "0.117.0", "0.119.0")
+POLICY_CHECKED_VERSIONS = ("0.116.0", "0.117.0", "0.119.0", "0.119.1")
 SESSION = "pocket-check"
 COMMAND = "11111111-1111-4111-8111-111111111111"
 

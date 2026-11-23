@@ -11,15 +11,15 @@ retain the distinction between the goal and a proven integration.
 The independent app in `apps/unified-pet` talks to the Linux gateway in
 `bridge/`, which routes voice to one selected Amplifier Unified conversation.
 Normal firmware `0.3.19-amoled-boot` on a Waveshare ESP32-S3-Touch-AMOLED-1.8 V2
-produced spoken replies on a home LAN with gateway `cea016b` and Unified
-`0.119.0`. The preview also contains gateway feedback changes checked offline;
-that exact gateway revision was not part of the physical call.
+produced spoken replies on a home LAN. In the latest physical call, gateway
+`c3349b4` and stock Unified `0.119.1` recorded six accepted requests, six reply
+renders and one follow-up refused while work was pending.
 
-Start with the [LAN installation guide](docs/team-prototype.md). This is a
-source preview for technically comfortable operators, not a turnkey release.
-It requires the matching board, your own Unified and GPT-Live access, a trusted
-TLS certificate for the gateway, and a LAN. Independent fresh-board setup,
-off-home Tailscale, and cross-workspace voice actions are not qualified.
+Start with the [teammate setup checklist](docs/team-prototype.md#start-here).
+It lists the exact board, gateway prerequisites, safe flashing, phone provisioning
+and a first spoken check. The preview requires your own Unified and GPT-Live
+access, trusted gateway TLS and a LAN. Independent fresh-board setup, off-home
+Tailscale and cross-workspace voice actions are not qualified.
 
 Tap the microphone to start and again to mute. Wait for the spoken reply before
 asking another question: follow-ups spoken while a request is pending are not
