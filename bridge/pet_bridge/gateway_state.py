@@ -119,6 +119,8 @@ CONVERSE_PROGRESS_STARTING = "Starting that conversation. One moment."
 CONVERSE_PROGRESS_STARTING_REPEAT = "Still starting it."
 CONVERSE_PROGRESS_WORKING = "It's working on your request."
 CONVERSE_PROGRESS_WORKING_REPEAT = "Still working on it."
+CONVERSE_PROGRESS_FOLLOWUP_UNSENT = "That follow-up wasn't sent. Ask again after the reply."
+CONVERSE_FOLLOWUP_NOTICE_INTERVAL_S = 4.0
 # Display-only speech-end heuristic, not a provider EOS or acoustic proof.
 CONVERSE_SPEECH_QUIET_S = 1.5
 CONVERSE_RENDER_MAX_S = 60.0

@@ -212,14 +212,24 @@ were restored and verified. The baseline window closed without a second leg.
    Stop at the first failed boundary, preserve evidence and do not retry
    automatically. Do not claim this gate on the diagnostic build alone.
 
-**Next LAN increment: queued follow-ups.** The operator chose to keep distinct
-spoken follow-ups addressed to the same conversation while an answer is pending,
-rather than requiring them to be repeated. First check whether the restricted
-Unified companion can explicitly queue an input without steering the active turn.
-Verify that each retained turn is visible or acknowledged accurately, enters
-the same chat in order, and gets its own correlated reply. Do not replay an
-uncertain submission or confuse provider speech with acceptance. Keep this
-experiment separate from the working normal-firmware checkpoint.
+**Next LAN increment: truthful spoken feedback without changing delivery.**
+Keep the shipped one-at-a-time preview on stock Unified. In the failed call,
+Unified accepted one request and the gateway refused a follow-up, but the pet
+suggested it had queued the follow-up and gave no progress announcement. Verify
+that the device says what was accepted, never claims a refused follow-up was
+queued, and speaks the correlated answer. The gateway's zero progress renders
+do not identify why an announcement was absent. Check the feedback repair on
+the existing normal firmware, without changing pairing or saved settings.
+
+**Queued follow-ups are still a product requirement, not part of this preview.**
+The Pocket gateway would retain B and C while A runs, then submit them to the
+same chat in order as separate turns, with no interruption or duplicate. The
+released Unified 0.119.2 companion API does not provide that guarantee. An idle
+observation followed by ordinary Send is not atomic and can steer active work.
+Track this as [Unified feature feedback #2420](https://github.com/microsoft/amplifier-unified/issues/2420),
+not a Pocket dependency on a patch. Keep the queue disabled until a supported
+release provides safe admission; then verify the three spoken replies on the
+real pet. Never replay an uncertain submission.
 
 ### Remaining release gates, in order
 
