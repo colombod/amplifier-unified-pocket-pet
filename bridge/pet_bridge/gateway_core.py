@@ -1580,6 +1580,8 @@ class PetSession:
         self._progress_due: float | None = None
         self._progress_stages: set[bool] = set()  # False = starting, True = accepted
         self._progress_disabled = False
+        self._pending_followup_hint = False
+        self._next_followup_notice = -math.inf
         self._progress_confirm: tuple[str, str | None] | None = None
         self._progress_poll: tuple[bool, Any] | None = None
         self._render_audible = False
@@ -3247,6 +3249,7 @@ class PetSession:
         self._progress_due = None
         self._progress_stages.clear()
         self._progress_disabled = False
+        self._pending_followup_hint = False
         self._progress_poll = None
         self._progress_confirm = None
         self._request_seq += 1
@@ -3383,6 +3386,17 @@ class PetSession:
             window[0] != self._request_seq or window[1] != _CAPTURING
         )):
             self._refuse("pending")
+            received_state = self._state if window is None else window[1]
+            if received_state in (_SENDING, _AWAIT_REPLY, _SPEAKING):
+                # This is an overlay about the new input, not recovery of
+                # the active turn. Do not stop polling or open admission.
+                if (self._state in (_SENDING, _AWAIT_REPLY)
+                        and (window is None or window[0] == self._request_seq)):
+                    self._pending_followup_hint = True
+                now = self._clock.now()
+                if now >= self._next_followup_notice:
+                    self._next_followup_notice = now + gs.CONVERSE_FOLLOWUP_NOTICE_INTERVAL_S
+                    self._emit(gs.build_converse_notice("not_sent"))
             return  # never queued or replayed after the pending request
         self._turn_id = None
         self._send_state = None
@@ -3497,7 +3511,13 @@ class PetSession:
         ) if accepted else (
             gs.CONVERSE_PROGRESS_STARTING_REPEAT if repeated else gs.CONVERSE_PROGRESS_STARTING
         )
-        self._progress_stages.add(accepted)
+        if self._pending_followup_hint:
+            # Use an already scheduled speech slot. No extra render can
+            # delay the reply, and no refused utterance is retained.
+            line = gs.CONVERSE_PROGRESS_FOLLOWUP_UNSENT
+            self._pending_followup_hint = False
+        else:
+            self._progress_stages.add(accepted)
         self._progress_due = self._clock.now() + gs.CONVERSE_PROGRESS_REPEAT_S
         self._arm("converse_progress", gs.CONVERSE_PROGRESS_REPEAT_S)
         self._converse_render(line, kind="progress")

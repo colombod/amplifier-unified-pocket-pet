@@ -212,14 +212,44 @@ were restored and verified. The baseline window closed without a second leg.
    Stop at the first failed boundary, preserve evidence and do not retry
    automatically. Do not claim this gate on the diagnostic build alone.
 
-**Next LAN increment: queued follow-ups.** The operator chose to keep distinct
-spoken follow-ups addressed to the same conversation while an answer is pending,
-rather than requiring them to be repeated. First check whether the restricted
-Unified companion can explicitly queue an input without steering the active turn.
-Verify that each retained turn is visible or acknowledged accurately, enters
-the same chat in order, and gets its own correlated reply. Do not replay an
-uncertain submission or confuse provider speech with acceptance. Keep this
-experiment separate from the working normal-firmware checkpoint.
+**LAN feedback update: one-at-a-time source preview.**
+On 23 November, the provisioned pet on normal `0.3.19-amoled-boot`, gateway
+`c3349b4` and stock Unified `0.119.1` completed one real LAN call. The gateway
+logged six sends, six acceptances, six completed reply renders, one follow-up
+refused while work was pending, zero uncertain submissions and thirteen
+progress renders. The operator saw **Accepted** and heard waiting updates;
+the exact spoken wording on refusal was not confirmed. The 144 offline
+conversation tests include the refusal and correlated-answer regression. This
+does not qualify fresh provisioning or prove that every render was intelligible.
+See the [teammate setup checklist](docs/team-prototype.md#start-here).
+
+**Next voice UX increment: stay responsive without steering active work.**
+In a live LAN call the operator saw **Accepted** and heard repeated “Still
+working on it,” but could not carry on a voice exchange while waiting. Keep the
+clear acknowledgment. Try a short initial update followed by less frequent,
+state-based reminders, and consider answering explicit status questions locally
+from the gateway's known state. Do not invent progress, send another Unified
+message, change the active request, or delay its ready reply to announce status.
+Test on the pet with a long-running request: the status answer must be true,
+Unified must receive only the original request, and its answer must still play.
+This is separate from retaining or submitting follow-up work.
+
+**Mic-off notifications are not part of this preview.** Muting closes the audio
+connection; it does not cancel a request Unified already accepted. A later
+increment could use a separate authenticated notification to show “Reply ready”
+or play an opt-in chime. Playback and capture must stay independent: the gateway
+must not reopen the microphone or start a new voice call. A new listen requires
+an explicit action on the pet.
+
+**Queued follow-ups are still a product requirement, not part of this preview.**
+The Pocket gateway would retain B and C while A runs, then submit them to the
+same chat in order as separate turns, with no interruption or duplicate. The
+released Unified 0.119.2 companion API does not provide that guarantee. An idle
+observation followed by ordinary Send is not atomic and can steer active work.
+Track this as [Unified feature feedback #2420](https://github.com/microsoft/amplifier-unified/issues/2420),
+not a Pocket dependency on a patch. Keep the queue disabled until a supported
+release provides safe admission; then verify the three spoken replies on the
+real pet. Never replay an uncertain submission.
 
 ### Remaining release gates, in order
 

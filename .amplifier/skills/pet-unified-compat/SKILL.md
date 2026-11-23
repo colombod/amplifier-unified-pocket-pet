@@ -11,9 +11,9 @@ as "busy"; see the current conversation-mode behavior in `AGENTS.md`.
 Unified 0.114.5 and 0.116.0 had matching inspected device-facing files and
 passed the read-only check. At the pilot switch, 0.117.0's in-memory
 companion policy also allowed the four request shapes below. Unified 0.119.0
-passes the same in-memory check and was used in the normal-firmware LAN call
-recorded in `PROJECT-BRIEF.md`. The policy check itself does not exercise a
-live credential, handler, context or voice.
+and 0.119.1 pass the same in-memory check and were used in the normal-firmware
+LAN calls recorded in `PROJECT-BRIEF.md`. The policy check itself does not
+exercise a live credential, handler, context or voice.
 
 ## The gateway's requests
 

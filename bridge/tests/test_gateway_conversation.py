@@ -182,6 +182,7 @@ class ConversationTest(ConversationCase):
         await self.h.clock.advance(2)
         self.assertEqual(self.h.ops.count("confirm"), 1)
         self.assertEqual(self.states()[-1], "listening")
+        self.assertEqual(self.notices(), ["not_sent"])
         await self.stop()
 
     async def test_conflicting_current_transcript_fails_closed_without_send(self):
@@ -288,8 +289,11 @@ class ConversationTest(ConversationCase):
         await self.request()
         await self.h.push(old.delta("ignored", "do something else", 2000, 2500))
         await self.h.push(old.delegation("dlg_pending"))
+        self.assertEqual(self.notices(), ["not_sent"])
+        self.assertEqual(self.states()[-1], "working")
         await self.h.clock.advance(1)
         await self.h.push(old.delegation("dlg_answering"))
+        self.assertEqual(self.notices(), ["not_sent"])  # coalesce the burst
         await self.render()
         await self.h.push(old.delegation("dlg_pending"))
         await self.h.clock.advance(3)
@@ -995,10 +999,29 @@ class ProgressTest(ConversationCase):
         await self.first_hint()
         await self.h.push(old.delta("interrupt", "other request", 2000, 2500))
         await self.h.push(old.delegation("interrupt_dlg"))
+        self.assertEqual(self.notices(), ["not_sent"])
+        await self.render()
+        await self.reply_once()
+        self.assertEqual(self.lines(), ["It's working on your request.", REPLY_TEXT])
+        result = await self.stop()
+        self.assertEqual((result.refused_pending, result.transcript_segments_unused), (1, 1))
+
+    async def test_pending_followup_changes_only_the_next_scheduled_progress_line(self):
+        self.pending_reply()
+        await self.request()
+        await self.h.push(old.delta("interrupt", "other request", 2000, 2500))
+        await self.h.push(old.delegation("interrupt_dlg"))
+        self.assertEqual(self.notices(), ["not_sent"])
+        self.assertEqual(self.lines(), [])
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_FIRST_S)
+        self.assertEqual(self.lines(), ["That follow-up wasn't sent. Ask again after the reply."])
+        self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
+        self.assertNotIn("answering", self.states())
         await self.render()
         await self.reply_once()
         result = await self.stop()
-        self.assertEqual((result.refused_pending, result.transcript_segments_unused), (1, 1))
+        self.assertEqual((result.requests_submitted, result.requests_accepted,
+                          result.refused_pending, result.replies_rendered), (1, 1, 1, 1))
 
     async def test_provider_loss_during_hint_preserves_confirm_outcome(self):
         gate = await self.first_hint(slow_accept=True)
@@ -1502,6 +1525,37 @@ class RealConversationFlowTest(flow.FlowCase):
         self.assertEqual((result.requests_accepted, result.replies_rendered,
                           result.progress_rendered), (1, 1, 1))
         self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(self.record(command)["state"], "COMPLETE")
+
+    async def test_busy_followup_reports_not_sent_and_keeps_original_reply(self):
+        self.client.reply_pending = True
+        self.client.reply_text = REPLY_TEXT
+        fs = await self.begin_conversation()
+        await self.request(fs, 1)
+        command = self.client.last_command
+        self.assertEqual(self.record(command)["state"], "ACCEPTED")
+        await fs.push(old.delta("followup", "different request", 2000, 2500))
+        await fs.push(old.delegation("followup"))
+        self.assertEqual(fs.device.of_type("pet.converse.notice"),
+                         [{"type": "pet.converse.notice", "code": "not_sent"}])
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "working")
+        await self.clock.advance(gs.CONVERSE_PROGRESS_FIRST_S)
+        notice = "That follow-up wasn't sent. Ask again after the reply."
+        commentary = lambda: [f["content"] for f in
+                              fs.provider.of_type("session.commentary.append")]
+        self.assertEqual(commentary(), [notice])
+        await self.render(fs)
+        self.client.reply_pending = False
+        await self.clock.advance(gs.POLL_INTERVAL_S)
+        self.assertEqual(commentary(), [notice, REPLY_TEXT])
+        await self.render(fs)
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "listening")
+        await fs.feed('{"type":"pet.stop"}')
+        result = await fs.finish()
+        self.assertEqual((result.requests_accepted, result.refused_pending,
+                          result.replies_rendered, result.progress_rendered), (1, 1, 1, 1))
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertEqual(json.loads(self.client.posts[0]["body"])["args"]["text"], "request 1")
         self.assertEqual(self.record(command)["state"], "COMPLETE")
 
     async def test_observation_403_reports_not_sent_instead_of_inventing_busy(self):

@@ -1,12 +1,38 @@
-# Pocket assistant team prototype
+# Pocket assistant: teammate LAN preview setup
 
-This guide describes a **LAN source preview**, not a turnkey release. Normal
-`0.3.19-amoled-boot` firmware produced spoken replies on a home LAN in one
-selected conversation (gateway `cea016b`, Unified `0.119.0`). See the
-[physical call record and limits](../PROJECT-BRIEF.md#what-is-done-and-what-the-evidence-does-not-prove).
-The preview source includes additional offline-checked gateway feedback.
-A separate operator has not yet completed a fresh board and server setup.
-Follow-ups spoken while a request is pending are not queued.
+**What you'll get:** talk to one selected Amplifier Unified chat from the pet on
+the same LAN as its gateway. Wait for each answer before speaking again. The
+pet shows **Accepted** when Unified accepts the request. Long waits may repeat
+“Still working on it”; that is a reminder, not a second send or proof of new
+progress. Nothing you say during the wait is queued. **Mic Off** ends audio, not
+accepted work; there is no background playback or automatic mic reopening.
+This source preview requires a local firmware build and is not yet a proven
+turnkey install on a second person's hardware.
+
+## Start here
+
+1. **Get the correct board.** Order the **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**
+   (CO5300/CST820, 16 MB flash, 8 MB PSRAM, ES8311 audio), not the LCD-1.83 or the
+   earlier AMOLED revision. Use a USB-C data cable and a spare, unprovisioned board.
+2. **Get one release.** From [Pocket releases](https://github.com/colombod/amplifier-unified-pocket-pet/releases),
+   choose `v0.3.19-lan-preview.2` and use its tagged source throughout. Check
+   [host, account, Wi-Fi and TLS requirements](#what-to-get) before you write anything.
+3. **Prepare your gateway.** Use [the Linux service guide](../bridge/deploy/README.md)
+   for its Python environment, then [pair and bind](#2-prepare-unified-and-the-gateway)
+   it to your own dedicated Unified chat. Start and verify the gateway using
+   [the service checks](../bridge/deploy/README.md#check-the-current-start). Stop if the free
+   compatibility or listener check fails; don't diagnose this with paid calls.
+4. **Prepare the spare board.** Follow [the matched build and flash instructions](#1-obtain-a-matched-build-and-preserve-the-board).
+   Back up and verify the board before writing; never use the fresh flash procedure
+   on a provisioned pet. Require a visible pet and working touch before setup.
+5. **Provision by phone, then try one question.** Follow [phone setup](#3-configure-from-a-phone),
+   then use the [first-call checklist](#first-spoken-check). The phone needs only
+   Wi-Fi and this pet's gateway token. Your Unified and OpenAI keys stay on your host.
+
+[Evidence and limits](../PROJECT-BRIEF.md#what-is-done-and-what-the-evidence-does-not-prove):
+normal `0.3.19-amoled-boot` firmware has spoken real replies on a provisioned board.
+A second operator has not yet completed the fresh-board and fresh-host journey.
+Neither home-away roaming nor queueing is included.
 
 The goal is a voice interface to the user's authorized work across Unified, not
 another chatbot or a permanently limited single-project assistant. The current
@@ -24,7 +50,8 @@ conversation for consequential details.
 **Before pairing:** on the Unified host, from the product checkout, run
 `"$UNIFIED_PYTHON" -I -B bridge/tools/check_unified.py`, where `UNIFIED_PYTHON`
 is the absolute path of the Python interpreter used by your Unified installation.
-It recognizes the inspected packages (0.116.0, 0.117.0, and 0.119.0).
+It recognizes the inspected packages (0.116.0, 0.117.0, 0.119.0 and 0.119.1).
+Use an unmodified Unified release; never patch Unified to pass this check.
 It asks the installed package's actual companion policy about
 the gateway's attach, list, read and send request shapes, entirely
 in memory. No token, board, service stop, provider call or real send is involved.
@@ -721,12 +748,22 @@ restart handling and a second person's service setup remain unverified.
 For a new host, follow the [current-start and LAN listener checks](../bridge/deploy/README.md#check-the-current-start)
 before trying the device. The LAN check sends no bearer and makes no paid call.
 
-Tap the round microphone control to connect and speak. Wait for **Listening**,
-ask a short question, and wait for the spoken reply before speaking again. Tap
-again to mute; muting ends audio, not work already accepted by Unified. There is no
-transcript preview or Send tap. Speech during an outstanding request or the
-answer is not queued, and barge-in is not yet qualified. Ask the front door to
-confirm consequential actions and inspect Unified if it reports uncertainty.
+### First spoken check
+
+1. On the pet, tap the round microphone once. Wait for **Listening** and say,
+   “Ask Unified what this chat is called.” Use a chat-specific question: the
+   voice model can answer general trivia without sending it to Unified.
+2. Wait for **Accepted** and a spoken answer naming your dedicated chat. Check
+   that the actual conversation contains one new request and its answer. A
+   progress announcement is not the answer. If the answer never plays, check
+   the conversation for the accepted request before asking again.
+3. Tap the microphone again to mute when done. Muting ends audio, not work
+   already accepted by Unified. If **Listening** never appears, recheck Wi-Fi,
+   the gateway's current start, TLS and the saved token before another paid call.
+
+Wait for each answer before speaking again. Speech during an outstanding
+request or the answer is not queued, and barge-in is not yet qualified. For
+consequential actions use Unified's normal confirmation and access controls.
 
 An ordinary call ends after about 90 seconds of silence or at the ten-minute
 limit. The demonstrated build 11 needs another tap after a lost connection,
@@ -828,9 +865,9 @@ it does not resend the earlier input. Incomplete history, unavailable reads,
 ambiguous proof or expired records remain blocked. The refusal uses a generic
 policy close that can also indicate other causes. A proof read already in flight
 may finish recording delivery after mute, but cannot restart that stopped call.
-On the original host, the LAN service now runs a version containing this
-safeguard. Voice through that version and the complete reconnect experience
-remain physically unverified; it has not been demonstrated on another host.
+On the original host, the LAN service runs a version containing this safeguard
+and handled the real call described in the [delivery brief](../PROJECT-BRIEF.md#delivery-sequence).
+That call did not test the reconnect safeguard or setup on another host.
 
 ## Remaining acceptance work
 
