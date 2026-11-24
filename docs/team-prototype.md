@@ -662,6 +662,9 @@ TLS. These trust procedures are not yet qualified on a teammate's host.
 
 ## 3. Configure from a phone
 
+See the [firmware user manual](firmware-manual.md#set-up-from-your-phone) for
+the screen-by-screen flow and where to get each address and credential.
+
 This bridge-first sequence is supported by the current source but has not yet
 been demonstrated on a factory-fresh teammate device:
 
