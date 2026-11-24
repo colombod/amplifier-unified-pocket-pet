@@ -18,6 +18,8 @@
 #include "live_voice.h"
 #include "touch_calibration.h"
 #include "tailnet_spike.h"
+#include "device_power.h"
+#include "power_input.h"
 
 #define FRAME_BYTES (192*208*2)
 extern const uint8_t pet_pixels[] asm("_binary_tachikoma_rgb565_start");
@@ -27,6 +29,11 @@ static lv_obj_t *audio_panel,*audio_back,*volume_label;
 static lv_obj_t *talk_button,*talk_label,*audio_open_button,*settings_panel,*settings_gear,*microphone_icon,*mute_slash;
 static lv_obj_t *wifi_badge,*settings_connection,*settings_signal,*settings_key;
 static lv_obj_t *back_button;
+static lv_obj_t *calibration_panel;
+static lv_obj_t *power_panel,*power_title,*power_message,*power_cancel,*power_confirm;
+static power_action_t power_action;
+static bool power_running;
+static power_touch_t power_touch;
 static bool return_to_settings;
 static unsigned tick_count=0, wave_ticks=0;
 static bool was_setup=false, panel_requested=true;
@@ -223,6 +230,109 @@ static lv_obj_t *button(lv_obj_t *parent,const char *text,int x,int y,int width,
     lv_obj_add_event_cb(o,cb,LV_EVENT_CLICKED,NULL);lv_obj_t *l=lv_label_create(o);
     lv_label_set_text(l,text);lv_obj_set_style_text_color(l,lv_color_hex(0x0f172a),0);lv_obj_center(l);return o;
 }
+static void power_close(lv_event_t *event) {
+    (void)event;
+    if(power_running)return;
+    power_action=POWER_NONE;
+    power_touch=POWER_TOUCH_WAIT;
+    lv_indev_reset(diag_input,NULL);
+    lv_obj_add_flag(power_panel,LV_OBJ_FLAG_HIDDEN);
+    device_power_block_keys(false);
+}
+static void power_notice(const char *heading,const char *message) {
+    power_action=POWER_NONE;
+    power_touch=POWER_TOUCH_WAIT;
+    lv_label_set_text(power_title,heading);
+    lv_label_set_text(power_message,message);
+    lv_label_set_text(lv_obj_get_child(power_cancel,0),"OK");
+    lv_obj_align(power_cancel,LV_ALIGN_BOTTOM_MID,0,-174);
+    lv_obj_remove_flag(power_cancel,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(power_confirm,LV_OBJ_FLAG_HIDDEN);
+}
+static bool power_touch_ready(void) {
+    return calibration_panel && lv_obj_has_flag(calibration_panel,LV_OBJ_FLAG_HIDDEN) &&
+        lv_obj_has_flag(audio_panel,LV_OBJ_FLAG_HIDDEN);
+}
+static void power_request(power_action_t action) {
+    if(!power_touch_ready() || !lv_obj_has_flag(power_panel,LV_OBJ_FLAG_HIDDEN))return;
+    device_power_block_keys(true);
+    lv_obj_remove_flag(power_panel,LV_OBJ_FLAG_HIDDEN);
+    if(action==POWER_OFF && !device_power_can_shutdown()) {
+        power_notice("Shut down unavailable","The power controller is unavailable. The pet is still on.");
+        return;
+    }
+    power_action=action;
+    power_touch=POWER_TOUCH_WAIT;
+    lv_indev_reset(diag_input,NULL);
+    lv_label_set_text(power_title,action==POWER_RESTART?"Restart the pet?":"Shut down the pet?");
+    lv_label_set_text(power_message,"Saved settings will be kept.");
+    lv_label_set_text(lv_obj_get_child(power_cancel,0),"Cancel");
+    lv_label_set_text(lv_obj_get_child(power_confirm,0),action==POWER_RESTART?"Restart":"Shut down");
+    lv_obj_align(power_cancel,LV_ALIGN_BOTTOM_MID,-80,-174);
+    lv_obj_remove_flag(power_cancel,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(power_confirm,LV_OBJ_FLAG_HIDDEN);
+}
+static void power_touch_read(lv_indev_t *input,lv_indev_data_t *data) {
+    diag_mapped(input,data);
+    if(power_action!=POWER_NONE && !power_running)
+        power_touch_sample(&power_touch,data->state==LV_INDEV_STATE_RELEASED);
+}
+static void power_press(lv_event_t *event) {
+    lv_event_code_t code=lv_event_get_code(event);
+    if(code==LV_EVENT_PRESSED)power_touch_press(&power_touch);
+    else if(code==LV_EVENT_PRESS_LOST && power_touch==POWER_TOUCH_PRESSED)
+        power_touch=POWER_TOUCH_READY;
+}
+static void restart_clicked(lv_event_t *event) {(void)event;power_request(POWER_RESTART);}
+static void shutdown_clicked(lv_event_t *event) {(void)event;power_request(POWER_OFF);}
+static void power_accept(lv_event_t *event) {
+    (void)event;
+    if(power_running || power_action==POWER_NONE || !power_touch_ready())return;
+    if(!power_touch_accept(&power_touch))return;
+    /* Recheck at the actual confirmation. Voice retains the media claim
+     * through task reaping, including unproven teardown (even if mic off).
+     * No stop, cancel, queue drain, or new session is triggered here. */
+    if(!tailnet_spike_power_claim()) {
+        power_notice("Pet is busy","Turn off the mic and wait for audio to close, then try again.");
+        return;
+    }
+    if(!network_power_claim()) {
+        tailnet_spike_power_release();
+        power_notice("Pet is busy","Wait for Wi-Fi or phone setup to finish, then try again.");
+        return;
+    }
+    power_running=true;
+    lv_obj_add_flag(power_cancel,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(power_confirm,LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(power_title,power_action==POWER_RESTART?"Restarting...":"Requesting shutdown...");
+    lv_label_set_text(power_message,"");
+    device_power_confirmed(power_action);
+}
+static void power_refresh(lv_timer_t *timer) {
+    (void)timer;
+    if(power_running) {
+        power_result_t result=device_power_result();
+        if(result==POWER_PENDING)return;
+        network_power_release();
+        tailnet_spike_power_release();
+        power_running=false;
+        if(result==POWER_BOOT_HELD)
+            power_notice("Restart not performed","Release BOOT, then try again.");
+        else if(result==POWER_BOOT_UNAVAILABLE)
+            power_notice("Restart unavailable","The BOOT input could not be checked. The pet is still on.");
+        else if(result==POWER_UNAVAILABLE)
+            power_notice("Shut down unavailable","The power controller is unavailable. The pet is still on.");
+        else
+            power_notice("Shutdown not confirmed","The pet is still on. No retry was attempted.");
+        return;
+    }
+    /* The BSP can be in interrupt mode. Sample once here until we observe
+     * release; do not arm from LVGL's cached state or change its input mode. */
+    if(power_action!=POWER_NONE && power_touch==POWER_TOUCH_WAIT)lv_indev_read(diag_input);
+    power_action_t request=device_power_take_key();
+    if(request!=POWER_NONE && diag_input && lv_indev_get_state(diag_input)==LV_INDEV_STATE_RELEASED)
+        power_request(request);
+}
 static void refresh(lv_timer_t *timer) {
     diag_mark(&input_diag.loop_in);
     audio_test_reap_finished();live_voice_reap_finished();
@@ -397,11 +507,34 @@ void app_main(void) {
     footer=button(settings_panel,"Phone setup",0,0,280,setup_clicked);lv_obj_align(footer,LV_ALIGN_TOP_MID,0,140);lv_obj_set_height(footer,40);
     audio_open_button=button(settings_panel,"Volume",0,0,280,audio_clicked);lv_obj_align(audio_open_button,LV_ALIGN_TOP_MID,0,186);lv_obj_set_height(audio_open_button,40);
     lv_obj_t *alignment=button(settings_panel,"Touch alignment",0,0,280,align_touch_clicked);lv_obj_align(alignment,LV_ALIGN_TOP_MID,0,232);lv_obj_set_height(alignment,40);
+    lv_obj_t *restart=button(settings_panel,"Restart",0,0,130,restart_clicked);lv_obj_align(restart,LV_ALIGN_TOP_MID,-75,282);
+    lv_obj_t *shutdown=button(settings_panel,"Shut down",0,0,130,shutdown_clicked);lv_obj_align(shutdown,LV_ALIGN_TOP_MID,75,282);
     button(settings_panel,"Back to Tachikoma",0,-20,280,settings_closed);
     lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);
+    uint32_t children=lv_obj_get_child_count(screen);
     diag_install(screen);
+    /* The pinned calibration component appends its full-screen overlay. Its
+     * reader consumes releases while open, including the NVS save. Don't
+     * display a confirmation above it or assume it's idle if not found. */
+    if(saved_cal && lv_obj_get_child_count(screen)==children+1) {
+        calibration_panel=lv_obj_get_child(screen,children);
+        lv_indev_set_read_cb(diag_input,power_touch_read);
+    }
+    power_panel=lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(power_panel);lv_obj_set_size(power_panel,lv_pct(100),lv_pct(100));lv_obj_center(power_panel);
+    lv_obj_set_style_bg_opa(power_panel,LV_OPA_COVER,0);lv_obj_set_style_bg_color(power_panel,lv_color_hex(0x0f172a),0);
+    lv_obj_remove_flag(power_panel,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(power_panel,LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_HIDDEN);
+    power_title=label(power_panel,"",340,0,112,&lv_font_montserrat_22);
+    power_message=label(power_panel,"",310,0,163,&lv_font_montserrat_16);
+    power_cancel=button(power_panel,"Cancel",-80,-174,132,power_close);
+    power_confirm=button(power_panel,"",80,-174,132,power_accept);
+    lv_obj_add_event_cb(power_confirm,power_press,LV_EVENT_PRESSED,NULL);
+    lv_obj_add_event_cb(power_confirm,power_press,LV_EVENT_PRESS_LOST,NULL);
+    lv_timer_create(power_refresh,60,NULL);
     lv_timer_create(refresh,120,NULL);refresh(NULL);
     bsp_display_unlock();
     diag_start();
     ESP_LOGI("pet","UI ready; microphone only after a tap.");
+    device_power_run();
 }
