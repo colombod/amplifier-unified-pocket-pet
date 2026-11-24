@@ -36,12 +36,13 @@ not the released `0.3.19` LAN preview.
   This is not a factory reset. Keep BOOT released while confirming and during
   normal startup. If the pet says **Restart not performed**, release BOOT and
   try again.
-- **Shut down:** Open **Settings → Shut down**, or briefly press **PWR** on
-  the running pet. At **Shut down the pet?**, tap **Shut down** or **Cancel**.
-  The firmware requests power-off from the board’s power controller, not
-  just a blank display. If the pet shows **Shutdown not confirmed** or
-  **Shut down unavailable**, it is still on; no second command is sent
-  automatically.
+- **Shut down:** Open **Settings → Shut down**, or briefly press and release
+  **PWR** on the running pet. The button opens **Shut down the pet?** after
+  release, not while you hold it. Tap **Shut down** or **Cancel**. Only
+  confirming sends a software shutdown request: the firmware asks the board’s
+  power controller to turn off, not just blank the display. If the pet shows
+  **Shutdown not confirmed** or **Shut down unavailable**, it is still on;
+  no second command is sent automatically.
 
 Finish phone setup and turn off the mic before restarting or shutting down.
 If you see **Pet is busy**, wait for Wi-Fi, settings saves or audio cleanup
