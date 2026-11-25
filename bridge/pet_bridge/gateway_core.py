@@ -1578,7 +1578,7 @@ class PetSession:
         self._transcript_floor = -1
         self._render_kind: str | None = None  # reply | notice | progress
         self._progress_due: float | None = None
-        self._progress_stages: set[bool] = set()  # False = starting, True = accepted
+        self._progress_first_slot_used = False
         self._progress_disabled = False
         self._pending_followup_hint = False
         self._next_followup_notice = -math.inf
@@ -3247,7 +3247,7 @@ class PetSession:
             self._disarm(timer)
         self._render_kind = None
         self._progress_due = None
-        self._progress_stages.clear()
+        self._progress_first_slot_used = False
         self._progress_disabled = False
         self._pending_followup_hint = False
         self._progress_poll = None
@@ -3504,22 +3504,19 @@ class PetSession:
                 or self._render_kind == "progress"
                 or self._speak_pending or self._reply_text is not None):
             return
-        accepted = self._send_state == "accepted"
-        repeated = accepted in self._progress_stages
-        line = (
-            gs.CONVERSE_PROGRESS_WORKING_REPEAT if repeated else gs.CONVERSE_PROGRESS_WORKING
-        ) if accepted else (
-            gs.CONVERSE_PROGRESS_STARTING_REPEAT if repeated else gs.CONVERSE_PROGRESS_STARTING
-        )
+        # Preserve the existing opportunity to explain a genuinely refused
+        # follow-up, but do not speak at all on an ordinary repeat tick.
+        self._progress_due = self._clock.now() + gs.CONVERSE_FOLLOWUP_HINT_INTERVAL_S
+        self._arm("converse_progress", gs.CONVERSE_FOLLOWUP_HINT_INTERVAL_S)
         if self._pending_followup_hint:
-            # Use an already scheduled speech slot. No extra render can
-            # delay the reply, and no refused utterance is retained.
             line = gs.CONVERSE_PROGRESS_FOLLOWUP_UNSENT
             self._pending_followup_hint = False
+        elif self._progress_first_slot_used:
+            return
         else:
-            self._progress_stages.add(accepted)
-        self._progress_due = self._clock.now() + gs.CONVERSE_PROGRESS_REPEAT_S
-        self._arm("converse_progress", gs.CONVERSE_PROGRESS_REPEAT_S)
+            line = (gs.CONVERSE_PROGRESS_WORKING if self._send_state == "accepted"
+                    else gs.CONVERSE_PROGRESS_STARTING)
+        self._progress_first_slot_used = True
         self._converse_render(line, kind="progress")
 
     def _stop_progress(self) -> None:

@@ -756,35 +756,32 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.states().count("answering"), 1)
         self.assertEqual((await self.stop()).requests_accepted, 1)
 
-    async def test_accepted_slow_reply_first_and_repeat_at_exact_interval(self):
+    async def test_accepted_slow_reply_has_one_hint_and_keeps_polling(self):
         await self.first_hint()
-        start = self.h.clock.now()
         await self.render()
-        await self.h.clock.advance(start + 29.9 - self.h.clock.now())
-        self.assertEqual(len(self.lines()), 1)
-        await self.h.clock.advance(0.1)
-        self.assertEqual(self.lines(), ["It's working on your request.", "Still working on it."])
-        self.assertAlmostEqual(self.h.provider.times[-1], start + 30)
-        await self.render()
+        polls = self.h.ops.count("poll")
+        await self.h.clock.advance(95)
+        self.assertEqual(self.lines(), ["It's working on your request."])
+        self.assertGreater(self.h.ops.count("poll"), polls)
         self.assertNotIn("answering", self.states())
         await self.reply_once()
         result = await self.stop()
-        self.assertEqual((result.progress_rendered, result.replies_rendered), (2, 1))
+        self.assertEqual((result.progress_rendered, result.replies_rendered), (1, 1))
 
-    async def test_starting_repeat_then_first_accepted_stage_is_not_a_repeat(self):
+    async def test_slow_start_has_one_hint_and_screen_updates_when_accepted(self):
         gate = await self.first_hint(slow_accept=True)
-        start = self.h.clock.now()
         await self.render()
-        await self.h.clock.advance(start + 30 - self.h.clock.now())
-        self.assertEqual(self.lines()[-1], "Still starting it.")
-        await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(self.lines(), ["Starting that conversation. One moment."])
+        self.assertEqual(self.states()[-1], "asking")
         self.pending_reply()
         gate.set()
         await self.h.quiesce()
-        await self.h.clock.advance(start + 60 - self.h.clock.now())
-        self.assertEqual(self.lines()[-1], "It's working on your request.")
-        await self.render()
-        self.assertEqual((await self.stop()).progress_rendered, 3)
+        self.assertEqual(self.states()[-1], "working")
+        await self.h.clock.advance(35)
+        self.assertEqual(self.lines(), ["Starting that conversation. One moment."])
+        await self.reply_once()
+        self.assertEqual((await self.stop()).progress_rendered, 1)
 
     async def test_accept_during_hint_starts_deadline_now_and_polls_afterwards(self):
         gate = await self.first_hint(slow_accept=True)
@@ -1018,6 +1015,26 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
         self.assertNotIn("answering", self.states())
         await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(self.lines(), ["That follow-up wasn't sent. Ask again after the reply."])
+        await self.reply_once()
+        result = await self.stop()
+        self.assertEqual((result.requests_submitted, result.requests_accepted,
+                          result.refused_pending, result.replies_rendered), (1, 1, 1, 1))
+
+    async def test_followup_after_hint_still_gets_refusal_without_resubmission(self):
+        await self.first_hint()
+        await self.render()
+        await self.h.push(old.delta("followup", "different request", 2000, 2500))
+        await self.h.push(old.delegation("followup"))
+        self.assertEqual(self.notices(), ["not_sent"])
+        await self.h.clock.advance(30)
+        self.assertEqual(self.lines(), [
+            "It's working on your request.", "That follow-up wasn't sent. Ask again after the reply.",
+        ])
+        await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(len(self.lines()), 2)
         await self.reply_once()
         result = await self.stop()
         self.assertEqual((result.requests_submitted, result.requests_accepted,
@@ -1111,8 +1128,8 @@ class ProgressTest(ConversationCase):
         await self.request()
         submitted = self.h.clock.now()
         await self.h.clock.advance(5)
-        # Accept 0.5 s into the first hint; repeat at submitted+185 is active
-        # when the original acceptance deadline fires at submitted+185.5.
+        # Accept 0.5 s into the first hint. An actionable follow-up notice
+        # starts at submitted+185, just before the original deadline.
         await self.h.clock.advance(0.5)
         gate.set()
         await self.h.quiesce()
@@ -1120,16 +1137,19 @@ class ProgressTest(ConversationCase):
         await self.render()
         for due in (35, 65, 95, 125, 155):
             await self.h.clock.advance(submitted + due - self.h.clock.now())
-            await self.render()
+        self.assertEqual(self.lines(), ["Starting that conversation. One moment."])
+        await self.h.push(old.delta("late-followup", "different request", 2000, 2500))
+        await self.h.push(old.delegation("late-followup"))
         await self.h.clock.advance(accepted + 179.9 - self.h.clock.now())
         self.assertEqual(self.h.session._render_kind, "progress")
-        self.assertEqual(self.notices(), [])
+        self.assertEqual(self.lines()[-1], "That follow-up wasn't sent. Ask again after the reply.")
+        self.assertEqual(self.notices(), ["not_sent"])
         await self.h.clock.advance(0.1)
-        self.assertEqual(self.notices(), ["reply_unavailable"])
+        self.assertEqual(self.notices(), ["not_sent", "reply_unavailable"])
         self.assertEqual(self.h.session._timed_out_turn, self.h.session._turn_id)
         self.assertEqual(self.h.ops.count("confirm"), 1)
         await self.render()
-        self.assertEqual((await self.stop()).progress_rendered, 6)
+        self.assertEqual((await self.stop()).progress_rendered, 1)
 
     async def test_counts_only_session_end_contains_audibly_completed_hints(self):
         from pet_bridge.gateway_events import EventLog
