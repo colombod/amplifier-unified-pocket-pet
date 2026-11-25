@@ -1132,7 +1132,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         timed_out = self.client.last_command
         self.assertNotEqual(old, timed_out)
         self.assertEqual(len(self.client.posts), 2)
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         self.assertEqual(device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
         provider.push_audio(gf.AUDIO_CANARY)
         await self.quiesce()
@@ -1158,7 +1158,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         await self.clock.advance(1)
         self.assertEqual(
             [frame["content"] for frame in provider.of_type("session.commentary.append")],
-            ["It's working on your request.", "No reply is available yet.", new_answer],
+            ["It's working on your request.", "I couldn't retrieve the reply.", new_answer],
         )
         provider.push_audio(gf.AUDIO_CANARY)
         await self.quiesce()
@@ -1215,6 +1215,8 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
                         "other-input", generation="gen-decoy", id="decoy",
                         nativeInputId=post["id"],
                     ))
+                if index == 1 and mode == "finished_missing":
+                    continue
                 rows.append(flow.assistant_row(
                     answer_generation, answers[index], id=f"answer-{index}"
                 ))
@@ -1259,7 +1261,8 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertNotEqual(first, late)
         self.assertEqual(self.record(first)["state"], "SUPPRESSED")
         self.assertEqual(self.record(late)["state"], "ACCEPTED")
-        await self.clock.advance(180)
+        mode = "finished_missing"
+        await self.clock.advance(gs.POLL_INTERVAL_S + gs.CONVERSE_REPLY_RETRIEVAL_S)
         self.assertEqual(device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
         await render_notice()
 
@@ -1327,7 +1330,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertEqual(self.gw.last_outcome.conversation.replies_rendered, 1)
         commentary = [frame["content"] for frame in provider.of_type("session.commentary.append")]
         # One fixed hint preceded this timeout; no late/decoy answer was rendered.
-        self.assertEqual(commentary, ["It's working on your request.", "No reply is available yet."] +
+        self.assertEqual(commentary, ["It's working on your request.", "I couldn't retrieve the reply."] +
                          ["That conversation is busy."] * 5 + [answers[2]])
 
     async def test_late_reply_proof_disconnect_retains_custody_until_read_finishes(self):
@@ -1346,7 +1349,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         await self.quiesce()
         await self.clock.advance(1.5)
         old = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         provider.push_audio(gf.AUDIO_CANARY)
         await self.quiesce()
         for _ in range(16):

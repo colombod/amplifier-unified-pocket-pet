@@ -96,6 +96,7 @@ Recheck `amplifier_web/device_pairing.py` `permits_companion` in the Unified rel
 - Older deployed gateways say "That conversation is busy" for any failed idle check. This checkout distinguishes positive activity from an inaccessible, unlisted or unknown state in running conversation mode; the latter reports "not sent". Neither case submits work.
 - The bound conversation is listed only while its workspace folder is a registered Unified workspace.
 - A dormant conversation can take more than a minute to accept the first request (67 s measured). The gateway can give one spoken acknowledgment, not periodic filler. The device stays in `asking` until acceptance; only a real reply puts it in `answering`.
+- While a voice call is open, poll the exact accepted request until its reply is ready; waiting for Unified isn't voice inactivity. Start the short reply retrieval window only on exact completion with a missing answer row. After playback, start a fresh listening interval. The total call cap and mic-off still close audio without replaying or cancelling accepted work.
 - The gateway follows a Unified restart by itself (`host_restart_follow` in the event log). Its credential store has a single owner: a second process gets `auth_locked`.
 - A spoken test must need Unified ("what is this chat's title"). The voice model answers general knowledge itself, and then nothing is sent.
 

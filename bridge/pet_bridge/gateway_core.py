@@ -1496,6 +1496,7 @@ class PetSession:
         self._media_deadline = math.inf  # optional, fixed before the first provider dial
         self._turn_id: str | None = None
         self._timed_out_turn: str | None = None
+        self._reply_retrieval_due: float | None = None
         self._turn_used = False
         self._begin_pending = False
         self._stager = gs.TranscriptStager()
@@ -2679,12 +2680,10 @@ class PetSession:
                 )
                 return
             self._send_accepted = True
-            self._send_accept_t = self._clock.now()
             self._state = _AWAIT_REPLY
             if not self._emit(gs.build_converse_state("working")):
                 return
             self._arm("poll", gs.POLL_INTERVAL_S)
-            self._arm("converse_reply", gs.CONVERSE_REPLY_MAX_S)
             return
         if reason is not None:  # a refusal: proof of no send only if it was allowlisted
             self._emit_send_result("rejected" if state == "refused" else "uncertain")
@@ -2709,11 +2708,9 @@ class PetSession:
         busy = self._poll_inflight or self._speak_pending or self._contaminated
         if self._state != _AWAIT_REPLY or busy or self._render_kind == "progress":
             return
-        limit = gs.CONVERSE_REPLY_MAX_S if self._converse else gs.POLL_MAX_S
-        if self._clock.now() + _EPS >= self._send_accept_t + limit:
-            if self._converse:
-                self._converse_timeout()
-                return
+        if self._expire_reply_retrieval():
+            return
+        if not self._converse and self._clock.now() + _EPS >= self._send_accept_t + gs.POLL_MAX_S:
             self._fail("deadline")
             return
         self._poll_inflight = True
@@ -2722,17 +2719,25 @@ class PetSession:
         self._submit("poll", lambda: action(turn), "poll")
 
     def _on_poll_result(self, ok: bool, value: Any) -> None:
-        if self._render_kind == "progress" and self._state == _AWAIT_REPLY:
+        if self._state != _AWAIT_REPLY or self._contaminated:
+            self._poll_inflight = False
+            return
+        if self._expire_reply_retrieval():
+            return
+        # This reason is only emitted after exact-input and finished-generation
+        # checks. A busy, idle, or unavailable chat is not completion evidence.
+        if (self._converse and self._reply_retrieval_due is None
+                and ok and isinstance(value, core.ReplyResult)
+                and value.command_id == self._turn_id
+                and value.status == "pending" and value.reason == "reply_row_not_visible"):
+            self._reply_retrieval_due = self._clock.now() + gs.CONVERSE_REPLY_RETRIEVAL_S
+            self._arm("converse_reply", gs.CONVERSE_REPLY_RETRIEVAL_S)
+        if self._render_kind == "progress":
             # At most one poll is in flight. Keep its result, including ready/text
             # or failure, rather than claiming/dropping it under the hint.
             self._progress_poll = (ok, value)
             return
         self._poll_inflight = False
-        if self._state != _AWAIT_REPLY or self._contaminated:
-            return
-        if self._converse and self._clock.now() + _EPS >= self._send_accept_t + gs.CONVERSE_REPLY_MAX_S:
-            self._converse_timeout()
-            return
         if not ok:
             if self._converse:
                 self._converse_notice("reply_unavailable")
@@ -2776,8 +2781,7 @@ class PetSession:
     def _on_epoch_pre(self, ok: bool, value: Any) -> None:
         if self._state != _AWAIT_REPLY or self._contaminated:
             return
-        if self._converse and self._clock.now() + _EPS >= self._send_accept_t + gs.CONVERSE_REPLY_MAX_S:
-            self._converse_timeout()
+        if self._expire_reply_retrieval():
             return
         if not ok or value is not True:  # the epoch moved on: nothing is spoken
             self._reply_text = None
@@ -2927,7 +2931,7 @@ class PetSession:
             "converse_limit": self._converse_limit,
             "media_limit": self._converse_limit if self._converse else self._on_cap_timer,
             "converse_render": self._converse_render_tick,
-            "converse_reply": self._converse_reply_timeout,
+            "converse_reply": self._expire_reply_retrieval,
             "converse_progress": self._converse_progress,
         }.get(name)
         if handler is not None:
@@ -3245,6 +3249,7 @@ class PetSession:
             return
         for timer in ("settle", "poll", "converse_reply", "converse_render", "converse_progress"):
             self._disarm(timer)
+        self._reply_retrieval_due = None
         self._render_kind = None
         self._progress_due = None
         self._progress_first_slot_used = False
@@ -3466,6 +3471,7 @@ class PetSession:
         self._state = _CONVERSE_RECOVERING
         self._disarm("poll")
         self._disarm("converse_reply")
+        self._reply_retrieval_due = None
         # Preflight/known-unsent refusals can leave a sealed capture in core.
         # Abandon ONLY that capture, never resolve an uncertain journal entry.
         if self._turn_id is not None:
@@ -3485,7 +3491,7 @@ class PetSession:
             "busy": "That conversation is busy.",
             "not_sent": "That was not sent.",
             "send_uncertain": "I could not confirm it was sent. I will not send it again.",
-            "reply_unavailable": "No reply is available yet.",
+            "reply_unavailable": "I couldn't retrieve the reply.",
         }
         self._converse_render(lines[self._notice_code or "not_sent"], kind="notice")
 
@@ -3532,8 +3538,8 @@ class PetSession:
         self._progress_confirm = None
 
     def _finish_progress(self, audible: bool) -> None:
-        # Keep the real waiting state throughout the hint: Stop/loss/caps retain
-        # their existing semantics, and acceptance starts its deadline immediately.
+        # Keep the real waiting state throughout the hint. Stop/loss/caps
+        # still apply, and a retrieval deadline already armed stays absolute.
         confirm, poll = self._progress_confirm, self._progress_poll
         self._stop_progress()
         if audible:
@@ -3631,14 +3637,13 @@ class PetSession:
         else:
             self._arm("converse_render", 0.1)
 
-    def _converse_timeout(self) -> None:
+    def _expire_reply_retrieval(self) -> bool:
+        due = self._reply_retrieval_due
+        if self._state != _AWAIT_REPLY or due is None or self._clock.now() + _EPS < due:
+            return False
         self._timed_out_turn = self._turn_id
         self._converse_notice("reply_unavailable", timed_out=True)
-
-    def _converse_reply_timeout(self) -> None:
-        if (self._state == _AWAIT_REPLY
-                and self._clock.now() + _EPS >= self._send_accept_t + gs.CONVERSE_REPLY_MAX_S):
-            self._converse_timeout()
+        return True
 
 
 # --STAGE-MARKER--

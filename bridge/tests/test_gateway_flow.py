@@ -240,6 +240,7 @@ class UnifiedFake:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.listing_status = "idle"
+        self.reply_row_missing = False
         self.listing_execution = False
         self.listing_response: Response | None = None
         self.post_response: Response | Callable[[str], Response] | None = None
@@ -297,12 +298,16 @@ class UnifiedFake:
             if self.partial:
                 return self._partial(command, dict(route.query).get("before"))
             shown = {"text": self.last_text} if self.echo_sent_text else {}
-            status = {"phase": "working", "basis": "generation_started"} if self.reply_pending else {}
+            status = (
+                {"phase": "working", "basis": "generation_started"}
+                if self.reply_pending and not self.reply_row_missing else {}
+            )
             rows = [
                 *self.history_rows,
                 user_row(command, **status, **shown),
-                assistant_row("gen-1", self.reply_text),
             ]
+            if not self.reply_row_missing:
+                rows.append(assistant_row("gen-1", self.reply_text))
             if self.history_rows:
                 return DetailServer(rows)({"route": route})
             return json_response(page(rows))
@@ -482,6 +487,18 @@ class FlowCase(OfflineAsyncCase):
         )
 
     # -- plumbing -----------------------------------------------------------------
+    async def observe_finished_without_reply(self) -> None:
+        """Feed one exact completion observation whose answer row is still hidden."""
+        self.client.reply_row_missing = True
+        try:
+            await self.clock.advance(gs.POLL_INTERVAL_S)
+        finally:
+            self.client.reply_row_missing = False
+
+    async def expire_reply_retrieval(self) -> None:
+        await self.observe_finished_without_reply()
+        await self.clock.advance(gs.CONVERSE_REPLY_RETRIEVAL_S)
+
     def new_event_id(self) -> str:
         self.counter += 1
         return f"gw_{self.counter:04d}"
