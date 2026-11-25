@@ -32,7 +32,7 @@ synthetic. Not the complete esp_websocket_client task or real TLS qualification.
 import argparse,hashlib,json,os,subprocess,sys
 from pathlib import Path
 case_names=(
-    'legacy','bench-counters','tx-ready60','tx-payload-stall60','tx-partial-stall60','rx-header-gap60',
+    'legacy','bench-counters','tx-ready60','tx-payload-stall60','tx-partial-stall60','rx-header-gap60','rx-header-gap-uplink',
     'tx-caller10','rx-caller10','tx-caller0','rx-caller0',
     'tx-deadline20','rx-deadline20','tx-cancel20','rx-cancel20',
     'idle-rx-start-tx','nested-tls-exclusion','nested-deadline-restore',

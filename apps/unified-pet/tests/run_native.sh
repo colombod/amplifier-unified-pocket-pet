@@ -52,6 +52,7 @@ done
 sh tests/run_bridge_native.sh "$out/bridge-runtime"
 sh tests/run_bridge_converse.sh "$out/bridge-converse"
 python3 tests/run_bridge_transport_native.py "$out/bridge-transport"
+"$out/bridge-transport/test" rx-header-gap-uplink
 python3 tests/run_bridge_transport_native.py "$out/bridge-lifecycle" lifecycle
 python3 tests/run_bridge_transport_native.py "$out/bridge-receive" receive
 # Certificate failures: the adapter matrix consumes synthetic TLS errors using
