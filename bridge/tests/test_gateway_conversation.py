@@ -703,6 +703,66 @@ class ConversationTest(ConversationCase):
         self.assertEqual(result.conversation_end, "render_timeout")
         self.assertIn("reply_unavailable", self.notices())
 
+    async def test_pcm_received_before_reply_commit_cannot_count_as_reply(self):
+        await self.request()
+        self.assertEqual(self.states()[-1], "working")
+        gate = self.h.device.send_block = asyncio.Event()
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(1)
+        self.assertEqual(self.h.session._render_kind, "reply")
+        self.assertTrue(self.h.session._all_acked())
+        gate.set()
+        await self.h.quiesce()
+        await self.h.clock.advance(2)
+        self.assertEqual(self.h.session.outcome.audio_out_bytes, len(AUDIO_CANARY))
+        self.assertEqual(self.h.session.outcome.replies_rendered, 0)
+        self.assertEqual(self.states()[-1], "answering")
+        await self.h.clock.advance(gs.CONVERSE_RENDER_MAX_S)
+        result = await self.h.finish()
+        self.assertEqual(result.conversation_end, "render_timeout")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_silent_device_send_does_not_hold_render_open(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(0.1)
+        gate = self.h.device.send_block = asyncio.Event()
+        try:
+            self.h.provider.push_audio(bytes(4800))
+            await self.h.quiesce()
+            self.assertTrue(self.h.session._audio._sending)
+            await self.h.clock.advance(2)
+            self.assertEqual(self.h.session.outcome.replies_rendered, 1)
+        finally:
+            gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.states()[-1], "listening")
+        await self.stop()
+
+    async def test_pending_current_reply_signal_holds_render_open(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(0.1)
+        gate = self.h.device.send_block = asyncio.Event()
+        try:
+            self.h.provider.push_audio(AUDIO_CANARY)
+            await self.h.quiesce()
+            self.assertTrue(self.h.session._audio._sending)
+            await self.h.clock.advance(2)
+            self.assertEqual(self.h.session.outcome.replies_rendered, 0)
+        finally:
+            gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.states()[-1], "answering")
+        await self.h.clock.advance(2)
+        self.assertEqual(self.states()[-1], "listening")
+        self.assertEqual((await self.stop()).replies_rendered, 1)
+
 
 class ProgressTest(ConversationCase):
     """Hints reuse commentary/ACK/audible quiet without resolving the request."""
@@ -729,8 +789,8 @@ class ProgressTest(ConversationCase):
         await self.h.clock.advance(0.1)
         self.assertAlmostEqual(self.h.provider.times[-1], submitted + 5)
         self.assertEqual(self.lines(), [
-            "Starting that conversation. One moment." if slow_accept else
-            "It's working on your request."
+            "One moment. I'm sending your request." if slow_accept else
+            "I'm waiting for the reply."
         ])
         self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
         self.assertEqual(self.states(), ["listening", "asking"] if slow_accept else
@@ -772,27 +832,33 @@ class ProgressTest(ConversationCase):
         await self.render()
         polls = self.h.ops.count("poll")
         await self.h.clock.advance(95)
-        self.assertEqual(self.lines(), ["It's working on your request."])
+        self.assertEqual(self.lines(), ["I'm waiting for the reply."])
         self.assertGreater(self.h.ops.count("poll"), polls)
         self.assertNotIn("answering", self.states())
         await self.reply_once()
         result = await self.stop()
         self.assertEqual((result.progress_rendered, result.replies_rendered), (1, 1))
 
-    async def test_slow_start_has_one_hint_and_screen_updates_when_accepted(self):
+    async def test_slow_send_and_slow_reply_have_one_hint_each(self):
         gate = await self.first_hint(slow_accept=True)
         await self.render()
         await self.h.clock.advance(35)
-        self.assertEqual(self.lines(), ["Starting that conversation. One moment."])
+        self.assertEqual(self.lines(), ["One moment. I'm sending your request."])
         self.assertEqual(self.states()[-1], "asking")
         self.pending_reply()
         gate.set()
         await self.h.quiesce()
         self.assertEqual(self.states()[-1], "working")
-        await self.h.clock.advance(35)
-        self.assertEqual(self.lines(), ["Starting that conversation. One moment."])
+        due = self.h.session._progress_due
+        self.assertIsNotNone(due)
+        await self.h.clock.advance(due - self.h.clock.now())
+        hints = ["One moment. I'm sending your request.", "I'm waiting for the reply."]
+        self.assertEqual(self.lines(), hints)
+        await self.render()
+        await self.h.clock.advance(65)
+        self.assertEqual(self.lines(), hints)
         await self.reply_once()
-        self.assertEqual((await self.stop()).progress_rendered, 1)
+        self.assertEqual((await self.stop()).progress_rendered, 2)
 
     async def test_accept_during_hint_does_not_start_retrieval_deadline(self):
         gate = await self.first_hint(slow_accept=True)
@@ -913,6 +979,29 @@ class ProgressTest(ConversationCase):
     async def test_no_ack_or_audio_abandoned_at_bound_no_more_hints_reply_works(self):
         await self.missing_hint_response(ack=False, audio=False)
 
+    async def test_in_flight_progress_pcm_cannot_count_as_next_reply(self):
+        await self.first_hint()
+        self.h.provider.push_audio(b"\x11\x22" * 4800)
+        await self.h.quiesce()
+        self.assertEqual(self.h.session.outcome.audio_out_bytes, 4800)
+        gate = self.h.device.send_block = asyncio.Event()
+        await self.h.clock.advance(0.1)
+        self.h.ops.results.pop("poll")
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_RENDER_MAX_S + 1)
+        self.assertEqual(self.lines().count(REPLY_TEXT), 1)
+        self.assertTrue(self.h.session._all_acked())
+        gate.set()
+        await self.h.quiesce()
+        await self.h.clock.advance(2)
+        self.assertEqual(self.h.session.outcome.audio_out_bytes, 9600)
+        self.assertEqual(self.h.session.outcome.replies_rendered, 0)
+        self.assertEqual(self.h.session.outcome.progress_rendered, 0)
+        # Only fresh PCM in the current reply's window completes it.
+        await self.render()
+        result = await self.stop()
+        self.assertEqual((result.replies_rendered, result.progress_rendered), (1, 0))
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
     async def test_ack_without_audio_does_not_count_or_close_call(self):
         await self.missing_hint_response(ack=True, audio=False)
 
@@ -1009,7 +1098,7 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.notices(), ["not_sent"])
         await self.render()
         await self.reply_once()
-        self.assertEqual(self.lines(), ["It's working on your request.", REPLY_TEXT])
+        self.assertEqual(self.lines(), ["I'm waiting for the reply.", REPLY_TEXT])
         result = await self.stop()
         self.assertEqual((result.refused_pending, result.transcript_segments_unused), (1, 1))
 
@@ -1040,7 +1129,7 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.notices(), ["not_sent"])
         await self.h.clock.advance(30)
         self.assertEqual(self.lines(), [
-            "It's working on your request.", "That follow-up wasn't sent. Ask again after the reply.",
+            "I'm waiting for the reply.", "That follow-up wasn't sent. Ask again after the reply.",
         ])
         await self.render()
         await self.h.clock.advance(35)
@@ -1127,7 +1216,7 @@ class ProgressTest(ConversationCase):
         await self.h.quiesce()
         self.assertEqual(self.lines(), [REPLY_TEXT])
         await self.h.clock.advance(5)
-        self.assertEqual(self.lines(), [REPLY_TEXT, "It's working on your request."])
+        self.assertEqual(self.lines(), [REPLY_TEXT, "I'm waiting for the reply."])
         self.assertEqual(self.commentary()[-1]["delegation_id"], "dlg_2")
         await self.render()
         self.assertEqual((await self.stop()).progress_rendered, 1)
@@ -1558,7 +1647,7 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.clock.advance(5)
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["Starting that conversation. One moment."],
+            ["One moment. I'm sending your request."],
         )
         gate.set()
         await self.quiesce()
@@ -1570,7 +1659,7 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.clock.advance(1)
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["Starting that conversation. One moment.", REPLY_TEXT],
+            ["One moment. I'm sending your request.", REPLY_TEXT],
         )
         self.assertTrue(self.record(command)["reply_consumed"])
         await self.render(fs)
@@ -1839,7 +1928,7 @@ class RealConversationFlowTest(flow.FlowCase):
         # expires silently; it must not consume the real reply or repeat.
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["It's working on your request.", "I couldn't retrieve the reply."],
+            ["I'm waiting for the reply.", "I couldn't retrieve the reply."],
         )
         self.assertEqual(fs.session.outcome.progress_rendered, 0)
         await self.render(fs)
@@ -1941,7 +2030,7 @@ class RealConversationFlowTest(flow.FlowCase):
         # the late empty/invalid/long reply is still never exported.
         self.assertEqual(
             [frame["content"] for frame in fs.provider.of_type("session.commentary.append")],
-            ["It's working on your request.", "I couldn't retrieve the reply."],
+            ["I'm waiting for the reply.", "I couldn't retrieve the reply."],
         )
         await fs.feed('{"type":"pet.stop"}')
         await fs.finish()
@@ -2566,7 +2655,7 @@ class PublicLateRecoveryControl(flow.FlowCase):
         self.assertEqual(self.record(first)["reply_outcome"], "claimed_for_render")
         self.assertEqual([
             frame["content"] for frame in fs.provider.of_type("session.commentary.append")
-        ], ["It's working on your request.", REPLY_TEXT])
+        ], ["I'm waiting for the reply.", REPLY_TEXT])
         fs.provider.push_audio(AUDIO_CANARY)
         await self.quiesce()
         for _ in range(16):

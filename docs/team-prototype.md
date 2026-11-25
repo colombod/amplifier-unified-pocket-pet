@@ -2,9 +2,9 @@
 
 **What you'll get:** talk to one selected Amplifier Unified chat from the pet on
 the same LAN as its gateway. Wait for each answer before speaking again. The
-pet shows **Accepted** when Unified accepts the request. During a long wait it
-may give one spoken acknowledgment, then stay quiet until the reply or an
-actionable notice. Nothing you say during the wait is queued. **Mic Off** ends
+pet shows **Accepted** when Unified accepts the request. The gateway may speak
+once while sending a slow request and once while waiting for its reply. It
+doesn't repeat the same update. Nothing you say during the wait is queued. **Mic Off** ends
 audio, not accepted work; there is no background playback or automatic mic reopening.
 This source preview requires a local firmware build and is not yet a proven
 turnkey install on a second person's hardware.

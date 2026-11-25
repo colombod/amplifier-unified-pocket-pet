@@ -115,8 +115,8 @@ CONVERSE_REPLY_RETRIEVAL_S = 15.0  # exact completion observed, matching row not
 CONVERSE_PROGRESS_FIRST_S = 5.0
 CONVERSE_FOLLOWUP_HINT_INTERVAL_S = 30.0
 CONVERSE_PROGRESS_RENDER_MAX_S = 10.0
-CONVERSE_PROGRESS_STARTING = "Starting that conversation. One moment."
-CONVERSE_PROGRESS_WORKING = "It's working on your request."
+CONVERSE_PROGRESS_SENDING = "One moment. I'm sending your request."
+CONVERSE_PROGRESS_WORKING = "I'm waiting for the reply."
 CONVERSE_PROGRESS_FOLLOWUP_UNSENT = "That follow-up wasn't sent. Ask again after the reply."
 CONVERSE_FOLLOWUP_NOTICE_INTERVAL_S = 4.0
 # Display-only speech-end heuristic, not a provider EOS or acoustic proof.
@@ -1113,7 +1113,7 @@ __all__ = [
     "CONVERSE_PROGRESS_FIRST_S",
     "CONVERSE_FOLLOWUP_HINT_INTERVAL_S",
     "CONVERSE_PROGRESS_RENDER_MAX_S",
-    "CONVERSE_PROGRESS_STARTING",
+    "CONVERSE_PROGRESS_SENDING",
     "CONVERSE_PROGRESS_WORKING",
     "CONVERSE_RENDER_MAX_S",
     "CONVERSE_REPLY_RETRIEVAL_S",

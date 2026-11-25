@@ -1158,7 +1158,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         await self.clock.advance(1)
         self.assertEqual(
             [frame["content"] for frame in provider.of_type("session.commentary.append")],
-            ["It's working on your request.", "I couldn't retrieve the reply.", new_answer],
+            ["I'm waiting for the reply.", "I couldn't retrieve the reply.", new_answer],
         )
         provider.push_audio(gf.AUDIO_CANARY)
         await self.quiesce()
@@ -1330,7 +1330,7 @@ class PreDialUncertaintyFlowTest(flow.FlowCase):
         self.assertEqual(self.gw.last_outcome.conversation.replies_rendered, 1)
         commentary = [frame["content"] for frame in provider.of_type("session.commentary.append")]
         # One fixed hint preceded this timeout; no late/decoy answer was rendered.
-        self.assertEqual(commentary, ["It's working on your request.", "I couldn't retrieve the reply."] +
+        self.assertEqual(commentary, ["I'm waiting for the reply.", "I couldn't retrieve the reply."] +
                          ["That conversation is busy."] * 5 + [answers[2]])
 
     async def test_late_reply_proof_disconnect_retains_custody_until_read_finishes(self):
