@@ -279,7 +279,7 @@ class ConversationTest(ConversationCase):
         await self.h.clock.advance(1)
         self.assertEqual(self.notices(), ["reply_unavailable"])
         self.assertEqual(self.h.provider.of_type("session.commentary.append")[-1]["content"],
-                         "No reply is available yet.")
+                         "I couldn't retrieve the reply.")
         await self.render()
         self.assertEqual(self.states()[-1], "listening")
         result = await self.stop()
@@ -527,10 +527,14 @@ class ConversationTest(ConversationCase):
         self.assertEqual(self.h.ops.count("begin"), 0)
         self.assertEqual(self.h.factory.calls, 1)
 
-    async def test_reply_deadline_survives_a_blocked_poll(self):
-        gate = self.h.ops.hold("poll")
+    async def test_retrieval_deadline_survives_a_blocked_poll(self):
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "reply_row_not_visible", False, 3
+        )
         await self.request()
-        await self.h.clock.advance(179.9)
+        await self.h.clock.advance(gs.POLL_INTERVAL_S)
+        gate = self.h.ops.hold("poll")
+        await self.h.clock.advance(gs.CONVERSE_REPLY_RETRIEVAL_S - 0.1)
         self.assertEqual(self.notices(), [])
         self.assertEqual(self.states()[-1], "working")
         await self.h.clock.advance(0.1)
@@ -566,14 +570,21 @@ class ConversationTest(ConversationCase):
         self.assertFalse(self.h.task.done())  # fresh idle interval after the wait
         self.assertEqual((await self.stop()).replies_rendered, 1)
 
-    async def test_no_reply_by_180_seconds_notices_then_returns_to_listening(self):
+    async def test_only_finished_missing_reply_starts_fixed_retrieval_window(self):
         self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
             turn, "pending", "generation_running", False, 3
         )
         await self.request()
-        await self.h.clock.advance(179.9)
+        await self.h.clock.advance(190)
         self.assertEqual(self.notices(), [])
         self.assertEqual(self.states()[-1], "working")
+        self.assertIsNone(self.h.session._reply_retrieval_due)
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "reply_row_not_visible", False, 3
+        )
+        await self.h.clock.advance(gs.POLL_INTERVAL_S)
+        await self.h.clock.advance(gs.CONVERSE_REPLY_RETRIEVAL_S - 0.1)
+        self.assertEqual(self.notices(), [])
         await self.h.clock.advance(0.1)
         self.assertEqual(self.notices(), ["reply_unavailable"])
         polls = self.h.ops.count("poll")
@@ -592,7 +603,7 @@ class ConversationTest(ConversationCase):
         for index in range(6):
             await self.h.clock.advance(80)
             await self.h.push(old.delta(f"keep{index}", "hi", index * 1000, index * 1000 + 500))
-        await self.request(10)  # accepted at 481.5, reply deadline would be 661.5
+        await self.request(10)  # accepted at 481.5; the call cap still applies
         await self.h.clock.advance(116.4)
         self.assertEqual(self.states()[-1], "working")
         self.assertEqual(self.notices(), ["no_words_yet"])
@@ -692,6 +703,66 @@ class ConversationTest(ConversationCase):
         self.assertEqual(result.conversation_end, "render_timeout")
         self.assertIn("reply_unavailable", self.notices())
 
+    async def test_pcm_received_before_reply_commit_cannot_count_as_reply(self):
+        await self.request()
+        self.assertEqual(self.states()[-1], "working")
+        gate = self.h.device.send_block = asyncio.Event()
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(1)
+        self.assertEqual(self.h.session._render_kind, "reply")
+        self.assertTrue(self.h.session._all_acked())
+        gate.set()
+        await self.h.quiesce()
+        await self.h.clock.advance(2)
+        self.assertEqual(self.h.session.outcome.audio_out_bytes, len(AUDIO_CANARY))
+        self.assertEqual(self.h.session.outcome.replies_rendered, 0)
+        self.assertEqual(self.states()[-1], "answering")
+        await self.h.clock.advance(gs.CONVERSE_RENDER_MAX_S)
+        result = await self.h.finish()
+        self.assertEqual(result.conversation_end, "render_timeout")
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
+    async def test_silent_device_send_does_not_hold_render_open(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(0.1)
+        gate = self.h.device.send_block = asyncio.Event()
+        try:
+            self.h.provider.push_audio(bytes(4800))
+            await self.h.quiesce()
+            self.assertTrue(self.h.session._audio._sending)
+            await self.h.clock.advance(2)
+            self.assertEqual(self.h.session.outcome.replies_rendered, 1)
+        finally:
+            gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.states()[-1], "listening")
+        await self.stop()
+
+    async def test_pending_current_reply_signal_holds_render_open(self):
+        await self.request()
+        await self.h.clock.advance(1)
+        self.h.provider.push_audio(AUDIO_CANARY)
+        await self.h.quiesce()
+        await self.h.clock.advance(0.1)
+        gate = self.h.device.send_block = asyncio.Event()
+        try:
+            self.h.provider.push_audio(AUDIO_CANARY)
+            await self.h.quiesce()
+            self.assertTrue(self.h.session._audio._sending)
+            await self.h.clock.advance(2)
+            self.assertEqual(self.h.session.outcome.replies_rendered, 0)
+        finally:
+            gate.set()
+        await self.h.quiesce()
+        self.assertEqual(self.states()[-1], "answering")
+        await self.h.clock.advance(2)
+        self.assertEqual(self.states()[-1], "listening")
+        self.assertEqual((await self.stop()).replies_rendered, 1)
+
 
 class ProgressTest(ConversationCase):
     """Hints reuse commentary/ACK/audible quiet without resolving the request."""
@@ -718,8 +789,8 @@ class ProgressTest(ConversationCase):
         await self.h.clock.advance(0.1)
         self.assertAlmostEqual(self.h.provider.times[-1], submitted + 5)
         self.assertEqual(self.lines(), [
-            "Starting that conversation. One moment." if slow_accept else
-            "It's working on your request."
+            "One moment. I'm sending your request." if slow_accept else
+            "I'm waiting for the reply."
         ])
         self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
         self.assertEqual(self.states(), ["listening", "asking"] if slow_accept else
@@ -756,44 +827,46 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.states().count("answering"), 1)
         self.assertEqual((await self.stop()).requests_accepted, 1)
 
-    async def test_accepted_slow_reply_first_and_repeat_at_exact_interval(self):
+    async def test_accepted_slow_reply_has_one_hint_and_keeps_polling(self):
         await self.first_hint()
-        start = self.h.clock.now()
         await self.render()
-        await self.h.clock.advance(start + 29.9 - self.h.clock.now())
-        self.assertEqual(len(self.lines()), 1)
-        await self.h.clock.advance(0.1)
-        self.assertEqual(self.lines(), ["It's working on your request.", "Still working on it."])
-        self.assertAlmostEqual(self.h.provider.times[-1], start + 30)
-        await self.render()
+        polls = self.h.ops.count("poll")
+        await self.h.clock.advance(95)
+        self.assertEqual(self.lines(), ["I'm waiting for the reply."])
+        self.assertGreater(self.h.ops.count("poll"), polls)
         self.assertNotIn("answering", self.states())
         await self.reply_once()
         result = await self.stop()
-        self.assertEqual((result.progress_rendered, result.replies_rendered), (2, 1))
+        self.assertEqual((result.progress_rendered, result.replies_rendered), (1, 1))
 
-    async def test_starting_repeat_then_first_accepted_stage_is_not_a_repeat(self):
+    async def test_slow_send_and_slow_reply_have_one_hint_each(self):
         gate = await self.first_hint(slow_accept=True)
-        start = self.h.clock.now()
         await self.render()
-        await self.h.clock.advance(start + 30 - self.h.clock.now())
-        self.assertEqual(self.lines()[-1], "Still starting it.")
-        await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(self.lines(), ["One moment. I'm sending your request."])
+        self.assertEqual(self.states()[-1], "asking")
         self.pending_reply()
         gate.set()
         await self.h.quiesce()
-        await self.h.clock.advance(start + 60 - self.h.clock.now())
-        self.assertEqual(self.lines()[-1], "It's working on your request.")
+        self.assertEqual(self.states()[-1], "working")
+        due = self.h.session._progress_due
+        self.assertIsNotNone(due)
+        await self.h.clock.advance(due - self.h.clock.now())
+        hints = ["One moment. I'm sending your request.", "I'm waiting for the reply."]
+        self.assertEqual(self.lines(), hints)
         await self.render()
-        self.assertEqual((await self.stop()).progress_rendered, 3)
+        await self.h.clock.advance(65)
+        self.assertEqual(self.lines(), hints)
+        await self.reply_once()
+        self.assertEqual((await self.stop()).progress_rendered, 2)
 
-    async def test_accept_during_hint_starts_deadline_now_and_polls_afterwards(self):
+    async def test_accept_during_hint_does_not_start_retrieval_deadline(self):
         gate = await self.first_hint(slow_accept=True)
         await self.h.clock.advance(0.5)
-        accepted = self.h.clock.now()
         gate.set()
         await self.h.quiesce()
         self.assertEqual(self.h.session._state, "AWAIT_REPLY")
-        self.assertEqual(self.h.session._send_accept_t, accepted)
+        self.assertIsNone(self.h.session._reply_retrieval_due)
         self.assertEqual(self.h.ops.count("poll"), 0)
         self.assertEqual(self.h.runner.held_results(), ())
         await self.render()
@@ -906,6 +979,29 @@ class ProgressTest(ConversationCase):
     async def test_no_ack_or_audio_abandoned_at_bound_no_more_hints_reply_works(self):
         await self.missing_hint_response(ack=False, audio=False)
 
+    async def test_in_flight_progress_pcm_cannot_count_as_next_reply(self):
+        await self.first_hint()
+        self.h.provider.push_audio(b"\x11\x22" * 4800)
+        await self.h.quiesce()
+        self.assertEqual(self.h.session.outcome.audio_out_bytes, 4800)
+        gate = self.h.device.send_block = asyncio.Event()
+        await self.h.clock.advance(0.1)
+        self.h.ops.results.pop("poll")
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_RENDER_MAX_S + 1)
+        self.assertEqual(self.lines().count(REPLY_TEXT), 1)
+        self.assertTrue(self.h.session._all_acked())
+        gate.set()
+        await self.h.quiesce()
+        await self.h.clock.advance(2)
+        self.assertEqual(self.h.session.outcome.audio_out_bytes, 9600)
+        self.assertEqual(self.h.session.outcome.replies_rendered, 0)
+        self.assertEqual(self.h.session.outcome.progress_rendered, 0)
+        # Only fresh PCM in the current reply's window completes it.
+        await self.render()
+        result = await self.stop()
+        self.assertEqual((result.replies_rendered, result.progress_rendered), (1, 0))
+        self.assertEqual(self.h.ops.count("confirm"), 1)
+
     async def test_ack_without_audio_does_not_count_or_close_call(self):
         await self.missing_hint_response(ack=True, audio=False)
 
@@ -1002,7 +1098,7 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.notices(), ["not_sent"])
         await self.render()
         await self.reply_once()
-        self.assertEqual(self.lines(), ["It's working on your request.", REPLY_TEXT])
+        self.assertEqual(self.lines(), ["I'm waiting for the reply.", REPLY_TEXT])
         result = await self.stop()
         self.assertEqual((result.refused_pending, result.transcript_segments_unused), (1, 1))
 
@@ -1018,6 +1114,26 @@ class ProgressTest(ConversationCase):
         self.assertEqual(self.commentary()[0]["delegation_id"], "dlg_1")
         self.assertNotIn("answering", self.states())
         await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(self.lines(), ["That follow-up wasn't sent. Ask again after the reply."])
+        await self.reply_once()
+        result = await self.stop()
+        self.assertEqual((result.requests_submitted, result.requests_accepted,
+                          result.refused_pending, result.replies_rendered), (1, 1, 1, 1))
+
+    async def test_followup_after_hint_still_gets_refusal_without_resubmission(self):
+        await self.first_hint()
+        await self.render()
+        await self.h.push(old.delta("followup", "different request", 2000, 2500))
+        await self.h.push(old.delegation("followup"))
+        self.assertEqual(self.notices(), ["not_sent"])
+        await self.h.clock.advance(30)
+        self.assertEqual(self.lines(), [
+            "I'm waiting for the reply.", "That follow-up wasn't sent. Ask again after the reply.",
+        ])
+        await self.render()
+        await self.h.clock.advance(35)
+        self.assertEqual(len(self.lines()), 2)
         await self.reply_once()
         result = await self.stop()
         self.assertEqual((result.requests_submitted, result.requests_accepted,
@@ -1100,36 +1216,63 @@ class ProgressTest(ConversationCase):
         await self.h.quiesce()
         self.assertEqual(self.lines(), [REPLY_TEXT])
         await self.h.clock.advance(5)
-        self.assertEqual(self.lines(), [REPLY_TEXT, "It's working on your request."])
+        self.assertEqual(self.lines(), [REPLY_TEXT, "I'm waiting for the reply."])
         self.assertEqual(self.commentary()[-1]["delegation_id"], "dlg_2")
         await self.render()
         self.assertEqual((await self.stop()).progress_rendered, 1)
 
-    async def test_reply_deadline_during_hint_is_not_disarmed_or_extended(self):
-        gate = self.h.ops.hold("confirm")
-        self.pending_reply()
-        await self.request()
-        submitted = self.h.clock.now()
-        await self.h.clock.advance(5)
-        # Accept 0.5 s into the first hint; repeat at submitted+185 is active
-        # when the original acceptance deadline fires at submitted+185.5.
-        await self.h.clock.advance(0.5)
-        gate.set()
-        await self.h.quiesce()
-        accepted = self.h.clock.now()
+    async def test_retrieval_deadline_during_hint_is_not_disarmed_or_extended(self):
+        await self.first_hint()
+        hint_due = self.h.session._progress_due
         await self.render()
-        for due in (35, 65, 95, 125, 155):
-            await self.h.clock.advance(submitted + due - self.h.clock.now())
-            await self.render()
-        await self.h.clock.advance(accepted + 179.9 - self.h.clock.now())
+        # The next hint is only for a refused follow-up, not a periodic nudge.
+        # Observe completion one retrieval window minus a second before it.
+        await self.h.clock.advance(
+            hint_due + 1 - gs.CONVERSE_REPLY_RETRIEVAL_S - gs.POLL_INTERVAL_S
+            - self.h.clock.now()
+        )
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "reply_row_not_visible", False, 3
+        )
+        await self.h.clock.advance(gs.POLL_INTERVAL_S)
+        due = self.h.session._reply_retrieval_due
+        self.assertIsNotNone(due)
+        self.assertGreater(due, hint_due)
+        await self.h.push(old.delta("late-followup", "different request", 2000, 2500))
+        await self.h.push(old.delegation("late-followup"))
+        await self.h.clock.advance(due - self.h.clock.now() - 0.1)
         self.assertEqual(self.h.session._render_kind, "progress")
-        self.assertEqual(self.notices(), [])
+        self.assertEqual(self.lines()[-1], "That follow-up wasn't sent. Ask again after the reply.")
+        self.assertEqual(self.notices(), ["not_sent"])
         await self.h.clock.advance(0.1)
-        self.assertEqual(self.notices(), ["reply_unavailable"])
+        self.assertEqual(self.notices(), ["not_sent", "reply_unavailable"])
         self.assertEqual(self.h.session._timed_out_turn, self.h.session._turn_id)
         self.assertEqual(self.h.ops.count("confirm"), 1)
         await self.render()
-        self.assertEqual((await self.stop()).progress_rendered, 6)
+        self.assertEqual((await self.stop()).progress_rendered, 1)
+
+    async def test_completion_observed_under_hint_starts_retrieval_before_hint_ends(self):
+        self.pending_reply()
+        await self.request()
+        gate = self.h.ops.hold("poll")
+        await self.h.clock.advance(gs.CONVERSE_PROGRESS_FIRST_S)
+        self.assertEqual(self.h.session._render_kind, "progress")
+        self.assertIsNone(self.h.session._reply_retrieval_due)
+        self.h.ops.results["poll"] = lambda turn: core.ReplyResult(
+            turn, "pending", "reply_row_not_visible", False, 3
+        )
+        observed = self.h.clock.now()
+        gate.set()
+        await self.h.quiesce()
+        self.assertIsNotNone(self.h.session._progress_poll)
+        due = observed + gs.CONVERSE_REPLY_RETRIEVAL_S
+        self.assertAlmostEqual(self.h.session._reply_retrieval_due, due)
+        await self.render()
+        self.assertAlmostEqual(self.h.session._reply_retrieval_due, due)
+        await self.h.clock.advance(due - self.h.clock.now())
+        self.assertEqual(self.notices(), ["reply_unavailable"])
+        await self.render()
+        self.assertEqual((await self.stop()).replies_rendered, 0)
 
     async def test_counts_only_session_end_contains_audibly_completed_hints(self):
         from pet_bridge.gateway_events import EventLog
@@ -1504,7 +1647,7 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.clock.advance(5)
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["Starting that conversation. One moment."],
+            ["One moment. I'm sending your request."],
         )
         gate.set()
         await self.quiesce()
@@ -1516,7 +1659,7 @@ class RealConversationFlowTest(flow.FlowCase):
         await self.clock.advance(1)
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["Starting that conversation. One moment.", REPLY_TEXT],
+            ["One moment. I'm sending your request.", REPLY_TEXT],
         )
         self.assertTrue(self.record(command)["reply_consumed"])
         await self.render(fs)
@@ -1730,7 +1873,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
         reads = len(self.client.named("detail"))
@@ -1764,6 +1907,7 @@ class RealConversationFlowTest(flow.FlowCase):
         first = self.client.last_command
         # Hold a genuine core poll beyond the timeout. Use the flow harness's
         # blocked-worker signal so its settle hook does not await that worker.
+        await self.observe_finished_without_reply()
         gate = self.hold_posts()
         real_poll = self.ops.observe_reply
         def delayed_poll(turn):
@@ -1771,7 +1915,7 @@ class RealConversationFlowTest(flow.FlowCase):
                 raise AssertionError("offline poll gate not released")
             return real_poll(turn)
         self.ops.observe_reply = delayed_poll
-        await self.clock.advance(180)
+        await self.clock.advance(gs.CONVERSE_REPLY_RETRIEVAL_S)
         self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
         gate.set()
@@ -1784,7 +1928,7 @@ class RealConversationFlowTest(flow.FlowCase):
         # expires silently; it must not consume the real reply or repeat.
         self.assertEqual(
             [f["content"] for f in fs.provider.of_type("session.commentary.append")],
-            ["It's working on your request.", "No reply is available yet."],
+            ["I'm waiting for the reply.", "I couldn't retrieve the reply."],
         )
         self.assertEqual(fs.session.outcome.progress_rendered, 0)
         await self.render(fs)
@@ -1802,7 +1946,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         real_request = self.client.request
@@ -1876,7 +2020,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         await self.request(fs, 2)
@@ -1886,7 +2030,7 @@ class RealConversationFlowTest(flow.FlowCase):
         # the late empty/invalid/long reply is still never exported.
         self.assertEqual(
             [frame["content"] for frame in fs.provider.of_type("session.commentary.append")],
-            ["It's working on your request.", "No reply is available yet."],
+            ["I'm waiting for the reply.", "I couldn't retrieve the reply."],
         )
         await fs.feed('{"type":"pet.stop"}')
         await fs.finish()
@@ -1903,14 +2047,14 @@ class RealConversationFlowTest(flow.FlowCase):
     async def test_real_timeout_validated_incomplete_tail_remains_busy(self):
         self.client.reply_pending = True
         self.client.echo_sent_text = True
-        self.client.history_rows = [
-            assistant_row("gen-old", "older", id=f"history-{i}") for i in range(639)
-        ]
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
+        self.client.history_rows = [
+            assistant_row("gen-old", "older", id=f"history-{i}") for i in range(639)
+        ]
         self.client.reply_pending = False
         await self.request(fs, 2)
         self.assertEqual(len(self.client.posts), 1)
@@ -1925,7 +2069,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         with mock.patch.object(self.journal, "put", side_effect=JournalError("journal_io_error")):
@@ -1942,7 +2086,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         self.client.listing_status = "working"
@@ -1966,7 +2110,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         real_request = self.client.request
@@ -2026,7 +2170,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         other = flow.IdFactory(900)()
@@ -2064,7 +2208,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         real_put = self.journal.put
@@ -2087,7 +2231,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         gate = self.hold_posts()
@@ -2132,6 +2276,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
+        await self.observe_finished_without_reply()
         gate = self.hold_posts()
         entered = threading.Event()
         claim = self.ops.claim_observed_reply
@@ -2141,7 +2286,7 @@ class RealConversationFlowTest(flow.FlowCase):
                 raise AssertionError("offline claim gate not released")
             return claim(turn)
         self.ops.claim_observed_reply = blocked_claim
-        await self.clock.advance(180)
+        await self.clock.advance(gs.CONVERSE_REPLY_RETRIEVAL_S)
         self.assertTrue(entered.is_set())
         self.assertEqual(fs.device.of_type("pet.converse.notice")[-1]["code"], "reply_unavailable")
         gate.set()
@@ -2165,6 +2310,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
+        await self.observe_finished_without_reply()
         gate = self.hold_posts()
         entered = threading.Event()
         claim = self.ops.claim_observed_reply
@@ -2174,7 +2320,7 @@ class RealConversationFlowTest(flow.FlowCase):
                 raise AssertionError("offline claim gate not released")
             return claim(turn)
         self.ops.claim_observed_reply = blocked_claim
-        await self.clock.advance(180)
+        await self.clock.advance(gs.CONVERSE_REPLY_RETRIEVAL_S)
         self.assertTrue(entered.is_set())
         gate.set()
         await self.quiesce()
@@ -2228,7 +2374,7 @@ class RealConversationFlowTest(flow.FlowCase):
         fs = await self.begin_conversation()
         await self.request(fs, 1)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.expire_reply_retrieval()
         await self.render(fs)
         self.client.reply_pending = False
         gate = self.hold_posts()
@@ -2481,7 +2627,7 @@ class ConversationServerTest(server.GatewayCase):
 
 
 class PublicLateRecoveryControl(flow.FlowCase):
-    async def test_public_baseline_timeout_exact_completion_allows_only_new_request(self):
+    async def test_late_exact_reply_is_spoken_once_then_idle_timer_starts(self):
         self.client.reply_pending = True
         self.client.echo_sent_text = True
         self.client.reply_text = REPLY_TEXT
@@ -2493,8 +2639,10 @@ class PublicLateRecoveryControl(flow.FlowCase):
         await fs.push(old.delegation("d1"))
         await self.clock.advance(1.5)
         first = self.client.last_command
-        await self.clock.advance(180)
+        await self.clock.advance(180.0)
         self.assertEqual(self.record(first)["state"], "ACCEPTED")
+        self.assertEqual(fs.device.of_type("pet.converse.notice"), [])
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "working")
         fs.provider.push_audio(AUDIO_CANARY)
         await self.quiesce()
         for _ in range(16):
@@ -2502,14 +2650,22 @@ class PublicLateRecoveryControl(flow.FlowCase):
             await self.quiesce()
             await self.clock.advance(0.1)
         self.client.reply_pending = False
-        await fs.push(old.delta("e2", "request 2", 2000, 2500))
-        await fs.push(old.delegation("d2"))
-        await self.clock.advance(1.5)
-        self.assertEqual(len(self.client.posts), 2)
-        self.assertNotEqual(self.client.last_command, first)
-        self.assertEqual(self.record(first)["reply_outcome"], "late_reply_not_spoken")
-        self.assertNotIn(REPLY_TEXT, [
+        await self.clock.advance(1)
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "answering")
+        self.assertEqual(self.record(first)["reply_outcome"], "claimed_for_render")
+        self.assertEqual([
             frame["content"] for frame in fs.provider.of_type("session.commentary.append")
-        ])
-        await fs.feed('{"type":"pet.stop"}')
-        await fs.finish()
+        ], ["I'm waiting for the reply.", REPLY_TEXT])
+        fs.provider.push_audio(AUDIO_CANARY)
+        await self.quiesce()
+        for _ in range(16):
+            fs.provider.push_audio(bytes(4800))
+            await self.quiesce()
+            await self.clock.advance(0.1)
+        self.assertEqual(fs.device.of_type("pet.converse.state")[-1]["state"], "listening")
+        await self.clock.advance(gs.CONVERSE_IDLE_S - 1)
+        self.assertNotIn("idle_timeout", [f["code"] for f in fs.device.of_type("pet.converse.notice")])
+        await self.clock.advance(1)
+        result = await fs.finish()
+        self.assertEqual((result.conversation_end, result.replies_rendered), ("idle_timeout", 1))
+        self.assertEqual(len(self.client.posts), 1)
