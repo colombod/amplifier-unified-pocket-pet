@@ -133,7 +133,7 @@ static esp_err_t page(httpd_req_t *req) {
     char host[80]={0}; httpd_req_get_hdr_value_str(req,"Host",host,sizeof(host));
     if(strcmp(host,"192.168.4.1") && strcmp(host,"192.168.4.1:80")) {
         httpd_resp_set_status(req,"302 Found"); httpd_resp_set_hdr(req,"Location","http://192.168.4.1/");
-        return httpd_resp_sendstr(req,"Open Tachikoma setup at http://192.168.4.1/");
+        return httpd_resp_sendstr(req,"Open Amplifier Assistant setup at http://192.168.4.1/");
     }
     httpd_resp_set_type(req,"text/html; charset=utf-8");
     /* Render the installed version even before the phone's status fetch works. */
@@ -444,7 +444,7 @@ void network_init(void) {
     size_t n=0; credentials_present=nvs_get_str(storage,"ssid",NULL,&n)==ESP_OK&&n>1;
     state.key_saved=nvs_get_str(storage,"api_key",NULL,&n)==ESP_OK;
     uint8_t mac[6];ESP_ERROR_CHECK(esp_read_mac(mac,ESP_MAC_WIFI_SOFTAP));
-    snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Tachikoma-%02X%02X-Setup",mac[4],mac[5]);
+    snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Amplifier-Assistant-%02X%02X-Setup",mac[4],mac[5]);
     /* Keep pairing credentials stable across power/USB resets. No values are logged. */
     n=sizeof(state.ap_password);
     if(nvs_get_str(storage,"setup_pass",state.ap_password,&n)!=ESP_OK || strlen(state.ap_password)<8) {
@@ -454,7 +454,7 @@ void network_init(void) {
         if(saved!=ESP_OK) {
             ESP_LOGW("pet_net","Pairing password persistence failed: %s",esp_err_to_name(saved));
             /* A unique name avoids stale iPhone password reuse if storage is full. */
-            snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Tachikoma-%02X%02X-%04lx",mac[4],mac[5],(unsigned long)(esp_random()&0xffff));
+            snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Amplifier-Assistant-%02X%02X-%04lx",mac[4],mac[5],(unsigned long)(esp_random()&0xffff));
         }
     }
     nvs_stats_t stats;
@@ -476,6 +476,6 @@ void network_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP,&ap));
     if(credentials_present && state.key_saved) ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    state.setup=!(credentials_present && state.key_saved);message(credentials_present?"Connecting to saved Wi-Fi...":"Let's connect Tachikoma");
+    state.setup=!(credentials_present && state.key_saved);message(credentials_present?"Connecting to saved Wi-Fi...":"Let's connect Amplifier Assistant");
     ESP_ERROR_CHECK(start_server());xTaskCreate(dns_task,"setup_dns",3072,NULL,3,NULL);xTaskCreate(worker,"network",6144,NULL,4,NULL);
 }

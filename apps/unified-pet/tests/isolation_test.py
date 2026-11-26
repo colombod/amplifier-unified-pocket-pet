@@ -175,7 +175,7 @@ class Isolation(unittest.TestCase):
         for dep in ("pet_tls","pet_touch_calibration","tailtiny","wireguard_lwip"):
             self.assertIn(dep,project)
         exporter=(APP/"scripts/export_pet.py").read_text(encoding="utf-8")
-        self.assertIn('REPO / "assets/source/tachikoma.png"',exporter)
+        self.assertIn('REPO / "assets/source/amplifier-assistant.webp"',exporter)
         self.assertIn('ROOT / "assets/generated"',exporter)
         self.assertTrue((APP/"sdkconfig").is_file())
         self.assertIn('PET_TOUCH_STORE_NAMESPACE="unified_pet"',project)

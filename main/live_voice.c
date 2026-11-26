@@ -246,7 +246,7 @@ static void run_session(void) {
  if(xTaskCreate(play_audio,"live_playback",4096,c,5,NULL)!=pdPASS){fail(c,"Cannot start speaker worker.");goto cleanup;}
  c->audio_tasks|=BIT1;
  ESP_LOGI(TAG,"Audio streaming ready; internal_free=%u psram_free=%u",(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),(unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
- set_state(LIVE_LISTENING,"Listening. Say hello to Tachikoma.");
+ set_state(LIVE_LISTENING,"Listening. Say hello to Amplifier Assistant.");
  if(!send_text(c,PET_GREETING_EVENT))goto cleanup;
  int64_t started=esp_timer_get_time();
  while(!atomic_load(&stop_requested) && !atomic_load(&c->failed) && !atomic_load(&c->closed) && atomic_load(&c->connected)) {

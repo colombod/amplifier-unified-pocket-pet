@@ -1,5 +1,10 @@
 # Pocket assistant: teammate LAN preview setup
 
+The current source uses the **Amplifier Assistant** name and the owner-supplied
+Amplifier mascot. The published `v0.3.19-lan-preview.3` still has its original
+artwork/name. Illustrations below describe the current source, not a new
+installed or physically qualified release.
+
 **What you'll get:** talk to one selected Amplifier Unified chat from the pet on
 the same LAN as its gateway. Wait for each answer before speaking again. The
 pet shows **Accepted** when Unified accepts the request. The gateway may speak
@@ -177,6 +182,62 @@ The build above also generates `apps/unified-pet/sdkconfig` from the tracked
 `sdkconfig.defaults` on a clean clone. Run checks that read the generated file,
 including the link rig and the historical isolation boundary check, **after**
 the build. Do not copy an `sdkconfig` from a different checkout into a clean one.
+
+### Custom artwork and name (source builds)
+
+Customization is a source edit before building; there is no artwork picker or
+rename menu on the pet or phone page.
+
+- **Artwork:** replace `assets/source/amplifier-assistant.webp` with your own
+  transparent **RGBA WebP**, exactly **1536 × 2288 pixels**. Use an 8-column,
+  11-row v2 atlas of **192 × 208** cells. Left-to-right required frame counts
+  per row are `6, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8`: idle, running-right,
+  running-left, waving, jumping, failed, waiting, running, review, and two
+  eight-direction look rows. Unused cells may be transparent; every required
+  cell must contain visible artwork. The exporter composites onto `#0f172a`
+  and writes little-endian RGB565 without resizing the cells. Keep these row
+  counts and offsets: the firmware already uses them. Idle is six frames at
+  360 ms each; tapping the character plays four wave frames at 720 ms each.
+- **Name:** in `apps/unified-pet/main/`, edit the visible **Amplifier Assistant**
+  strings in `main.c`, `setup.html`, `network.c`, `assistant_config.h` and
+  `live_voice.c`. Change the host-owned identity at the start of
+  `_FRONTEND_INSTRUCTIONS` in `bridge/pet_bridge/gateway_provider.py` as well.
+  `network.c` also uses the ASCII SSID prefix `Amplifier-Assistant`: its
+  complete setup name, including the device suffix, must stay within **32
+  bytes**. The default is `Amplifier-Assistant-XXXX-Setup`; the pet displays its
+  exact name and password beside the QR. Keep a short name that fits the title
+  beside the gear and the existing buttons. Change labels only, not mic
+  callbacks, prompt policy, protocol identifiers or credential/NVS keys.
+- Update `assets/source/amplifier-assistant.provenance.json` with your artwork's
+  own source and hashes; don't retain the supplied mascot's provenance for
+  replacement pixels. Use artwork you have the right to distribute. That
+  record says only that the project owner supplied this particular asset for
+  this project, not that other artwork or dependencies share a blanket license.
+  Update the name/hash fixtures in `apps/unified-pet/tests/artwork_test.py`,
+  `ui_contract_test.py`, `setup_page_test.mjs` and `bridge/tests/test_gateway_*.py`
+  when deliberately customizing, along with the README thumbnail and setup
+  illustration labels. Root `main/` is a legacy test target, not production;
+  if retaining it, mirror its labels/prompts separately. Both exporters read
+  the same source atlas; production never imports root `main/`.
+
+Before the SDK build, use a Python with Pillow (the release tools pin 11.3.0)
+for these host-only checks from the repository root:
+
+```sh
+python3 -B apps/unified-pet/scripts/export_pet.py
+python3 -B apps/unified-pet/tests/artwork_test.py
+python3 -B apps/unified-pet/tests/ui_contract_test.py
+node apps/unified-pet/tests/setup_page_test.mjs
+node apps/unified-pet/tests/setup_bridge_page_test.mjs
+node apps/unified-pet/tests/setup_unified_page_test.mjs
+```
+
+The generated file is
+`apps/unified-pet/assets/generated/amplifier-assistant.rgb565`; it contains
+73 frames, 79,872 bytes each (5,830,656 bytes total). A successful host export is
+not an SDK build, installation, or proof of the display or voice experience.
+Then build the matched source using the instructions above, and follow the
+appropriate authorized first-install or settings-preserving update path.
 
 ### First install on a new board
 
@@ -705,7 +766,7 @@ stop and seek maintainer help rather than repeatedly saving.
 
 Scroll back up to **1 · Choose your Wi-Fi**, select your 2.4 GHz network, and
 enter its password. The OpenAI key stays on the host in bridge mode. Tap
-**Connect Tachikoma**, wait for the save and connection result, then tap
+**Connect Amplifier Assistant**, wait for the save and connection result, then tap
 **Done · return to my Wi-Fi**. If the phone disconnects before acknowledgement,
 reconnect to setup Wi-Fi and inspect the result before trying again.
 

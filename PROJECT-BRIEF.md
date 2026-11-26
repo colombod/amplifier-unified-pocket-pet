@@ -13,7 +13,7 @@ starting a new chat in a new workspace as well as continuing existing work.
 
 ## Design: extend what already exists
 
-    apps/unified-pet/ — microphone, speaker, Tachikoma, touch, phone setup
+    apps/unified-pet/ — microphone, speaker, Amplifier Assistant, touch, phone setup
         ↕ authenticated audio and state over Wi-Fi (LAN today)
     bridge/pet_bridge/ — adapt pet media to voice provider; send and correlate once
         ↕ supported scoped Unified client interface

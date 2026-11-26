@@ -1,8 +1,12 @@
-# Amplifier Unified Pocket Pet
+# Amplifier Assistant — Pocket Pet for Amplifier Unified
 
 **A pocket-sized voice companion for the work you already do in Amplifier Unified.** Tap the mic, ask your Unified chat a question, and hear the answer from the pet without opening your laptop.
 
-<img src="assets/tachikoma-preview.png" width="192" height="195" alt="Tachikoma, the animated Pocket Pet character" />
+<img src="assets/amplifier-assistant-preview.png" width="192" height="208" alt="Amplifier Assistant, the blue hovering mascot, from an exported RGB565 frame" />
+
+This checkout uses the owner-supplied Amplifier mascot and **Amplifier Assistant**
+name. The published `v0.3.19-lan-preview.3` linked below predates this artwork/name
+change; its physical evidence is not qualification of a new build.
 
 [**Set up your first Pocket Pet**](docs/team-prototype.md#start-here) · [Download the LAN preview source](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3) · [Report a problem or request a feature](https://github.com/colombod/amplifier-unified-pocket-pet/issues)
 
@@ -38,4 +42,5 @@ Real spoken replies have been verified on the maintainer’s provisioned board. 
 | [Architecture](docs/ARCHITECTURE.md) | The device, gateway, and Unified boundaries; hardware and build references; where to change and test each part |
 | [Delivery contract](docs/CONTRACT.md) | Product promises, their limits, and how to verify them |
 | [Setup and build guide](docs/team-prototype.md#start-here) | Exact board, firmware build, first install, preserving settings, phone setup, and offline checks |
+| [Custom artwork and name](docs/team-prototype.md#custom-artwork-and-name-source-builds) | Atlas format and source edits before making your own build |
 | [Gateway deployment](bridge/deploy/README.md) | Running the Linux service and checking the TLS listener |

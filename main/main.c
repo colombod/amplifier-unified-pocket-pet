@@ -16,7 +16,7 @@
 #include "tailnet_spike.h"
 
 #define FRAME_BYTES (192*208*2)
-extern const uint8_t pet_pixels[] asm("_binary_tachikoma_rgb565_start");
+extern const uint8_t pet_pixels[] asm("_binary_amplifier_assistant_rgb565_start");
 static lv_image_dsc_t frames[73];
 static lv_obj_t *pet, *title, *subtitle, *setup_panel, *qr, *wifi_details, *setup_message, *footer;
 static lv_obj_t *audio_panel,*audio_message,*tone_button,*record_button,*audio_back,*volume_label;
@@ -135,7 +135,7 @@ void app_main(void) {
     lv_display_add_event_cb(display,display_event,LV_EVENT_FLUSH_FINISH,NULL);
     lv_obj_t *screen=lv_screen_active();lv_obj_set_style_bg_color(screen,lv_color_hex(0x0f172a),0);
     lv_obj_set_style_text_color(screen,lv_color_hex(0xf1f5f9),0);lv_obj_clear_flag(screen,LV_OBJ_FLAG_SCROLLABLE);
-    title=label(screen,"Tachikoma",350,0,12,&lv_font_montserrat_22);
+    title=label(screen,"Amplifier Assistant",350,0,12,&lv_font_montserrat_22);
     subtitle=label(screen,"Let's get connected",350,0,42,&lv_font_montserrat_16);
     wifi_badge=label(screen,"Wi-Fi",330,0,80,&lv_font_montserrat_12);
     for(unsigned i=0;i<73;i++) {
@@ -177,7 +177,7 @@ void app_main(void) {
     lv_obj_set_style_text_color(setup_panel,lv_color_hex(0xf1f5f9),0);
     lv_obj_set_style_pad_all(setup_panel,0,0);lv_obj_clear_flag(setup_panel,LV_OBJ_FLAG_SCROLLABLE);
     label(setup_panel,"Connect your phone",350,0,14,&lv_font_montserrat_22);
-    label(setup_panel,"Scan to join Tachikoma Wi-Fi",350,0,46,&lv_font_montserrat_16);
+    label(setup_panel,"Scan to join Amplifier Assistant Wi-Fi",350,0,46,&lv_font_montserrat_16);
     char version[64];snprintf(version,sizeof(version),"Firmware %s",esp_app_get_description()->version);
     lv_obj_t *version_label=label(setup_panel,version,350,0,68,&lv_font_montserrat_14);
     lv_obj_set_style_text_color(version_label,lv_color_hex(0x8fe1ff),0);
@@ -219,7 +219,7 @@ void app_main(void) {
     lv_obj_t *alignment=button(settings_panel,"Touch alignment",0,0,280,align_touch_clicked);lv_obj_align(alignment,LV_ALIGN_TOP_MID,0,232);lv_obj_set_height(alignment,40);
     tailnet_button=button(settings_panel,"Test Tailscale",0,0,280,tailnet_clicked);lv_obj_align(tailnet_button,LV_ALIGN_TOP_MID,0,278);lv_obj_set_height(tailnet_button,40);
     tailnet_status=label(settings_panel,"IDLE",340,0,326,&lv_font_montserrat_12);
-    button(settings_panel,"Back to Tachikoma",0,-20,280,settings_closed);
+    button(settings_panel,"Back to Amplifier Assistant",0,-20,280,settings_closed);
     lv_obj_add_flag(settings_panel,LV_OBJ_FLAG_HIDDEN);
     touch_calibration_init(bsp_display_get_input_dev(),screen);
     lv_timer_create(refresh,120,NULL);refresh(NULL);

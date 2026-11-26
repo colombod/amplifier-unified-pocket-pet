@@ -6,7 +6,7 @@ idf_component_register(SRCS "main.c" "network.c" "audio_test.c" "live_voice.c" "
 configure_file("${CMAKE_CURRENT_LIST_DIR}/pet_asset.S.in"
     "${CMAKE_CURRENT_BINARY_DIR}/pet_asset.S" @ONLY)
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/pet_asset.S" PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/assets/generated/tachikoma.rgb565")
+    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/assets/generated/amplifier-assistant.rgb565")
 target_sources(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/pet_asset.S")
 if(PET_PRIVATE_MIC_DIAG)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE PET_PRIVATE_MIC_DIAG=1)
