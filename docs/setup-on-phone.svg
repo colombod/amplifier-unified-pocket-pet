@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="616" viewBox="0 0 440 616" role="img" aria-labelledby="title desc">
+  <title id="title">Find and save the Pocket Unified bridge settings on your phone</title>
+  <desc id="desc">Scroll down to Pocket Unified bridge. Enable Use the host bridge. Enter the gateway LAN IPv4, its TLS port, its certificate FQDN and the raw token issued for this pet. Press Save bridge settings only. Then scroll back up for Wi-Fi. The values shown are examples, not credentials.</desc>
+  <rect width="440" height="616" rx="16" fill="#eaf2fc"/>
+  <g font-family="sans-serif" fill="#0f172a">
+    <text x="22" y="34" font-size="20" font-weight="700">1. Scroll to Pocket Unified bridge</text>
+    <rect x="22" y="48" width="396" height="515" rx="15" fill="white" stroke="#94a3b8" stroke-width="1.5"/>
+    <rect x="35" y="61" width="370" height="27" rx="11" fill="#e2e8f0"/>
+    <text x="220" y="80" text-anchor="middle" font-size="14" font-weight="700">http://192.168.4.1</text>
+    <path d="M35 99h370" stroke="#cbd5e1"/>
+    <text x="42" y="129" font-size="23" font-weight="700">Pocket Unified bridge</text>
+    <rect x="43" y="147" width="19" height="19" rx="4" fill="#0369a1"/>
+    <path d="m47 156 4 4 7-9" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round"/>
+    <text x="72" y="162" font-size="14" font-weight="700">Use the host bridge (not the standalone chatbot)</text>
+    <g fill="#f8fafc" stroke="#94a3b8" stroke-width="1.25">
+      <rect x="42" y="200" width="356" height="30" rx="6"/>
+      <rect x="42" y="267" width="356" height="30" rx="6"/>
+      <rect x="42" y="334" width="356" height="30" rx="6"/>
+      <rect x="42" y="401" width="356" height="30" rx="6"/>
+    </g>
+    <g font-size="15" font-weight="700">
+      <text x="42" y="193">Gateway LAN IPv4</text>
+      <text x="42" y="260">Gateway TLS port</text>
+      <text x="42" y="327">Certificate FQDN</text>
+      <text x="42" y="394">Pet token</text>
+    </g>
+    <g font-size="14" fill="#334155">
+      <text x="52" y="220">192.168.1.50 (example)</text>
+      <text x="52" y="287">9443 (example)</text>
+      <text x="52" y="354">gateway.example.com (example)</text>
+      <text x="52" y="421">Paste the raw token issued for this pet</text>
+    </g>
+    <rect x="43" y="447" width="16" height="16" rx="3" fill="#fff" stroke="#64748b"/>
+    <text x="69" y="460" fill="#334155" font-size="13">Clear the saved pet token (disable the bridge first)</text>
+    <text x="69" y="479" fill="#475569" font-size="13">Leave this box unchecked.</text>
+    <rect x="42" y="490" width="356" height="42" rx="8" fill="#075985" stroke="#fbbf24" stroke-width="3"/>
+    <text x="220" y="517" text-anchor="middle" fill="white" font-size="17" font-weight="700">Save bridge settings only</text>
+    <text x="220" y="550" text-anchor="middle" fill="#475569" font-size="14">Wait for the bridge save acknowledgement.</text>
+    <text x="22" y="595" font-size="20" font-weight="700">2. Scroll back up to choose Wi-Fi</text>
+  </g>
+</svg>
