@@ -52,6 +52,7 @@ struct bridge_transport {
      * deadline, not a new timeout. Zero means no enclosing SSL read/write. */
     int64_t operation_deadline;
     bool operation_probe,shutdown_done;
+    bool read_probe_active,read_probe_empty;
     esp_timer_handle_t cutoff;
     atomic_bool attempted,started,upgraded,cancelled;
     atomic_bool finishing,owner_done,task_exited,hook_failed;
@@ -300,29 +301,49 @@ static int bounded_read(esp_transport_handle_t ssl,char *b,int n,int ms){
     bridge_transport_t *t=atomic_load(&chain);
     if(!t||ssl!=t->ssl||n<0||(!b&&n))return -1;
     int64_t d=call_deadline(t,ms);bool probe=ms==0;
-    int held=take_io(t,d,probe);
-    if(held<=0){observe_ws_read(t,false,true,0);return held<0?-1:ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;}
+    bool retried=false;
+    for(;;){
+        int held=take_io(t,d,probe);
+        if(held<=0){
+            observe_ws_read(t,false,true,0);
+            if(retried&&atomic_load(&t->upgraded))note_transport_end(t,esp_timer_get_time());
+            return held<0?-1:ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
+        }
 #if defined(PET_PRIVATE_MIC_DIAG)
-    int64_t bench_begin=esp_timer_get_time();
+        int64_t bench_begin=esp_timer_get_time();
 #endif
-    int64_t saved=t->operation_deadline;bool saved_probe=t->operation_probe;
-    if(saved){d=saved<d?saved:d;probe=probe&&saved_probe;}
-    t->operation_deadline=d;t->operation_probe=probe;
-    int wait=budget(t,d,probe),result;int64_t read_started=esp_timer_get_time();
-    if(wait<0||!socket_valid_owned(t))result=-1;
-    else if(!wait&&call_expired(d,probe))result=ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
-    else result=t->read(ssl,b,n,wait); /* remaining CALLER budget, not 50 */
-    /* Account admitted plaintext before handing off the io lock, including
-     * bytes returned by an already-in-flight read concurrent with cancel. */
-    if(n>0)observe_ws_read(t,result>0,result<=0,read_started);
-    if(result<0&&atomic_load(&t->upgraded))note_transport_end(t,read_started);
-    t->operation_deadline=saved;t->operation_probe=saved_probe;
+        int64_t saved=t->operation_deadline;bool saved_probe=t->operation_probe;
+        bool saved_read_probe=t->read_probe_active,saved_empty=t->read_probe_empty;
+        if(saved){d=saved<d?saved:d;probe=probe&&saved_probe;}
+        t->operation_deadline=d;t->operation_probe=probe;
+        /* Only an outermost SSL read can hand the mutex to TX between polls.
+         * Keep SDK's cache-aware probe and all admitted TLS I/O serialized. */
+        t->read_probe_active=!saved&&!probe;
+        t->read_probe_empty=false;
+        int wait=budget(t,d,probe),result;int64_t read_started=esp_timer_get_time();
+        if(wait<0||!socket_valid_owned(t))result=-1;
+        else if(!wait&&call_expired(d,probe))result=ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
+        else result=t->read(ssl,b,n,wait);
+        /* Only a proven readiness miss can be retried: an admitted TLS read
+         * can return the same timeout after touching the TLS stream. */
+        bool again=t->read_probe_empty&&result==ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT&&
+                   budget(t,d,probe)>0;
+        if(!again){
+            if(n>0)observe_ws_read(t,result>0,result<=0,read_started);
+            if(result<0&&atomic_load(&t->upgraded))note_transport_end(t,read_started);
+        }
+        t->read_probe_active=saved_read_probe;t->read_probe_empty=saved_empty;
+        t->operation_deadline=saved;t->operation_probe=saved_probe;
 #if defined(PET_PRIVATE_MIC_DIAG)
-    pet_bench_io_t *s=bench_lane();
-    pet_bench_time(&s->read_hold_us_total,&s->read_hold_us_max,esp_timer_get_time()-bench_begin);
-    s->read_hold_count++;
+        pet_bench_io_t *s=bench_lane();
+        pet_bench_time(&s->read_hold_us_total,&s->read_hold_us_max,esp_timer_get_time()-bench_begin);
+        s->read_hold_count++;
 #endif
-    give_io(t);return result;
+        give_io(t);
+        if(!again)return result;
+        retried=true;
+        vTaskDelay(1);
+    }
 }
 static int bounded_write(esp_transport_handle_t ssl,const char *b,int n,int ms){
     bridge_transport_t *t=atomic_load(&chain);
@@ -386,21 +407,23 @@ static int bounded_poll(esp_transport_handle_t ssl,int ms,bool read){
             if(t->operation_deadline<d)d=t->operation_deadline;
             probe=probe||t->operation_probe;
         }
+        bool internal_read_probe=read&&nested&&t->read_probe_active;
         int wait=budget(t,d,probe),result;
+        bool empty=false;
         int64_t before=esp_timer_get_time();
         if(wait<0||!socket_valid_owned(t))result=-1;
         else if(!wait&&call_expired(d,probe))result=0;
         else{
-            /* Idle RX shares io with every WS preflight/header/payload write.
-             * Never spend a socket-readiness wait holding that mutex: probe
-             * under ownership, then wait outside it below. Nested SSL reads
-             * retain their enclosing owner and normal remaining-time slices. */
-            if(read&&!nested)wait=0;
+            /* Idle RX and read-admission probes must not wait for the socket
+             * while holding the shared mutex. bounded_read retries only after
+             * this SDK read returns without admitting TLS work. */
+            if(read&&(!nested||internal_read_probe))wait=0;
             else if(wait>50)wait=50;
 #if defined(PET_PRIVATE_MIC_DIAG)
             if(read&&!nested)bench_lane()->idle_read_polls++;
 #endif
             result=(read?t->poll_read:t->poll_write)(ssl,wait);
+            empty=result==0;
             /* Pinned ssl_read tests exactly -1 and 0. Never leak another
              * negative poll value through to its TLS branch. Preserve positive
              * cached-byte availability, unless the admission fence changed. */
@@ -411,10 +434,11 @@ static int bounded_poll(esp_transport_handle_t ssl,int ms,bool read){
                 else if(!wait&&call_expired(d,probe))result=0;
             }
         }
-        bool again=result==0&&!probe&&budget(t,d,probe)>0;
+        if(internal_read_probe)t->read_probe_empty=empty&&result==0;
+        bool again=result==0&&!probe&&!internal_read_probe&&budget(t,d,probe)>0;
         give_io(t); /* nested give retains the enclosing SSL owner */
         if(!again){
-            if(read&&result<=0)observe_ws_read(t,false,true,0);
+            if(read&&result<=0&&!internal_read_probe)observe_ws_read(t,false,true,0);
             if(read&&result<0&&atomic_load(&t->upgraded))note_transport_end(t,before);
             return result;
         }

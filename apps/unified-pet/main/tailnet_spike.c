@@ -30,7 +30,7 @@
 static SemaphoreHandle_t lock;
 static QueueHandle_t jobs;
 static tailnet_spike_status_t status={.state=TAILNET_IDLE,.cleaned_up=true};
-static atomic_int owner; /* 0 idle; 1 tailnet (including retained cleanup); 2 audio */
+static atomic_int owner; /* 0 idle; 1 tailnet (including retained cleanup); 2 audio; 3 power */
 static atomic_bool cancelled;
 static uint64_t began,overall;
 static tailtiny_t *runtime;
@@ -45,6 +45,12 @@ bool tailnet_spike_audio_acquire(void) {
     int expected=0;return atomic_compare_exchange_strong(&owner,&expected,2);
 }
 void tailnet_spike_audio_release(void) {int expected=2;atomic_compare_exchange_strong(&owner,&expected,0);}
+bool tailnet_spike_power_claim(void) {
+    int expected=0;return atomic_compare_exchange_strong(&owner,&expected,3);
+}
+void tailnet_spike_power_release(void) {
+    int expected=3;atomic_compare_exchange_strong(&owner,&expected,0);
+}
 void tailnet_spike_snapshot(tailnet_spike_status_t *out) {
     if(!out)return;
     if(!lock){*out=status;return;}
@@ -292,7 +298,7 @@ static void console(void *arg) {
                     static const char ack[]="pet-bench-v1 voice audio\n";
                     usb_serial_jtag_write_bytes(ack,sizeof(ack)-1,pdMS_TO_TICKS(100));
                 }
-                else if(!strcmp(line,"voice scan")){
+                else if(!strcmp(line,"voice scan")&&network_activity_begin()){
                     /* Bench only: access points of the joined network, strongest first.
                      * pet-bench-v1 ap <index> <16-bit tag of the address> <channel> <rssi as positive> <1 if joined>
                      * pet-bench-v1 scan <listed> <result code>. No names or addresses. */
@@ -314,20 +320,23 @@ static void console(void *arg) {
                     int len=snprintf(text,sizeof(text),"pet-bench-v1 scan %u %u\n",(unsigned)count,(unsigned)e);
                     usb_serial_jtag_write_bytes(text,len,pdMS_TO_TICKS(200));
                     free(found);
+                    network_activity_end();
                 }
                 else if(!strcmp(line,"voice last 0")||!strcmp(line,"voice last 1")||!strcmp(line,"voice last 2"))
                     bridge_voice_bench_last((unsigned)(line[11]-'0'));
-                else if(!strcmp(line,"voice bw 20")||!strcmp(line,"voice bw 40")){
+                else if((!strcmp(line,"voice bw 20")||!strcmp(line,"voice bw 40"))&&network_activity_begin()){
                     unsigned bw=line[9]=='2'?20:40;
                     esp_err_t e=esp_wifi_set_bandwidth(WIFI_IF_STA,bw==20?WIFI_BW_HT20:WIFI_BW_HT40);
+                    network_activity_end();
                     char ack[64];int len=snprintf(ack,sizeof(ack),"pet-bench-v1 voice bw %u %u\n",bw,(unsigned)e);
                     usb_serial_jtag_write_bytes(ack,len,pdMS_TO_TICKS(100));
                 }
-                else if(!strcmp(line,"voice drop")){
+                else if(!strcmp(line,"voice drop")&&network_activity_begin()){
                     /* Bench only: leave the access point, as a lost link does, so the
                      * ordinary recovery in network.c has to notice and rejoin.
                      * pet-bench-v1 voice drop <result code>. */
                     esp_err_t e=esp_wifi_disconnect();
+                    network_activity_end();
                     char ack[64];int len=snprintf(ack,sizeof(ack),"pet-bench-v1 voice drop %u\n",(unsigned)e);
                     usb_serial_jtag_write_bytes(ack,len,pdMS_TO_TICKS(100));
                 }
