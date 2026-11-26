@@ -5,6 +5,11 @@ Amplifier mascot. The published `v0.3.19-lan-preview.3` still has its original
 artwork/name. Illustrations below describe the current source, not a new
 installed or physically qualified release.
 
+The integrated source candidate is firmware `0.3.21-amplifier`: the new artwork
+and name retain the maintained power controls and microphone transport fix.
+Building it is not installing it or physically qualifying its voice/power behavior.
+The [firmware user manual](firmware-manual.md) describes its current controls.
+
 **What you'll get:** talk to one selected Amplifier Unified chat from the pet on
 the same LAN as its gateway. Wait for each answer before speaking again. The
 pet shows **Accepted** when Unified accepts the request. The gateway may speak
@@ -302,10 +307,12 @@ image if it reports the same version). Use stable power and stop on any error.
 
 ### Update a pet that’s already set up
 
-An update should replace only the app and leave the bootloader, partition table,
-and settings storage alone. The portable tool's write mode has not been
-qualified on a physical board: **keep your current firmware and use the dry run
-only**. Run [`update_app.py`](../apps/unified-pet/scripts/update_app.py) with a
+An update replaces only the app and leaves the bootloader, partition table,
+and settings storage alone. Do not use the first-install manifest, `idf.py flash`,
+`erase_flash`, a full-image restore, or an NVS restore on a configured pet.
+The portable writer has been exercised with simulated flash, **not physically
+qualified**. Applying it is a supervised, explicitly authorized qualification,
+not a proven turnkey update. Run [`update_app.py`](../apps/unified-pet/scripts/update_app.py) with a
 local Linux Python environment with `esptool==4.11.0` and `pyserial==3.5`.
 Use a firmware SHA-256 from an independently trusted, matched build. From the
 repo root, with `PET_TOOLS_PYTHON`, `APP_IMAGE` and `APP_SHA256` set:
@@ -317,17 +324,36 @@ repo root, with `PET_TOOLS_PYTHON`, `APP_IMAGE` and `APP_SHA256` set:
 
 This checks the image and reports the proposed app-sector range, **without
 opening any serial port**. It cannot validate the connected board or guarantee
-the new app will boot. The portable writer has been exercised with simulated
-flash, **not physically qualified**; do not use it on a daily-use pet yet. It
-does not install new boards. Never substitute `idf.py flash` on a provisioned
-board.
+the new app will boot. It does not install new boards or infer a flash layout
+from the board model, vendor image, saved settings, or this build's manifest.
 
-For an explicitly authorized qualification on a spare provisioned board, use
+For an explicitly authorized qualification on an identified provisioned board, use
 the exact V2 model, stable power, an idle gateway and a muted pet. Close all
 serial monitors first; exclusivity does not evict an already open monitor. See
-`--help` for `--apply`, the explicit port and expected station MAC, previous app
-SHA-256 and a new backup directory under a private 0700 parent outside Git.
-Opening the port can reset the device. No sudo, custom esptool reset sequence,
+`--help` first. Set `PET_PORT` to its explicit port, `PET_BOARD_ID` to its
+independently known station MAC (lowercase, colon-separated), and
+`PRIOR_APP_SHA256` to the trusted hash of the exact app currently installed,
+not a guessed release/version hash. Set `PET_UPDATE_BACKUP` to an **absent**
+directory under an existing private, owner-controlled 0700 parent outside Git.
+Tell the person that opening the port resets the pet and can blank its screen.
+Then, only within that authorized idle window:
+
+```sh
+"$PET_TOOLS_PYTHON" -I -B apps/unified-pet/scripts/update_app.py \
+  --image "$APP_IMAGE" --sha256 "$APP_SHA256" --apply \
+  --port "$PET_PORT" --board-id "$PET_BOARD_ID" \
+  --expect-installed "$PRIOR_APP_SHA256" --save-to "$PET_UPDATE_BACKUP"
+```
+
+Before any app write, the tool requires the supported ESP32-S3 identity,
+16 MiB flash, supported security state, exact known Pocket partition-table
+SHA-256 `5a349f86ef3dc2e5421cfc191e2f70030b67eff9eb81fad7b1d0219e57657302`
+and the expected prior executable hash. It backs up and reads back the current
+app partition, then writes only the candidate's app sectors starting at
+`0x10000`. It verifies exact app readback and unchanged flash outside those
+sectors before requesting boot. A differing/unknown table or app is a refusal:
+stop and investigate privately, never force, migrate, rewrite the table or
+substitute a stock/vendor/saved layout. No sudo, custom esptool reset sequence,
 firmware decryption, or settings migration is supported.
 
 Keep `backup.json`, `before-partition.bin` and `previous-app.bin` private. The
@@ -338,6 +364,14 @@ the outcome is uncertain (including interruption around `boot-intent`), do not
 reset, retry or restore NVS. Preserve the files and inspect the outcome first.
 Successful readback and unchanged flash checksums are pre-boot evidence, not
 proof of a cold boot, working audio, or successful teammate setup.
+
+After a verified update, observe the **Amplifier Assistant** display and touch,
+the expected firmware version under **Settings → Phone setup**, retained Wi-Fi,
+gateway configuration, volume and touch alignment, and mic off at boot. Do not
+re-enter or save credentials merely to check retention. Separately verify the
+power controls and one spoken request plus follow-up on the exact installed
+build; provider calls need their own authorization. A configured-device update
+does not qualify the separate fresh-board/fresh-host setup journey.
 
 A generated `apps/unified-pet/sdkconfig` left by an earlier build takes
 precedence over a changed `sdkconfig.defaults`. The build script now refuses an
@@ -724,6 +758,9 @@ intended service trust configuration without printing credentials or weakening
 TLS. These trust procedures are not yet qualified on a teammate's host.
 
 ## 3. Configure from a phone
+
+See the [firmware user manual](firmware-manual.md#set-up-from-your-phone) for
+the screen-by-screen flow and where to get each address and credential.
 
 This bridge-first sequence is supported by the current source but has not yet
 been demonstrated on a factory-fresh teammate device:

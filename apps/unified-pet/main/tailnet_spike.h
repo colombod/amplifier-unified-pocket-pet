@@ -26,3 +26,6 @@ const char *tailnet_spike_state_name(tailnet_spike_state_t state);
 /* Same atomic admission gate used by local audio, voice, touch and USB. */
 bool tailnet_spike_audio_acquire(void);
 void tailnet_spike_audio_release(void);
+/* Only claim from idle, after the normal audio/voice reapers release ownership. */
+bool tailnet_spike_power_claim(void);
+void tailnet_spike_power_release(void);

@@ -16,7 +16,7 @@ out=${1:-/tmp/pet-native}
 mkdir -p "$out"
 python3 tests/ui_contract_test.py
 python3 tests/input_diag_test.py --out "$out/input-diag"
-for name in setup_address live_protocol network_retry; do
+for name in setup_address live_protocol network_retry device_power; do
   cc -Wall -Wextra -Werror -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I main "tests/${name}_test.c" -lm -o "$out/$name"
   "$out/$name"
@@ -52,6 +52,7 @@ done
 sh tests/run_bridge_native.sh "$out/bridge-runtime"
 sh tests/run_bridge_converse.sh "$out/bridge-converse"
 python3 tests/run_bridge_transport_native.py "$out/bridge-transport"
+"$out/bridge-transport/test" rx-header-gap-uplink
 python3 tests/run_bridge_transport_native.py "$out/bridge-lifecycle" lifecycle
 python3 tests/run_bridge_transport_native.py "$out/bridge-receive" receive
 # Certificate failures: the adapter matrix consumes synthetic TLS errors using
