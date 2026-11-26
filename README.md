@@ -4,9 +4,10 @@
 
 <img src="assets/amplifier-assistant-preview.png" width="192" height="208" alt="Amplifier Assistant, the blue hovering mascot, from an exported RGB565 frame" />
 
-This checkout uses the owner-supplied Amplifier mascot and **Amplifier Assistant**
-name. The published `v0.3.19-lan-preview.3` linked below predates this artwork/name
-change; its physical evidence is not qualification of a new build.
+This checkout uses the Amplifier mascot and **Amplifier Assistant** name. The
+published `v0.3.19-lan-preview.3` linked below predates the new artwork and name;
+its physical evidence does not qualify the new firmware. This is a companion
+project, not an official or endorsed Amplifier Unified product.
 
 [**Set up your first Pocket Pet**](docs/team-prototype.md#start-here) · [Download the LAN preview source](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3) · [Report a problem or request a feature](https://github.com/colombod/amplifier-unified-pocket-pet/issues)
 
@@ -45,3 +46,12 @@ Real spoken replies have been verified on the maintainer’s provisioned board. 
 | [Setup and build guide](docs/team-prototype.md#start-here) | Exact board, firmware build, first install, preserving settings, and offline checks |
 | [Custom artwork and name](docs/team-prototype.md#custom-artwork-and-name-source-builds) | Atlas format and source edits before making your own build |
 | [Gateway deployment](bridge/deploy/README.md) | Running the Linux service and checking the TLS listener |
+
+## License
+
+The original Pocket project code and documentation, the supplied Amplifier
+Assistant mascot artwork, and the previews and firmware graphics derived from
+that artwork are covered by the [MIT License](LICENSE). The
+[mascot provenance record](assets/source/amplifier-assistant.provenance.json)
+identifies the exact upstream artwork. Third-party components, fonts and data
+keep their own licenses and notices; the project license does not replace them.

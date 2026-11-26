@@ -214,10 +214,9 @@ rename menu on the pet or phone page.
   beside the gear and the existing buttons. Change labels only, not mic
   callbacks, prompt policy, protocol identifiers or credential/NVS keys.
 - Update `assets/source/amplifier-assistant.provenance.json` with your artwork's
-  own source and hashes; don't retain the supplied mascot's provenance for
-  replacement pixels. Use artwork you have the right to distribute. That
-  record says only that the project owner supplied this particular asset for
-  this project, not that other artwork or dependencies share a blanket license.
+  own source, hashes, and license. The supplied mascot and the graphics derived
+  from it use the project's [MIT License](../LICENSE); that does not grant
+  rights to replacement artwork or third-party dependencies.
   Update the name/hash fixtures in `apps/unified-pet/tests/artwork_test.py`,
   `ui_contract_test.py`, `setup_page_test.mjs` and `bridge/tests/test_gateway_*.py`
   when deliberately customizing, along with the README thumbnail and setup

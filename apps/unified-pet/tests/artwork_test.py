@@ -48,6 +48,7 @@ class Artwork(unittest.TestCase):
             "git_blob": "d1175e32dde375192c1b46a92b0c2470bed7e6d1",
             "sha256": digest,
             "owner_supplied_for_project": True,
+            "license": "MIT",
         })
         self.assertEqual(self.report["source_sha256"], digest)
         with Image.open(SOURCE) as sheet:
