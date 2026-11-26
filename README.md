@@ -4,7 +4,7 @@
 
 <img src="assets/tachikoma-preview.png" width="192" height="195" alt="Tachikoma, the animated Pocket Pet character" />
 
-[**Set up your first Pocket Pet**](docs/team-prototype.md#start-here) · [Download the LAN preview source](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.2) · [Report a problem or request a feature](https://github.com/colombod/amplifier-unified-pocket-pet/issues)
+[**Set up your first Pocket Pet**](docs/team-prototype.md#start-here) · [Download the LAN preview source](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3) · [Report a problem or request a feature](https://github.com/colombod/amplifier-unified-pocket-pet/issues)
 
 ## How it works
 
@@ -12,7 +12,7 @@
 2. **The Pocket gateway** runs on your Linux host. It uses OpenAI GPT-Live for voice and a paired companion credential to send requests to the Unified chat you selected during setup.
 3. **Your existing Unified chat** does the work. The pet shows **Accepted** when Unified accepts a request, then speaks the reply when it comes back. Pocket is a companion, not a separate assistant or a replacement for Unified.
 
-The LAN preview is usable with **one selected chat and one request at a time**. Wait for the spoken answer before asking another question; follow-ups are not queued, and progress reminders may repeat during long waits. **Mic Off** ends the audio, not work Unified already accepted. There is no background playback, remote mic reopening, off-home device access, or on-device workspace switching in this release.
+The LAN preview is usable with **one selected chat and one request at a time**. Wait for the spoken answer before asking another question. Follow-ups are not queued; during a slow request the pet may speak once while sending and once while waiting for the reply. **Mic Off** ends the audio, not work Unified already accepted. There is no background playback, remote mic reopening, off-home device access, or on-device workspace switching in this release.
 
 ## Install, deploy, and configure
 
@@ -20,7 +20,7 @@ The LAN preview is usable with **one selected chat and one request at a time**. 
 
 | Step | What to do |
 | --- | --- |
-| **1. Get the release** | Download [the LAN preview](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.2). Use the same tagged source for the gateway and firmware. This is a source release, not a pre-flashed kit. |
+| **1. Get the release** | Download [the LAN preview](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3). Use the same tagged source for the gateway and firmware. This is a source release, not a pre-flashed kit. |
 | **2. Deploy the gateway** | [Set up the Linux service](bridge/deploy/README.md), [pair it with stock Unified](docs/team-prototype.md#2-prepare-unified-and-the-gateway), and select a chat. Verify the [TLS LAN listener](bridge/deploy/README.md#check-the-current-start) before making a paid call. |
 | **3. Install the firmware** | [Build Pocket Pet firmware](docs/team-prototype.md#1-obtain-a-matched-build-and-preserve-the-board). Then follow [first install on a new board](docs/team-prototype.md#first-install-on-a-new-board). If your pet already has Wi-Fi, gateway pairing, or calibration saved, skip the first-install steps and read the [settings-preserving update guidance](docs/team-prototype.md#update-a-pet-thats-already-set-up). |
 | **4. Configure the pet** | In **Settings → Phone setup**, scan the QR code. [Enter the gateway address, TLS name, and pet token, then save Wi-Fi](docs/team-prototype.md#3-configure-from-a-phone). Your Unified and OpenAI credentials stay on the host. |

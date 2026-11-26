@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="276" viewBox="0 0 840 276" role="img" aria-labelledby="title desc">
+  <title id="title">Know when to speak, wait, and mute on Pocket Pet</title>
+  <desc id="desc">Tap the round microphone and speak when Listening appears. Accepted means Unified received the request; wait for Speaking and the reply. Tap the same control to mute. The slash and Mic off label mean the microphone is off.</desc>
+  <rect width="840" height="276" rx="16" fill="#eaf2fc"/>
+  <g font-family="sans-serif" text-anchor="middle">
+    <g font-size="20" font-weight="700" fill="#0f172a">
+      <text x="114" y="37">1. Start</text><text x="318" y="37">2. Ask</text>
+      <text x="522" y="37">3. Wait</text><text x="726" y="37">4. Hear</text>
+    </g>
+    <g fill="#0f172a">
+      <rect x="22" y="52" width="184" height="156" rx="14"/><rect x="226" y="52" width="184" height="156" rx="14"/>
+      <rect x="430" y="52" width="184" height="156" rx="14"/><rect x="634" y="52" width="184" height="156" rx="14"/>
+    </g>
+    <g fill="#f1f5f9" font-size="19" font-weight="700">
+      <text x="114" y="87">Mic off</text><text x="318" y="87">Listening</text>
+      <text x="522" y="87">Accepted.</text><text x="726" y="87">Speaking</text>
+    </g>
+    <text x="522" y="107" fill="#f1f5f9" font-size="14">Waiting for reply...</text>
+    <defs>
+      <g id="mic" fill="#0f172a">
+        <rect x="-3" y="-11" width="6" height="12" rx="3"/>
+        <path d="M-7-2a7 7 0 0 0 14 0M0 5v5m-4 0h8" fill="none" stroke="#0f172a" stroke-width="1.8" stroke-linecap="round"/>
+      </g>
+    </defs>
+    <g transform="translate(114 137)"><circle r="21" fill="#f1f5f9"/><use href="#mic"/><path d="m-10-11 20 20" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round"/></g>
+    <g transform="translate(318 137)"><circle r="21" fill="#86efac"/><use href="#mic"/></g>
+    <g transform="translate(522 137)"><circle r="21" fill="#86efac"/><use href="#mic"/></g>
+    <g transform="translate(726 137)"><circle r="21" fill="#86efac"/><use href="#mic"/></g>
+    <g fill="#f1f5f9" font-size="14">
+      <text x="114" y="183">Mic off - tap to talk</text><text x="318" y="183">Mic on - tap to mute</text>
+      <text x="522" y="183">Mic on - tap to mute</text><text x="726" y="183">Mic on - tap to mute</text>
+    </g>
+    <g fill="#334155" font-size="15">
+      <text x="114" y="232">Tap the microphone.</text><text x="318" y="232">Ask one question.</text>
+      <text x="522" y="232">Don't ask again yet.</text><text x="726" y="232">Tap to mute when done.</text>
+      <text x="420" y="257" font-size="14">Illustrated status labels · Accepted is not the answer.</text>
+    </g>
+  </g>
+</svg>

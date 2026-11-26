@@ -14,8 +14,9 @@ turnkey install on a second person's hardware.
 1. **Get the correct board.** Order the **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2**
    (CO5300/CST820, 16 MB flash, 8 MB PSRAM, ES8311 audio), not the LCD-1.83 or the
    earlier AMOLED revision. Use a USB-C data cable.
-2. **Get one release.** From [Pocket releases](https://github.com/colombod/amplifier-unified-pocket-pet/releases),
-   choose `v0.3.19-lan-preview.2` and use its tagged source throughout. Check
+2. **Get one release.** Use the same tag for the gateway, firmware source, and
+   release notes. The current published [LAN preview (`v0.3.19-lan-preview.3`)](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3)
+   is source-only; it does not include a firmware installer. Check the
    [host, account, Wi-Fi and TLS requirements](#what-to-get) before you write anything.
 3. **Prepare your gateway.** Use [the Linux service guide](../bridge/deploy/README.md)
    for its Python environment, then [pair and bind](#2-prepare-unified-and-the-gateway)
@@ -27,9 +28,10 @@ turnkey install on a second person's hardware.
    and [app-only update guidance](#update-a-pet-thats-already-set-up) on a pet with
    saved settings. Both start with checking the board and preserving a backup
    before any write.
-5. **Provision by phone, then try one question.** Follow [phone setup](#3-configure-from-a-phone),
-   then use the [first-call checklist](#first-spoken-check). The phone needs only
-   Wi-Fi and this pet's gateway token. Your Unified and OpenAI keys stay on your host.
+5. **Provision by phone, then try one question.** The [illustrated setup](#3-configure-from-a-phone)
+   shows where to enter the gateway address, TLS details, pet token and Wi-Fi
+   password. Then use the [first-call checklist](#first-spoken-check). Your Unified
+   and OpenAI credentials stay on the gateway host.
 
 [Evidence and limits](../PROJECT-BRIEF.md#what-is-done-and-what-the-evidence-does-not-prove):
 normal `0.3.19-amoled-boot` firmware has spoken real replies on a provisioned board.
@@ -665,28 +667,53 @@ TLS. These trust procedures are not yet qualified on a teammate's host.
 This bridge-first sequence is supported by the current source but has not yet
 been demonstrated on a factory-fresh teammate device:
 
-1. On the pet open **Settings → Phone setup**, scan the QR and join the displayed
-   WPA2 setup Wi-Fi. If the page does not open, browse to the address shown on the
-   pet while staying on that setup network.
-2. Under **Pocket Unified bridge**, enable the bridge and enter the gateway LAN
-   IPv4, its TLS port, the certificate FQDN and the raw pet token. Save the bridge
-   settings first and wait for the save acknowledgement. A successful save does not
-   prove the gateway is reachable. If the acknowledgement is lost, reconnect to
-   the setup page and inspect the nonsecret address settings. A saved-token flag
-   means only that **some** token is present, not which one. Preserve the retained
-   original token; do not generate a new one. A deliberate save of the same
-   known token and same settings can establish a fresh acknowledgement once the
-   page is reachable; if the prior outcome or settings remain unclear, stop and
-   seek maintainer help instead of repeatedly retrying.
-3. Choose the 2.4 GHz Wi-Fi network and enter its password. In bridge mode the
-   OpenAI key is not needed on the pet. Wait for the connection and save result,
-   then select Done. If the phone disconnects before acknowledgement, reconnect
-   to the setup network and inspect the result before retrying.
-4. Confirm Wi-Fi and bridge status on the pet. The optional historical Tailscale
-   test fields do not, by themselves, enable off-home voice. Do not run the
-   diagnostic Tailscale tunnel in this prototype: source review identified a
-   shutdown race, and its task-done signal does not prove safe teardown. A repair
-   and verification are in progress.
+### Open setup on the pet
+
+![With the mic off, tap the top-right gear, then Phone setup. Scan the QR on the actual pet to join setup Wi-Fi.](setup-on-pet.svg)
+
+*Illustration based on the firmware UI, not a photograph. It contains no usable QR or password.*
+
+With the mic off, tap the gear at the top right and choose **Phone setup**. Scan
+the QR on your pet and join its WPA2 setup network. If the page does not open,
+stay on that network and open `http://192.168.4.1` in your phone browser.
+
+### Save the gateway settings first
+
+![Scroll down to Pocket Unified bridge, enable it, fill the four fields, leave Clear unchecked, then tap Save bridge settings only.](setup-on-phone.svg)
+
+*Illustration of the bridge section, not a screenshot. The values shown are examples.*
+
+Scroll down past the Wi-Fi form to **Pocket Unified bridge** and check
+**Use the host bridge (not the standalone chatbot)**. Use the values from
+[the gateway you just prepared](#2-prepare-unified-and-the-gateway):
+
+| Field | What to enter |
+| --- | --- |
+| **Gateway LAN IPv4** | The gateway host's LAN address that the pet can reach, not the phone's address or a Tailscale address. |
+| **Gateway TLS port** | The port of that gateway's verified TLS LAN listener (`9443` if you used the guide's example unchanged). |
+| **Certificate FQDN** | The exact DNS name on the gateway TLS certificate, without `https://`, port, or path. |
+| **Pet token** | The raw 43-character token issued for this pet, not its SHA-256 digest, the Unified credential, or the OpenAI key. For an already configured pet, leave blank to retain the saved token unless intentionally replacing it. Leave **Clear the saved pet token** unchecked. |
+
+Tap **Save bridge settings only** and wait for **Bridge settings saved.** That
+confirms the save, not that the gateway is reachable. If acknowledgement is
+lost, reconnect to the setup page and inspect the nonsecret address settings.
+A saved-token flag means only that **some** token is present. Keep the original
+token; don't generate a new one to retry. If the prior outcome is still unclear,
+stop and seek maintainer help rather than repeatedly saving.
+
+### Join your home Wi-Fi
+
+Scroll back up to **1 · Choose your Wi-Fi**, select your 2.4 GHz network, and
+enter its password. The OpenAI key stays on the host in bridge mode. Tap
+**Connect Tachikoma**, wait for the save and connection result, then tap
+**Done · return to my Wi-Fi**. If the phone disconnects before acknowledgement,
+reconnect to setup Wi-Fi and inspect the result before trying again.
+
+On the pet, verify **Connected** and **Host bridge configured** before the
+[first spoken check](#first-spoken-check). These labels do not prove that the
+first call will reach the gateway. Skip the historical **Tailscale** and
+**Unified peer** setup sections for this LAN preview; do not run the diagnostic
+Tailscale tunnel, which has a known shutdown race.
 
 The setup page is HTTP inside the WPA2 setup network and uses a per-boot mutation
 control; it is not HTTPS provisioning. The pet token is stored in device NVS.
@@ -755,6 +782,10 @@ For a new host, follow the [current-start and LAN listener checks](../bridge/dep
 before trying the device. The LAN check sends no bearer and makes no paid call.
 
 ### First spoken check
+
+![Round microphone off, then Listening, Accepted while waiting, and Speaking. Tap the same control to mute.](setup-first-call.svg)
+
+*Illustration of the status labels and mic control. **Accepted** is a receipt, not the spoken answer.*
 
 1. On the pet, tap the round microphone once. Wait for **Listening** and say,
    “Ask Unified what this chat is called.” Use a chat-specific question: the
