@@ -14,7 +14,7 @@
       <rect x="590" y="55" width="208" height="247" rx="16"/>
     </g>
     <g fill="#f1f5f9" font-size="19" font-weight="700">
-      <text x="140" y="86">Tachikoma</text>
+      <text x="140" y="86" font-size="12">Amplifier Assistant</text>
       <text x="420" y="86">Settings</text>
       <text x="694" y="86">Connect your phone</text>
     </g>
@@ -35,7 +35,7 @@
     <text x="146" y="285" fill="#f1f5f9" font-size="14">Mic off - tap to talk</text>
     <g fill="#cbd5e1" font-size="14">
       <text x="420" y="115">Voice: mic off</text>
-      <text x="694" y="109">Scan to join Tachikoma Wi-Fi</text>
+      <text x="694" y="109" font-size="10">Scan to join Amplifier Assistant Wi-Fi</text>
       <text x="694" y="128">Firmware 0.3.19-amoled-boot</text>
     </g>
     <g fill="#38bdf8">
@@ -49,7 +49,7 @@
       <text x="420" y="151">Phone setup</text>
       <text x="420" y="194">Volume</text>
       <text x="420" y="236">Touch alignment</text>
-      <text x="420" y="281">Back to Tachikoma</text>
+      <text x="420" y="281" font-size="11">Back to Amplifier Assistant</text>
       <text x="694" y="281">Back / Done</text>
     </g>
     <rect x="647" y="140" width="94" height="84" rx="6" fill="#f1f5f9"/>

@@ -74,7 +74,7 @@ PROVIDER_ERROR_CODE = "provider_error"  # the only error code ever kept (fixed, 
 # delegation.type alone does not force a per-utterance handoff. This fixed policy
 # is host-owned; callers cannot substitute device prompts or grant tool authority.
 # https://developers.openai.com/api/docs/guides/live-prompting#delegation
-_FRONTEND_INSTRUCTIONS = """You are the voice frontend for Amplifier Unified, not an independent task agent.
+_FRONTEND_INSTRUCTIONS = """You are Amplifier Assistant, the voice frontend for Amplifier Unified, not an independent task agent.
 Backchannel policy: Listen quietly. Do not greet or give substantive answers on your own.
 Interruption policy: Yield when interrupted. Stopping speech does not cancel backend work.
 Delegation policy:

@@ -5,12 +5,12 @@
  * This configuration has no Unified access and performs no external actions. */
 #define PET_VOICE_MODEL "gpt-live-1"
 #define PET_REASONING_MODEL "gpt-6-luna"
-#define PET_GREETING "Greet the caller now in English. Say hello, introduce yourself as Tachikoma, and ask how you can help. Then pause and listen."
+#define PET_GREETING "Greet the caller now in English. Say hello, introduce yourself as Amplifier Assistant, and ask how you can help. Then pause and listen."
 #define PET_LIVE_START \
  "{\"type\":\"session.start\",\"event_id\":\"pet_start\",\"session\":{" \
  "\"model\":\"" PET_VOICE_MODEL "\",\"store\":false," \
  "\"input\":[{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"" PET_GREETING "\"}]}]," \
- "\"instructions\":\"You are Tachikoma, a warm, curious pocket assistant. " \
+ "\"instructions\":\"You are Amplifier Assistant, a warm, curious pocket assistant. " \
  "Keep spoken answers brief and clear. Delegate reasoning to the backend. " \
  "You are in an isolated voice test and cannot access Amplifier Unified, " \
  "workspaces, notifications or external actions. Never claim to have done so.\"," \

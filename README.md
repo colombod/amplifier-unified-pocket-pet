@@ -1,8 +1,13 @@
-# Amplifier Unified Pocket Pet
+# Amplifier Assistant — Pocket Pet for Amplifier Unified
 
 **A pocket-sized voice companion for the work you already do in Amplifier Unified.** Tap the mic, ask your Unified chat a question, and hear the answer from the pet without opening your laptop.
 
-<img src="assets/tachikoma-preview.png" width="192" height="195" alt="Tachikoma, the animated Pocket Pet character" />
+<img src="assets/amplifier-assistant-preview.png" width="192" height="208" alt="Amplifier Assistant, the blue hovering mascot, from an exported RGB565 frame" />
+
+This checkout uses the Amplifier mascot and **Amplifier Assistant** name. The
+published `v0.3.19-lan-preview.3` linked below predates the new artwork and name;
+its physical evidence does not qualify the new firmware. This is a companion
+project, not an official or endorsed Amplifier Unified product.
 
 [**Set up your first Pocket Pet**](docs/team-prototype.md#start-here) · [Download the LAN preview source](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3) · [Report a problem or request a feature](https://github.com/colombod/amplifier-unified-pocket-pet/issues)
 
@@ -23,7 +28,7 @@ The LAN preview is usable with **one selected chat and one request at a time**. 
 | **1. Get the release** | Download [the LAN preview](https://github.com/colombod/amplifier-unified-pocket-pet/releases/tag/v0.3.19-lan-preview.3). Use the same tagged source for the gateway and firmware. This is a source release, not a pre-flashed kit. |
 | **2. Deploy the gateway** | [Set up the Linux service](bridge/deploy/README.md), [pair it with stock Unified](docs/team-prototype.md#2-prepare-unified-and-the-gateway), and select a chat. Verify the [TLS LAN listener](bridge/deploy/README.md#check-the-current-start) before making a paid call. |
 | **3. Install the firmware** | [Build Pocket Pet firmware](docs/team-prototype.md#1-obtain-a-matched-build-and-preserve-the-board). Then follow [first install on a new board](docs/team-prototype.md#first-install-on-a-new-board). If your pet already has Wi-Fi, gateway pairing, or calibration saved, skip the first-install steps and read the [settings-preserving update guidance](docs/team-prototype.md#update-a-pet-thats-already-set-up). |
-| **4. Configure the pet** | In **Settings → Phone setup**, scan the QR code. [Enter the gateway address, TLS name, and pet token, then save Wi-Fi](docs/team-prototype.md#3-configure-from-a-phone). Your Unified and OpenAI credentials stay on the host. |
+| **4. Configure the pet** | In **Settings → Phone setup**, scan the QR code. The [firmware user manual](docs/firmware-manual.md#set-up-from-your-phone) walks through the phone screens and shows where to find each value. Your Unified and OpenAI credentials stay on the host. |
 | **5. Hear a reply** | Tap the mic, wait for **Listening**, and ask: **“Ask Unified what this chat is called.”** Wait for **Accepted** and the spoken answer, then check that the request landed once in the selected chat. See the [first-call checklist](docs/team-prototype.md#first-spoken-check) if it doesn’t. |
 
 **Privacy and cost:** During a call, OpenAI processes microphone audio and the reply text used for speech. Voice and Unified model usage can incur charges. Check the actual chat for consequential details: spoken output is not guaranteed to be verbatim.
@@ -37,5 +42,16 @@ Real spoken replies have been verified on the maintainer’s provisioned board. 
 | [Vision](docs/VISION.md) | The experience Pocket Pet is meant to deliver beyond the LAN preview |
 | [Architecture](docs/ARCHITECTURE.md) | The device, gateway, and Unified boundaries; hardware and build references; where to change and test each part |
 | [Delivery contract](docs/CONTRACT.md) | Product promises, their limits, and how to verify them |
-| [Setup and build guide](docs/team-prototype.md#start-here) | Exact board, firmware build, first install, preserving settings, phone setup, and offline checks |
+| [Firmware user manual](docs/firmware-manual.md) | The pet's controls, phone setup screens, gateway values and tokens, and troubleshooting |
+| [Setup and build guide](docs/team-prototype.md#start-here) | Exact board, firmware build, first install, preserving settings, and offline checks |
+| [Custom artwork and name](docs/team-prototype.md#custom-artwork-and-name-source-builds) | Atlas format and source edits before making your own build |
 | [Gateway deployment](bridge/deploy/README.md) | Running the Linux service and checking the TLS listener |
+
+## License
+
+The original Pocket project code and documentation, the supplied Amplifier
+Assistant mascot artwork, and the previews and firmware graphics derived from
+that artwork are covered by the [MIT License](LICENSE). The
+[mascot provenance record](assets/source/amplifier-assistant.provenance.json)
+identifies the exact upstream artwork. Third-party components, fonts and data
+keep their own licenses and notices; the project license does not replace them.

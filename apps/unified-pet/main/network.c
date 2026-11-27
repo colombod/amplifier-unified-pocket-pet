@@ -1,4 +1,5 @@
 #include "network.h"
+#include "power_gate.h"
 #include <stdio.h>
 #include <assert.h>
 #include <unistd.h>
@@ -61,6 +62,18 @@ static uint32_t now_ms(void){return (uint32_t)(esp_timer_get_time()/1000);}
 extern const unsigned char setup_html_start[] asm("_binary_setup_html_start");
 extern const unsigned char setup_html_end[] asm("_binary_setup_html_end");
 typedef struct { int kind; char ssid[33], password[64], key[256]; } command_t;
+static power_gate_t activity;
+bool network_activity_begin(void) {return power_activity_begin(&activity);}
+void network_activity_end(void) {power_activity_end(&activity);}
+bool network_power_claim(void) {return power_claim(&activity);}
+void network_power_release(void) {power_release(&activity);}
+
+static BaseType_t enqueue(const command_t *cmd) {
+    if(!network_activity_begin())return pdFALSE;
+    BaseType_t queued=xQueueSend(commands,cmd,0);
+    if(queued!=pdTRUE)network_activity_end();
+    return queued;
+}
 static void message(const char *text) {
     xSemaphoreTake(state_lock,portMAX_DELAY);
     strlcpy(state.message,text,sizeof(state.message));
@@ -117,14 +130,14 @@ esp_err_t network_pause_setup(uint32_t timeout_ms) {
     if(!ok)return ESP_ERR_INVALID_STATE;
     xEventGroupClearBits(events,SETUP_PAUSED|SETUP_RESTORED|SETUP_FAILED);
     command_t cmd={.kind=3};
-    if(xQueueSend(commands,&cmd,0)!=pdTRUE)return ESP_FAIL;
+    if(enqueue(&cmd)!=pdTRUE)return ESP_FAIL;
     EventBits_t b=xEventGroupWaitBits(events,SETUP_PAUSED|SETUP_FAILED,pdFALSE,pdFALSE,pdMS_TO_TICKS(timeout_ms));
     return b&SETUP_PAUSED?ESP_OK:b&SETUP_FAILED?ESP_FAIL:ESP_ERR_TIMEOUT;
 }
 esp_err_t network_resume_setup(uint32_t timeout_ms) {
     xEventGroupClearBits(events,SETUP_RESTORED|SETUP_FAILED);
     command_t cmd={.kind=4};
-    if(xQueueSend(commands,&cmd,0)!=pdTRUE)return ESP_FAIL;
+    if(enqueue(&cmd)!=pdTRUE)return ESP_FAIL;
     EventBits_t b=xEventGroupWaitBits(events,SETUP_RESTORED|SETUP_FAILED,pdFALSE,pdFALSE,pdMS_TO_TICKS(timeout_ms));
     return b&SETUP_RESTORED?ESP_OK:b&SETUP_FAILED?ESP_FAIL:ESP_ERR_TIMEOUT;
 }
@@ -164,7 +177,7 @@ static esp_err_t page(httpd_req_t *req) {
     char host[80]={0}; httpd_req_get_hdr_value_str(req,"Host",host,sizeof(host));
     if(strcmp(host,"192.168.4.1") && strcmp(host,"192.168.4.1:80")) {
         httpd_resp_set_status(req,"302 Found"); httpd_resp_set_hdr(req,"Location","http://192.168.4.1/");
-        return httpd_resp_sendstr(req,"Open Tachikoma setup at http://192.168.4.1/");
+        return httpd_resp_sendstr(req,"Open Amplifier Assistant setup at http://192.168.4.1/");
     }
     httpd_resp_set_type(req,"text/html; charset=utf-8");
     /* Render the installed version even before the phone's status fetch works. */
@@ -318,7 +331,7 @@ static esp_err_t configure(httpd_req_t *req) {
     xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=true;state.settings_saved=false;state.configure_generation++;xSemaphoreGive(state_lock);
     message("Settings received. Connecting to Wi-Fi...");
     ESP_LOGI("pet_net","Configuration request accepted");
-    BaseType_t queued=xQueueSend(commands,&cmd,0); memset(&cmd,0,sizeof(cmd));
+    BaseType_t queued=enqueue(&cmd); memset(&cmd,0,sizeof(cmd));
     if(queued!=pdTRUE) {xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=false;xSemaphoreGive(state_lock);}
     if(queued!=pdTRUE) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Busy; try again");
     return httpd_resp_sendstr(req,"{}");
@@ -329,9 +342,22 @@ static esp_err_t finish(httpd_req_t *req) {
     if(!s.connected || s.joining || !s.settings_saved || !s.bridge_valid ||
        !(s.bridge_enabled?s.bridge_token_saved:s.key_saved)) return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Wait until Wi-Fi is connected and settings are saved");
     command_t cmd={.kind=2};
-    if(xQueueSend(commands,&cmd,0)!=pdTRUE) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Try again");
+    if(enqueue(&cmd)!=pdTRUE) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Try again");
     return httpd_resp_sendstr(req,"{}");
 }
+static esp_err_t setup_activity(httpd_req_t *req, esp_err_t (*handle)(httpd_req_t *)) {
+    if(!network_activity_begin()) {
+        if(!ap_request(req))return ESP_OK;
+        httpd_resp_set_status(req,"503 Service Unavailable");
+        return httpd_resp_sendstr(req,"Device power action in progress");
+    }
+    esp_err_t result=handle(req);
+    network_activity_end();
+    return result;
+}
+static esp_err_t guarded_scan(httpd_req_t *req) {return setup_activity(req,scan_get);}
+static esp_err_t guarded_configure(httpd_req_t *req) {return setup_activity(req,configure);}
+static esp_err_t guarded_finish(httpd_req_t *req) {return setup_activity(req,finish);}
 static esp_err_t start_server(void) {
     httpd_config_t cfg=HTTPD_DEFAULT_CONFIG(); cfg.uri_match_fn=httpd_uri_match_wildcard;
     cfg.stack_size=8192; cfg.max_uri_handlers=6; cfg.lru_purge_enable=true;
@@ -339,9 +365,9 @@ static esp_err_t start_server(void) {
     esp_err_t err=httpd_start(&server,&cfg);if(err!=ESP_OK)return err;
     httpd_uri_t routes[]={
         {.uri="/status",.method=HTTP_GET,.handler=status_get},
-        {.uri="/networks",.method=HTTP_GET,.handler=scan_get},
-        {.uri="/configure",.method=HTTP_POST,.handler=configure},
-        {.uri="/finish",.method=HTTP_POST,.handler=finish},
+        {.uri="/networks",.method=HTTP_GET,.handler=guarded_scan},
+        {.uri="/configure",.method=HTTP_POST,.handler=guarded_configure},
+        {.uri="/finish",.method=HTTP_POST,.handler=guarded_finish},
         {.uri="/*",.method=HTTP_GET,.handler=page}};
     for(size_t i=0;i<sizeof(routes)/sizeof(routes[0]);i++) {
         err=httpd_register_uri_handler(server,&routes[i]);
@@ -475,6 +501,7 @@ static void worker(void *arg) {
         command_t cmd={.kind=1};size_t n=sizeof(cmd.ssid);pet_store_get_str(&storage,"ssid",cmd.ssid,&n);n=sizeof(cmd.password);pet_store_get_str(&storage,"password",cmd.password,&n);
         bool ok=join_network(&cmd,false);memset(&cmd,0,sizeof(cmd));if(!ok)network_retry_failed(&retry,now_ms());
     }
+    network_activity_end(); /* boot reservation, established by network_init */
     for(;;) {
         command_t cmd={0};
         if(xQueueReceive(commands,&cmd,pdMS_TO_TICKS(1000))==pdTRUE) {
@@ -513,6 +540,7 @@ static void worker(void *arg) {
                    (s.bridge_enabled?s.bridge_token_saved:s.key_saved)) {esp_wifi_set_mode(WIFI_MODE_STA);xSemaphoreTake(state_lock,portMAX_DELAY);state.setup=false;setup_activity_seen=false;xSemaphoreGive(state_lock);}
             }
             memset(&cmd,0,sizeof(cmd));
+            network_activity_end(); /* queue ownership ends after the operation */
         }
         network_status_t s;network_snapshot(&s);
         if(s.connected && !(xEventGroupGetBits(events)&IP_READY)) {
@@ -522,7 +550,7 @@ static void worker(void *arg) {
         }
         refresh_station(s.connected);
         if(s.connected)network_retry_reset(&retry);
-        else if(credentials_present && !s.setup_paused) {
+        else if(credentials_present && !s.setup_paused && network_activity_begin()) {
             if(!retry.scheduled)network_retry_failed(&retry,now_ms());
             xSemaphoreTake(state_lock,portMAX_DELAY);
             bool due=network_retry_due(&retry,now_ms(),state.connected,state.joining,uxQueueMessagesWaiting(commands)>0,setup_activity_seen,setup_activity_at);
@@ -538,11 +566,12 @@ static void worker(void *arg) {
                 memset(&saved,0,sizeof(saved));
                 if(ok)network_retry_reset(&retry);else network_retry_failed(&retry,now_ms());
             }
+            network_activity_end();
         }
     }
 }
-void network_close_setup(void) {network_status_t s;network_snapshot(&s);if(s.setup_paused)return;command_t cmd={.kind=2};xQueueSend(commands,&cmd,0);}
-void network_open_setup(void) {network_status_t s;network_snapshot(&s);if(s.setup_paused)return;command_t cmd={.kind=0};xQueueSend(commands,&cmd,0);}
+void network_close_setup(void) {network_status_t s;network_snapshot(&s);if(s.setup_paused)return;command_t cmd={.kind=2};enqueue(&cmd);}
+void network_open_setup(void) {network_status_t s;network_snapshot(&s);if(s.setup_paused)return;command_t cmd={.kind=0};enqueue(&cmd);}
 void network_init(void) {
     state.rssi=-127;
     state_lock=xSemaphoreCreateMutex();events=xEventGroupCreate();commands=xQueueCreate(2,sizeof(command_t));
@@ -560,7 +589,7 @@ void network_init(void) {
         state.key_saved=loaded==ESP_OK;
     }
     uint8_t mac[6];ESP_ERROR_CHECK(esp_read_mac(mac,ESP_MAC_WIFI_SOFTAP));
-    snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Tachikoma-%02X%02X-Setup",mac[4],mac[5]);
+    snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Amplifier-Assistant-%02X%02X-Setup",mac[4],mac[5]);
     /* Keep pairing credentials stable across power/USB resets. No values are logged. */
     n=sizeof(state.ap_password);
     loaded=pet_store_get_str(&storage,"setup_pass",state.ap_password,&n);
@@ -573,7 +602,7 @@ void network_init(void) {
         if(saved!=ESP_OK) {
             ESP_LOGW("pet_net","Pairing password persistence failed: %s",esp_err_to_name(saved));
             /* A unique name avoids stale iPhone password reuse if storage is full. */
-            snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Tachikoma-%02X%02X-%04lx",mac[4],mac[5],(unsigned long)(esp_random()&0xffff));
+            snprintf(state.ap_ssid,sizeof(state.ap_ssid),"Amplifier-Assistant-%02X%02X-%04lx",mac[4],mac[5],(unsigned long)(esp_random()&0xffff));
         }
     }
     nvs_stats_t stats;
@@ -596,6 +625,8 @@ void network_init(void) {
     bool ready=mode_ready();
     if(credentials_present && ready) ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    state.setup=!(credentials_present && ready);message(credentials_present?"Connecting to saved Wi-Fi...":"Let's connect Tachikoma");
-    ESP_ERROR_CHECK(start_server());xTaskCreate(dns_task,"setup_dns",3072,NULL,3,NULL);xTaskCreate(worker,"network",6144,NULL,4,NULL);
+    state.setup=!(credentials_present && ready);message(credentials_present?"Connecting to saved Wi-Fi...":"Let's connect Amplifier Assistant");
+    ESP_ERROR_CHECK(start_server());xTaskCreate(dns_task,"setup_dns",3072,NULL,3,NULL);
+    if(network_activity_begin() && xTaskCreate(worker,"network",6144,NULL,4,NULL)!=pdPASS)
+        ESP_LOGE("pet_net","Network worker not started; power actions unavailable");
 }

@@ -46,6 +46,7 @@ static char last_plain_write[16];
 static int fixture_shutdown(int fd,int how);
 static void lock_wait_event(void);
 static int tls_read_result=INT_MAX,tls_write_result=INT_MAX,base_poll_result=1,last_poll_ms;
+static bool miss_next_read_poll;
 static bool probe_exclusion;
 static unsigned exclusion_probes;
 enum lock_action{LOCK_NONE,LOCK_CANCEL,LOCK_EXPIRE,LOCK_SHRINK};
@@ -71,7 +72,7 @@ static const char *T="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
  * fixture retry loop around WS send/read: each operation calls the real SDK
  * exactly once, so a short-poll timeout cannot be concealed by replaying it. */
 enum wire_stall{WIRE_TX_READY,WIRE_TX_PAYLOAD,WIRE_TX_PARTIAL,WIRE_RX_HEADER};
-static bool wire_enabled,wire_cancel_fired;
+static bool wire_enabled,wire_cancel_fired,wire_gap_uplink;
 static enum wire_stall wire_stall;
 static int64_t wire_started,wire_read_ready,wire_write_ready,wire_cancel_at;
 static unsigned wire_polls;
@@ -79,7 +80,11 @@ static unsigned char wire_tx[256],wire_rx[64];
 static size_t wire_tx_len,wire_rx_len,wire_rx_at;
 static const unsigned char first_payload[]={0x10,0x21,0x32,0x00,0x54,0x65,0x86,0xf7,0x98};
 static const unsigned char second_payload[]={0x7b,0x03,0xf0,0x6e};
+static const unsigned char uplink_payload[]={0x98,0x00,0x34,0xc3};
+static int64_t wire_uplink_attempt_at;
+static int wire_uplink_result;
 static int wire_poll(int ms,bool read);
+static void run_gap_uplink(void);
 int64_t esp_timer_get_time(void){int64_t result=now;now+=clock_step_us;return result;}
 static SemaphoreHandle_t new_lock(bool recursive){
     SemaphoreHandle_t s=calloc(1,sizeof(*s));assert(s);s->recursive=recursive;live_locks++;return s;
@@ -169,7 +174,7 @@ ssize_t esp_tls_conn_write(esp_tls_t*tls,const void*buffer,size_t n){
     assert(tls&&tls->transport);check_io_owner(1);raw_writes++;
     if(probe_exclusion)check_exclusion();
     if(wire_enabled){
-        assert(wire_stall!=WIRE_RX_HEADER&&now>=wire_write_ready);
+        assert((wire_stall!=WIRE_RX_HEADER||wire_gap_uplink)&&now>=wire_write_ready);
         size_t before=wire_tx_len,count=n;
         /* The real SDK writes a six-byte masked header separately from this
          * short payload. Accept distinct bytes, not just a write-call count. */
@@ -283,6 +288,7 @@ static void lock_wait_event(void){
 }
 void vTaskDelay(TickType_t ticks){
     assert(ticks==1);delays++;now+=(int64_t)ticks*1000000/configTICK_RATE_HZ;
+    run_gap_uplink();
     if(start_tx_on_delay){
         bridge_transport_t*t=atomic_load(&chain);
         assert(t&&!t->io->depth&&!t->io->owner&&!t->operation_deadline);
@@ -351,7 +357,8 @@ static int ssl_poll(esp_transport_handle_t ssl,int ms,bool read){
     int result;
     if(wire_enabled)result=wire_poll(ms,read);
     else{
-        result=idle_read_only&&!read?1:base_poll_result;
+        if(read&&miss_next_read_poll){miss_next_read_poll=false;result=0;}
+        else result=idle_read_only&&!read?1:base_poll_result;
         if(!result&&!immediate_zero)now+=(int64_t)ms*1000; /* sustained timeout consumes time */
     }
     if(result>0&&cancel_after_ready){
@@ -382,6 +389,7 @@ static int wire_poll(int ms,bool read){
         assert(socket_reads==sockets_before);check_io_owner(depth);
     }
     assert(until>=now);now=until;
+    if(read)run_gap_uplink();
     return ready<=now?1:0;
 }
 static int ssl_connect(esp_transport_handle_t t,const char*host,int port,int ms){
@@ -398,6 +406,7 @@ static void reset(void){
     raw_reads=nested_read_polls=nested_write_polls=error_handle_reads=socket_reads=0;
     takes=gives=max_depth=nonrecursive_rejections=contended_takes=0;
     tls_read_result=tls_write_result=INT_MAX;base_poll_result=1;last_poll_ms=-1;
+    miss_next_read_poll=false;
     probe_exclusion=false;exclusion_probes=0;lock_action=LOCK_NONE;action_depth=actions_fired=0;
     status=101;fail_write=fail_connect=cancel_during_connect=false;location=true;gateway_refusal=NULL;
     memset(&connect_error,0,sizeof(connect_error));
@@ -405,6 +414,7 @@ static void reset(void){
     muted_ws=muted_client=muted_base=bundle=false;response_at=0;response[0]=cn[0]=0;
     wire_enabled=wire_cancel_fired=false;wire_cancel_at=0;wire_polls=0;
     wire_tx_len=wire_rx_len=wire_rx_at=0;
+    wire_gap_uplink=false;wire_uplink_attempt_at=0;wire_uplink_result=0;
     fixture_fd=12345;shutdowns=delays=schedule_tx=max_idle_poll_ms=0;release_lock_at=0;
     cancel_give_depth=cancel_give_fired=0;
     cancel_lock_at=expected_operation_deadline=scheduled_tx_at=0;
@@ -465,6 +475,7 @@ static int fixture_io(bridge_transport_t*t,bool read,int ms){
 static void assert_unlocked(bridge_transport_t*t){
     assert(!t->io->depth&&!t->io->owner&&takes==gives);
     assert(!t->operation_deadline&&!t->operation_probe);
+    assert(!t->read_probe_active&&!t->read_probe_empty);
 }
 static unsigned sdk_io_regressions(void){
     unsigned cases=0;
@@ -486,7 +497,7 @@ static unsigned sdk_io_regressions(void){
     for(unsigned read=0;read<2;read++)for(size_t i=0;i<sizeof(requested)/sizeof(*requested);i++){
         t=new_fixture();int ms=requested[i];
         assert(fixture_io(t,read,ms)==(read?1:6));
-        assert(last_poll_ms==(ms>=0&&ms<50?ms:50));
+        assert(last_poll_ms==(read?0:(ms>=0&&ms<50?ms:50)));
         assert(polls==1&&nested_read_polls+nested_write_polls==1);
         assert(raw_reads+raw_writes==1&&max_depth==2);
         assert_unlocked(t);fixture_power_cycle(t);cases++;
@@ -495,18 +506,25 @@ static unsigned sdk_io_regressions(void){
         t=new_fixture();base_poll_result=ready;
         int expected=read?(ready==0?ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT:
                                    ERR_TCP_TRANSPORT_CONNECTION_FAILED):ready;
+        int64_t entry=now;
         assert(fixture_io(t,read,50)==expected);
-        assert(polls==1&&nested_read_polls+nested_write_polls==1);
+        unsigned expected_polls=read&&ready==0?50U*configTICK_RATE_HZ/1000:1;
+        assert(now-entry==(ready==0?50000:0));
+        assert(polls==expected_polls&&nested_read_polls+nested_write_polls==expected_polls);
         assert(!raw_reads&&!raw_writes&&!error_handle_reads);
         assert_unlocked(t);fixture_power_cycle(t);cases++;
     }
     const int read_results[]={ESP_TLS_ERR_SSL_WANT_READ,ESP_TLS_ERR_SSL_TIMEOUT,-123,0};
     const int read_expected[]={ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT,
         ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT,-123,ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN};
-    for(size_t i=0;i<sizeof(read_results)/sizeof(*read_results);i++){
-        t=new_fixture();tls_read_result=read_results[i];
+    for(unsigned miss=0;miss<2;miss++)for(size_t i=0;i<sizeof(read_results)/sizeof(*read_results);i++){
+        /* A prior readiness miss must not cause a second TLS read after the
+         * next probe admitted a read, even when it returns the same timeout. */
+        t=new_fixture();tls_read_result=read_results[i];miss_next_read_poll=miss!=0;
+        int64_t entry=now;
         assert(fixture_io(t,true,50)==read_expected[i]);
-        assert(raw_reads==1&&nested_read_polls==1&&error_handle_reads==(i<3?1U:0U));
+        assert(raw_reads==1&&nested_read_polls==1+miss&&error_handle_reads==(i<3?1U:0U));
+        assert(delays==miss&&now-entry==(int64_t)miss*1000000/configTICK_RATE_HZ);
         assert_unlocked(t);fixture_power_cycle(t);cases++;
     }
     t=new_fixture();tls_write_result=-1;
@@ -535,11 +553,11 @@ static unsigned sdk_io_regressions(void){
     for(unsigned read=0;read<2;read++){
         t=new_fixture();lock_action=LOCK_SHRINK;action_depth=2;
         assert(fixture_io(t,read,1000)==(read?1:6));
-        assert(actions_fired==1&&lock_action==LOCK_NONE&&last_poll_ms==7);
+        assert(actions_fired==1&&lock_action==LOCK_NONE&&last_poll_ms==(read?0:7));
         assert(polls==1&&raw_reads+raw_writes==1&&max_depth==2);
         assert_unlocked(t);fixture_power_cycle(t);cases++;
     }
-    assert(cases==32);return cases;
+    assert(cases==36);return cases;
 }
 enum wire_limit{WIRE_CALLER,WIRE_DEADLINE,WIRE_CANCEL};
 struct wire_case{const char*name;enum wire_stall stall;int budget;enum wire_limit limit;bool success;};
@@ -550,6 +568,7 @@ static const struct wire_case wire_cases[]={
      * immediate short-write failure itself is caused by the 50ms clamp. */
     {"tx-partial-stall60",WIRE_TX_PARTIAL,1000,WIRE_CALLER,true},
     {"rx-header-gap60",WIRE_RX_HEADER,1000,WIRE_CALLER,true},
+    {"rx-header-gap-uplink",WIRE_RX_HEADER,1000,WIRE_CALLER,true},
     {"tx-caller10",WIRE_TX_READY,10,WIRE_CALLER,false},
     {"rx-caller10",WIRE_RX_HEADER,10,WIRE_CALLER,false},
     {"tx-caller0",WIRE_TX_READY,0,WIRE_CALLER,false},
@@ -594,8 +613,22 @@ static size_t check_masked_frame(size_t at,const unsigned char*payload,size_t n)
     for(size_t i=0;i<n;i++)assert((wire_tx[at+6+i]^wire_tx[at+2+i%4])==payload[i]);
     return at+6+n;
 }
+static void run_gap_uplink(void){
+    /* Model a distinct task with TX ready while the second RX header byte is
+     * missing. Probe once, then send one actual pinned SDK WS frame. */
+    if(!wire_gap_uplink||wire_uplink_attempt_at||wire_rx_at!=1||
+       now<wire_started+10000||now>=wire_read_ready)return;
+    bridge_transport_t *t=atomic_load(&chain);assert(t&&task==1);
+    wire_uplink_attempt_at=now;
+    task=2;
+    wire_uplink_result=esp_transport_poll_write(t->ssl,0);
+    if(wire_uplink_result>0)
+        wire_uplink_result=send_wire(t,uplink_payload,sizeof(uplink_payload),1);
+    task=1;
+}
 static int run_wire_case(const struct wire_case*c){
     bridge_transport_t*t=new_fixture();begin_wire(t,c);
+    wire_gap_uplink=!strcmp(c->name,"rx-header-gap-uplink");
     const bool read=c->stall==WIRE_RX_HEADER;
     char received[32]={0};
     int result=read?esp_transport_read(t->ws,received,sizeof(received),c->budget):
@@ -622,7 +655,14 @@ static int run_wire_case(const struct wire_case*c){
             assert(esp_transport_read(t->ws,received,sizeof(received),c->budget)==(int)sizeof(second_payload));
             bridge_transport_data_delivered(t);
             assert(!memcmp(received,second_payload,sizeof(second_payload)));
-            assert(wire_rx_at==wire_rx_len&&!wire_tx_len);
+            assert(wire_rx_at==wire_rx_len);
+            if(wire_gap_uplink){
+                fprintf(stderr,"RX GAP UPLINK attempt_us=%lld result=%d tx_bytes=%zu\n",
+                    (long long)(wire_uplink_attempt_at-wire_started),wire_uplink_result,wire_tx_len);
+                assert(wire_uplink_attempt_at>=wire_started+10000&&wire_uplink_attempt_at<wire_read_ready);
+                assert(wire_uplink_result==(int)sizeof(uplink_payload));
+                assert(check_masked_frame(0,uplink_payload,sizeof(uplink_payload))==wire_tx_len);
+            }else assert(!wire_tx_len);
         }else{
             /* Decode the actual random mask and compare binary byte order.
              * Duplicate headers, repeated prefixes and whole-frame retries
@@ -733,14 +773,16 @@ static int run_extra_case(size_t which){
             int result=guarded_operation(t,op,120);
             assert(result==(op==0?ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT:0));
             assert(now-entry==120000&&!raw_reads&&!raw_writes);
-            /* Idle RX now probes without waiting under io and sleeps one tick
-             * outside it. Other/nested polls retain their 50ms slices. */
-            assert(polls==(op==2?120U*configTICK_RATE_HZ/1000:3U));
-            if(op<2)assert(nested_read_polls+nested_write_polls==3&&delays==0);
+            /* Both read paths check without waiting under io and yield a tick;
+             * writes retain their bounded 50ms poll slices. */
+            bool read=op==0||op==2;
+            assert(polls==(read?120U*configTICK_RATE_HZ/1000:3U));
+            if(op<2)assert(nested_read_polls+nested_write_polls==polls);
+            assert(delays==(read?polls:0));
             assert_unlocked(t);
             /* A fresh call must not inherit an expired previous scope. */
             expected_operation_deadline=now+7000;base_poll_result=1;
-            assert(guarded_operation(t,0,7)==1&&last_poll_ms==7);
+            assert(guarded_operation(t,0,7)==1&&last_poll_ms==0);
             assert_unlocked(t);fixture_power_cycle(t);
         }
     }else if(which>=3&&which<=6){

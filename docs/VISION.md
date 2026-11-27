@@ -11,7 +11,7 @@ an existing conversation, or start a new chat in a new workspace. Unified does
 the work and the pet speaks back. It is not a separate chatbot and is not
 permanently bound to one conversation.
 
-The experience is simple: an animated Tachikoma, one understandable voice
+The experience is simple: an animated Amplifier Assistant, one understandable voice
 control, a clear indication of connection and current context, and useful
 Settings. Voice carries the conversation; touch helps choose context. The user
 is not required to operate a diagnostic console, read long transcript previews,

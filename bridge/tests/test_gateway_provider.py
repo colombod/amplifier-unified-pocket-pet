@@ -45,6 +45,7 @@ class ProviderBuilderTest(OfflineTestCase):
     def test_start_has_host_owned_delegation_policy_not_device_authority(self):
         start = json.loads(gp.build_provider_start("gw_host", "gpt-live-1", "marin"))
         instructions = start["session"]["instructions"]
+        self.assertTrue(instructions.startswith("You are Amplifier Assistant, the voice frontend for Amplifier Unified,"))
         for required in (
             "Backchannel policy:", "Interruption policy:", "Delegation policy:",
             "Backend tools:", "Generate <|SpawnThinking|> when:",
@@ -95,7 +96,7 @@ class ProviderBuilderTest(OfflineTestCase):
             '"responses"',
             '"reasoning"',
             "gpt-6",
-            "Tachikoma",
+            "a warm, curious pocket assistant",
             DEVICE_INSTRUCTIONS_CANARY,
         ):
             with self.subTest(absent=absent):

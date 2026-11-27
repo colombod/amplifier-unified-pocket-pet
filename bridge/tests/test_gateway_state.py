@@ -32,7 +32,7 @@ UUID4 = "123e4567-e89b-42d3-a456-426614174000"
 UUID1 = "123e4567-e89b-12d3-a456-426614174000"
 SHA = hashlib.sha256(b"sealed text").hexdigest()
 GREETING = (
-    "Greet the caller now in English. Say hello, introduce yourself as Tachikoma, "
+    "Greet the caller now in English. Say hello, introduce yourself as Amplifier Assistant, "
     "and ask how you can help. Then pause and listen."
 )
 # Source-backed fixture: apps/unified-pet/main/assistant_config.h:9-20 (PET_LIVE_START).
@@ -50,7 +50,7 @@ ASSISTANT_START_DOC: dict[str, Any] = {
             }
         ],
         "instructions": (
-            "You are Tachikoma, a warm, curious pocket assistant. "
+            "You are Amplifier Assistant, a warm, curious pocket assistant. "
             "Keep spoken answers brief and clear. Delegate reasoning to the backend. "
             "You are in an isolated voice test and cannot access Amplifier Unified, "
             "workspaces, notifications or external actions. Never claim to have done so."
@@ -362,7 +362,7 @@ class SessionStartFrameTest(OfflineTestCase):
             },
         )
         frame = parse(ASSISTANT_START)
-        for fragment in ("Tachikoma", "gpt-6-luna", "developer", "responses"):
+        for fragment in ("Amplifier Assistant", "gpt-6-luna", "developer", "responses"):
             self.assertNotIn(fragment, repr(frame))
         for key in ("input", "instructions", "delegation"):
             with self.subTest(removed=key):
@@ -501,14 +501,14 @@ class SessionStartFrameTest(OfflineTestCase):
         with self.assertRaises(GatewayProtocolError) as ctx:
             parse(mutated_start(lambda d: d["session"].update(store=True)))
         self.assertEqual(str(ctx.exception), "unknown_command")
-        self.assertNotIn("Tachikoma", repr(ctx.exception))
+        self.assertNotIn("Amplifier Assistant", repr(ctx.exception))
 
 
 class GreetingFrameTest(OfflineTestCase):
     def test_t_state_greeting_legacy_fixture_is_greeting_without_content(self):
         frame = parse(ASSISTANT_GREETING)
         self.assertEqual(frame, DeviceFrame(kind="greeting", event_id="pet_greeting"))
-        self.assertNotIn("Tachikoma", repr(frame))
+        self.assertNotIn("Amplifier Assistant", repr(frame))
 
     def test_t_state_greeting_malformed_variants_are_unknown_command(self):
         base = json.loads(ASSISTANT_GREETING)

@@ -106,6 +106,9 @@ static int esp_wifi_start(void){return ESP_OK;}
 static int start_server(void){return ESP_OK;}
 static void dns_task(void *p){(void)p;}
 static void worker(void *p){(void)p;}
+/* The boot storage fixture does not run worker tasks or power admission. */
+bool network_activity_begin(void){return true;}
+#define pdPASS 1
 static int xTaskCreate(void(*fn)(void*),const char *n,int stack,void *p,int priority,void *out) {
  (void)fn;(void)n;(void)stack;(void)p;(void)priority;(void)out;return 1;
 }

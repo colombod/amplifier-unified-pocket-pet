@@ -6,8 +6,8 @@ user-facing qualification controls.
 
 Conversation mode (user decision 2026-11-14): the microphone button is only
 mic on / mic off. There is no "Done talking", transcript preview, Send or
-Cancel on the screen, and no device-side send confirmation in the firmware's
-reachable code. The host, not the pet, decides what is sent.
+voice Cancel button, and no device-side send confirmation. The host, not the
+pet, decides what is sent. The separate device-power modal may offer Cancel.
 """
 from pathlib import Path
 import re
@@ -46,13 +46,51 @@ class PetUI(unittest.TestCase):
 
     def test_useful_settings_and_artwork_remain(self):
         for text in ('"Phone setup"', '"Volume"', '"Touch alignment"',
-                     '"Back to Tachikoma"', '"Tachikoma"'):
+                     '"Back to Amplifier Assistant"', '"Amplifier Assistant"'):
             self.assertIn(text, SOURCE)
         self.assertIn("audio_test_save_volume()", SOURCE)
         self.assertIn("touch_calibration_begin()", SOURCE)
         self.assertIn("network_open_setup()", SOURCE)
         self.assertIn("lv_image_set_src(pet,&frames[frame])", SOURCE)
         self.assertIn("tailnet_spike_snapshot(&tn)", SOURCE)  # Admission intact.
+
+    def test_artwork_binding_and_animation_cadence_are_unchanged(self):
+        self.assertIn('asm("_binary_amplifier_assistant_rgb565_start")', SOURCE)
+        self.assertIn("static lv_image_dsc_t frames[73];", SOURCE)
+        self.assertIn("#define FRAME_BYTES (192*208*2)", SOURCE)
+        self.assertIn("wave_ticks=24;", SOURCE)
+        self.assertIn("frame=22+(24-wave_ticks)/6;--wave_ticks;", SOURCE)
+        self.assertIn("frame=45+(tick_count/2)%6;", SOURCE)
+        self.assertIn("frame=(tick_count/3)%6;", SOURCE)
+        self.assertIn("lv_timer_create(refresh,120,NULL);", SOURCE)
+        self.assertIn("lv_image_set_scale(pet,300);", SOURCE)
+        for root in (APP, APP.parents[1]):
+            assembly = (root / "main/pet_asset.S.in").read_text(encoding="utf-8")
+            cmake = (root / "main/CMakeLists.txt").read_text(encoding="utf-8")
+            self.assertIn(".balign 4", assembly)
+            self.assertIn("_binary_amplifier_assistant_rgb565_start", assembly)
+            self.assertIn("_binary_amplifier_assistant_rgb565_end", assembly)
+            for text in (assembly, cmake):
+                self.assertIn("assets/generated/amplifier-assistant.rgb565", text)
+
+    def test_assistant_name_reaches_phone_prompts_and_setup_network(self):
+        for root in (APP, APP.parents[1]):
+            network = (root / "main/network.c").read_text(encoding="utf-8")
+            page = (root / "main/setup.html").read_text(encoding="utf-8")
+            config = (root / "main/assistant_config.h").read_text(encoding="utf-8")
+            live = (root / "main/live_voice.c").read_text(encoding="utf-8")
+            for template, suffix in (("Amplifier-Assistant-%02X%02X-Setup", "Setup"),
+                                     ("Amplifier-Assistant-%02X%02X-%04lx", "FFFF")):
+                self.assertIn('"' + template + '"', network)
+                self.assertLessEqual(len(f"Amplifier-Assistant-FFFF-{suffix}".encode()), 32)
+            for text in ("<title>Meet Amplifier Assistant</title>",
+                         "<h1>Meet Amplifier Assistant.</h1>", ">Connect Amplifier Assistant<"):
+                self.assertIn(text, page)
+            self.assertIn("introduce yourself as Amplifier Assistant", config)
+            self.assertIn("You are Amplifier Assistant, a warm, curious pocket assistant.", config)
+            self.assertIn("Listening. Say hello to Amplifier Assistant.", live)
+            for text in (network, page, config, live):
+                self.assertNotIn("Tachikoma", text)
 
     def test_microphone_button_is_only_mic_on_and_mic_off(self):
         # The whole tap handler: off when on, on when off. Nothing else.
@@ -86,7 +124,7 @@ class PetUI(unittest.TestCase):
         self.assertEqual(LIVE.count("bridge_voice_run("), 1)
 
     def test_no_preview_send_or_cancel_in_conversation_mode(self):
-        for text in ("Done talking", "Confirm your words", '"Send"', '"Cancel"', "Start voice",
+        for text in ("Done talking", "Confirm your words", '"Send"', "Start voice",
                      "bridge_panel", "bridge_send", "bridge_text", "bridge_display",
                      "bridge_stop_clicked", "bridge_send_clicked", "BR_PREVIEW",
                      "can_finish_capture", "can_send", "copy_preview", "confirm_send",
@@ -103,6 +141,21 @@ class PetUI(unittest.TestCase):
                 self.assertNotIn(text, SOURCE)
                 self.assertNotIn(text, LIVE)
                 self.assertNotIn(text, LIVE_H)
+
+    def test_power_confirmation_is_local_and_exclusive(self):
+        for label,callback in (("Restart","restart_clicked"),("Shut down","shutdown_clicked")):
+            self.assertRegex(SOURCE, rf'button\(settings_panel,"{label}",[^;]*{callback}\)')
+        cancels = [line for line in SOURCE.splitlines() if 'button(' in line and '"Cancel"' in line]
+        self.assertEqual(cancels, ['    power_cancel=button(power_panel,"Cancel",-80,-174,132,power_close);'])
+        dismiss = SOURCE.split("static void power_close(",1)[1].split("\n}",1)[0]
+        self.assertNotRegex(dismiss, r"(claim|device_power_confirmed|live_voice|restart\()")
+        self.assertEqual(SOURCE.count("device_power_confirmed("),1)
+        accept = SOURCE.split("static void power_accept(",1)[1].split("\n}",1)[0]
+        effect = accept.index("device_power_confirmed(")
+        for check in ("power_touch_ready()", "power_touch_accept(&power_touch)",
+                      "tailnet_spike_power_claim()", "network_power_claim()"):
+            self.assertLess(accept.index(check),effect)
+        self.assertNotRegex(accept,r"(live_voice_|bridge_voice_|nvs_)")
 
     def test_bridge_voice_starts_conversation_mode_only(self):
         self.assertEqual(BRIDGE.count("bridge_command(&c->model,BR_CMD_CONVERSE,0)"), 1)

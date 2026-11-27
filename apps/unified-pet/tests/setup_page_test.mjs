@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const html=fs.readFileSync(new URL('../main/setup.html',import.meta.url),'utf8');
+assert.match(html,/<title>Meet Amplifier Assistant<\/title>/);
+assert.match(html,/<h1>Meet Amplifier Assistant\.<\/h1>/);
+assert.match(html,/>Connect Amplifier Assistant<\/button>/);
+assert.doesNotMatch(html,/Tachikoma/);
 const source=html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const nodes=new Map();
 function element(){return {value:'',required:false,disabled:false,textContent:'',hidden:false,selectedOptions:[{dataset:{open:'false'}}],classList:{toggle(name,hidden){this[name]=hidden;},add(name){this[name]=true;}},replaceChildren(){},append(){}};}
@@ -26,6 +30,7 @@ assert.match(node('notice').textContent,/Required API key is missing/);
 assert.equal(node('password').value,'dummy-password');assert.ok(node('key').value);
 postMode='disconnect';await vm.runInContext("$('setup').onsubmit({preventDefault(){}})",context);
 assert.match(node('notice').textContent,/may still be connecting/);assert.equal(node('connect').disabled,true);assert.ok(node('key').value);
+assert.match(node('notice').textContent,/Amplifier Assistant may still be connecting/);
 status={...status,connected:true,key_saved:true,settings_saved:false,configure_generation:1,message:'Saving failed'};
 await vm.runInContext('poll()',context);assert.ok(node('key').value);assert.equal(node('done').classList.hidden,true);
 status={...status,settings_saved:true,message:'Saved'};

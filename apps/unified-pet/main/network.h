@@ -18,6 +18,11 @@ void network_open_setup(void);
 void network_snapshot(network_status_t *out);
 
 void network_close_setup(void);
+/* Foreground and queued network activity may overlap, but not a power claim. */
+bool network_activity_begin(void);
+void network_activity_end(void);
+bool network_power_claim(void);
+void network_power_release(void);
 /* Device-only credential access. Caller wipes the buffer; never expose via HTTP. */
 esp_err_t network_copy_api_key(char *out, size_t capacity);
 /* After network_init; same caller-owned/wiped buffer lifecycle as the OpenAI key. */

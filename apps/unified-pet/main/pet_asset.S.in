@@ -1,7 +1,7 @@
 .section .rodata.pet_asset,"a",@progbits
 .balign 4
-.global _binary_tachikoma_rgb565_start
-_binary_tachikoma_rgb565_start:
-.incbin "@CMAKE_SOURCE_DIR@/assets/generated/tachikoma.rgb565"
-.global _binary_tachikoma_rgb565_end
-_binary_tachikoma_rgb565_end:
+.global _binary_amplifier_assistant_rgb565_start
+_binary_amplifier_assistant_rgb565_start:
+.incbin "@CMAKE_SOURCE_DIR@/assets/generated/amplifier-assistant.rgb565"
+.global _binary_amplifier_assistant_rgb565_end
+_binary_amplifier_assistant_rgb565_end:
