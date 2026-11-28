@@ -21,7 +21,18 @@ enum { KEY_POLL_MS=20, PMIC_POLL_MS=80, PMIC_BUS_MS=20, OFF_GRACE_MS=1000 };
 enum { KEY_BLOCKED=3, KEY_MASK=3 };
 static atomic_uint key_slot;
 static atomic_int confirmed_action, result;
-static atomic_bool shutdown_supported;
+/* Published once after identification. The BSP owns the shared bus for the
+ * lifetime of the app; ESP-IDF serializes synchronous master transactions. */
+static _Atomic(i2c_master_dev_handle_t) source_device;
+
+power_source_t device_power_read_source(void)
+{
+    i2c_master_dev_handle_t dev=atomic_load(&source_device);
+    uint8_t reg=AXP2101_STATUS1, status[2];
+    if(!dev || i2c_master_transmit_receive(dev,&reg,1,status,sizeof(status),PMIC_BUS_MS)!=ESP_OK)
+        return POWER_SOURCE_UNKNOWN;
+    return axp2101_source(status[0],status[1]);
+}
 
 static bool read_reg(void *ctx,uint8_t reg,uint8_t *value)
 {
@@ -46,7 +57,10 @@ static bool pmic_init(power_axp2101_t *pmic)
     i2c_master_dev_handle_t dev;
     if(!bus || i2c_master_bus_add_device(bus,&cfg,&dev)!=ESP_OK) return false;
     *pmic=(power_axp2101_t){.read=read_reg,.write=write_reg,.ctx=dev};
-    if(axp2101_identified(pmic)) return true;
+    if(axp2101_identified(pmic)) {
+        atomic_store(&source_device,dev);
+        return true;
+    }
     i2c_master_bus_rm_device(dev);
     return false;
 }
@@ -72,7 +86,7 @@ power_action_t device_power_take_key(void)
     return atomic_compare_exchange_strong(&key_slot,&slot,slot&~(unsigned)KEY_MASK) ?
         (power_action_t)action : POWER_NONE;
 }
-bool device_power_can_shutdown(void) {return atomic_load(&shutdown_supported);}
+bool device_power_can_shutdown(void) {return atomic_load(&source_device)!=NULL;}
 void device_power_confirmed(power_action_t action)
 {
     atomic_store(&result,POWER_PENDING);
@@ -87,7 +101,6 @@ void device_power_run(void)
     boot_key_init(&boot,!boot_input || !gpio_get_level(BOOT_PIN),now_ms());
     power_axp2101_t pmic;
     bool have_pmic=pmic_init(&pmic);
-    atomic_store(&shutdown_supported,have_pmic);
     bool pwr_input=have_pmic && axp2101_enable_short_key(&pmic);
     if(!pwr_input) ESP_LOGW("pet_power","PWR runtime input unavailable");
     pwr_key_t pwr={.initialized_at=now_ms()};

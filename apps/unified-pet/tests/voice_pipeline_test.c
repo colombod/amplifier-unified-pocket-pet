@@ -30,6 +30,7 @@ static _Thread_local bool partial_unlock,encoded_pending,actor;
 static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed=PTHREAD_COND_INITIALIZER;
 static bool partial_ready,sender_done,encode_ready,action_done,snapshot_ready,snapshot_attempted,snapshot_done;
+static bool stall_overflow;
 static unsigned close_calls,snapshot_reads;
 static bool is_case(const char *name) {return !strcmp(scenario,name);}
 static bool cap_case(void) {return scenario&&!strncmp(scenario,"cap-",4);}
@@ -154,6 +155,7 @@ static size_t xStreamBufferSend(StreamBufferHandle_t p,const void *src,size_t si
         n=479;partial_injections++;if(is_case("partial-race"))partial_unlock=true;
     }
     for(size_t i=0;i<n;i++){p->memory[p->tail]=((const uint8_t *)src)[i];p->tail=(p->tail+1)%p->capacity;}
+    if(is_case("stall") && n<size) signal_flag(&stall_overflow);
     p->used+=n;
     atomic_fetch_add(&accepted_bytes,n);
     if(p->used>atomic_load(&queue_peak))atomic_store(&queue_peak,p->used);
@@ -364,7 +366,12 @@ static int esp_websocket_client_send_text(esp_websocket_client_handle_t p,const 
     for(size_t i=0;i<count;i++)assert(decoded[i]==(uint8_t)((total+i)/960+1));
     if(!strcmp(scenario,"short"))return (int)size-1;
     if(!strcmp(scenario,"hard-failure"))return -1;
-    if(!strcmp(scenario,"stall")&&send_calls==1)vTaskDelay(2300);
+    if(is_case("stall") && send_calls==1) {
+        /* Hold the transport through a real short enqueue, even when host
+         * scheduling slows the fake codec. Keep the original latency floor. */
+        vTaskDelay(2300);
+        wait_flag(&stall_overflow);
+    }
     else if(!strcmp(scenario,"burst")&&send_calls==1)vTaskDelay(1750);
     else if(!strcmp(scenario,"slow"))vTaskDelay(150);
     else if(!strcmp(scenario,"jitter")&&send_calls%5==1)vTaskDelay(280);
@@ -399,7 +406,9 @@ static void *action_thread(void *unused) {
 }
 
 static void test_capture_backpressure(const char *name) {
-    scenario=name;case_ms=!strcmp(name,"slow")?8500:(!strcmp(name,"stall")||!strcmp(name,"burst"))?3000:1400;
+    scenario=name;
+    case_ms=is_case("slow")?18000:is_case("stall")?8000:is_case("burst")?3000:1400;
+    stall_overflow=false;
     reads=0;closes=0;capture_exits=0;playback_exits=0;wire_bytes=0;queue_peak=0;wipes=0;successful_reads=0;accepted_bytes=0;
     send_calls=partial_injections=successful_sends=0;observed_metrics=false;
     partial_ready=sender_done=encode_ready=action_done=snapshot_ready=snapshot_attempted=snapshot_done=false;

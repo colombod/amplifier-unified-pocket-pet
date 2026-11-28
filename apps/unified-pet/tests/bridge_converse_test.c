@@ -357,12 +357,14 @@ static unsigned mic_stamp(unsigned call,uint64_t position){
         /* Three distinct 200 ms PCM words, before/during/after a 2.6 s
          * owner stall. Test the bytes in the outgoing frame, not the queue's
          * idea of what should have arrived. Not a transcription test. */
-        const unsigned at[]={24000,120000,168000};
+        static const unsigned at[]={24000,120000,168000};
         for(unsigned i=0;i<3;i++)
             if(position>=at[i]&&position<at[i]+4800)return 0x5801+i;
     }
     return 0x1000u+(call%4)*0x1000u+(unsigned)(position%0x1000);
 }
+static uint64_t quiet_sent,quiet_played;
+static bool quiet_burst;
 static unsigned opens,closes,inhibits,mic_reads,mic_fail_at,mic_read_attempts,spk_writes,spk_fail_at;
 static void (*audio_close_hook)(void);
 static int64_t spk_busy,mic_off_at,first_audible_at;
@@ -422,6 +424,7 @@ static esp_err_t audio_stream_write(audio_session_t *a,void *p,unsigned n){
     if(spk_fail_at&&++spk_writes==spk_fail_at)return ESP_FAIL;
     int64_t from=now>spk_busy?now:spk_busy,to=from+(int64_t)n*1000000/48000;
     played+=n;
+    if(quiet_burst && ((unsigned char *)p)[0]==1) quiet_played+=n;
     if(mic_off_at&&now>mic_off_at)played_after_off+=n;
     if(live_pcm_audible(p,n)){
         played_audible+=n;if(!first_audible_at)first_audible_at=from;
@@ -886,6 +889,10 @@ static void host_frame(int64_t at){
     if(!handler||!ws_up||!began_sent)return; /* the host streams audio only inside a begun conversation */
     static unsigned char pcm[4800];static char json[7000];size_t n=0;
     for(unsigned i=0;i<sizeof(pcm);i+=2){pcm[i]=audible?0xd0:0;pcm[i+1]=audible?(i%4?0x07:0xf8):0;} /* +-2000 */
+    if(quiet_burst && at>=stall_from && at<stall_to){
+        for(size_t i=0;i<sizeof(pcm);i+=2){pcm[i]=1;pcm[i+1]=0;}
+        quiet_sent+=sizeof(pcm);
+    }
     int at_=snprintf(json,sizeof(json),"{\"type\":\"session.output_audio.delta\",\"delta\":\"");
     assert(!mbedtls_base64_encode((unsigned char*)json+at_,sizeof(json)-(size_t)at_-3,&n,pcm,sizeof(pcm)));
     memcpy(json+at_+n,"\"}",3);
@@ -1490,6 +1497,12 @@ static void lag(void){
     assert(played_audible==host_audible&&host_audible==1000*48);       /* speech is never what gets dropped */
     assert(first_audible_at-run_start<=9700000);
     assert(played<host_silent+host_audible);                           /* only digital silence was skipped */
+}
+static void quiet_backlog(void){
+    fresh();opened();host_audio(100);quiet_burst=true;
+    stall_from=run_start+2000000;stall_to=run_start+4000000;
+    at(8500,EV_MIC_OFF,NULL);call(false);stopped_cleanly(2);
+    assert(quiet_sent==2*48000 && quiet_played==quiet_sent);
 }
 /* The condition of the real calls (sittings 2 and 2b, build 10): the host
  * streams output audio continuously at about 10 frames a second and the owner
@@ -2918,6 +2931,7 @@ int main(int argc,char **argv){
     else if(!strcmp(name,"burst-ok"))burst_ok();
     else if(!strcmp(name,"gappy"))gappy();
     else if(!strcmp(name,"lag"))lag();
+    else if(!strcmp(name,"quiet-backlog"))quiet_backlog();
     else if(!strcmp(name,"retained"))retained();
     else if(!strcmp(name,"late-600"))late_call(name,8,20);
     else if(!strcmp(name,"late-600-heavy"))late_call(name,20,40);

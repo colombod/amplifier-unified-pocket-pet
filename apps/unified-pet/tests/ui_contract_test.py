@@ -51,7 +51,7 @@ class PetUI(unittest.TestCase):
         self.assertIn("audio_test_save_volume()", SOURCE)
         self.assertIn("touch_calibration_begin()", SOURCE)
         self.assertIn("network_open_setup()", SOURCE)
-        self.assertIn("lv_image_set_src(pet,&frames[frame])", SOURCE)
+        self.assertIn("if(lv_image_get_src(pet)!=&frames[frame]) lv_image_set_src(pet,&frames[frame]);", SOURCE)
         self.assertIn("tailnet_spike_snapshot(&tn)", SOURCE)  # Admission intact.
 
     def test_artwork_binding_and_animation_cadence_are_unchanged(self):
@@ -106,7 +106,7 @@ class PetUI(unittest.TestCase):
         self.assertEqual(SOURCE.count("lv_obj_add_event_cb(talk_button,talk_clicked,LV_EVENT_CLICKED,NULL)"), 1)
         for text in ('"Mic off - tap to talk"', '"Mic on - tap to mute"', '"Tap to cancel"', '"Closing..."'):
             self.assertIn(text, SOURCE)
-        self.assertEqual(SOURCE.count("lv_label_set_text(talk_label,"), 1)
+        self.assertEqual(SOURCE.count("update_label(talk_label,"), 1)
 
     def test_reconnecting_keeps_the_mic_on_look_and_only_while_mic_is_on(self):
         # Mic-on look is everything except connecting and closing, so the
@@ -194,8 +194,8 @@ class PetUI(unittest.TestCase):
         self.assertEqual(SOURCE.count("s.ssid"), 1)
         self.assertIn("wifi_name_line(connection,sizeof(connection),s.connected,s.joining,s.ssid);", SOURCE)
         self.assertIn("lv_label_set_long_mode(settings_connection,LV_LABEL_LONG_MODE_DOTS);", SOURCE)
-        self.assertIn('lv_label_set_text_fmt(settings_signal,"Signal %s",signal);', SOURCE)
-        self.assertIn('lv_label_set_text(settings_signal,"");', SOURCE)
+        self.assertIn('if(s.connected) snprintf(text,sizeof(text),"Signal %s",signal);', SOURCE)
+        self.assertIn("else text[0]='\\0';\n    update_label(settings_signal,text);", SOURCE)
         settings = SOURCE.split("settings_panel=lv_obj_create(screen)", 1)[1]
         self.assertNotIn("password", settings)
         rule = (APP / "main/wifi_name.h").read_text(encoding="utf-8")

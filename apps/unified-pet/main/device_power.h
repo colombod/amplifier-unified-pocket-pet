@@ -4,6 +4,11 @@
 typedef enum { POWER_NONE, POWER_RESTART, POWER_OFF } power_action_t;
 typedef enum { POWER_PENDING, POWER_BOOT_HELD, POWER_BOOT_UNAVAILABLE, POWER_UNAVAILABLE, POWER_OFF_UNCONFIRMED } power_result_t;
 
+typedef enum { POWER_SOURCE_UNKNOWN, POWER_SOURCE_USB, POWER_SOURCE_BATTERY } power_source_t;
+/* On-demand sample for a worker (I2C may block). A future UI should render
+ * the worker's snapshot. No background polling or PMIC configuration. */
+power_source_t device_power_read_source(void);
+
 /* LVGL owns modal state; app_main owns GPIO/I2C and executes confirmed actions. */
 void device_power_run(void);
 power_action_t device_power_take_key(void);

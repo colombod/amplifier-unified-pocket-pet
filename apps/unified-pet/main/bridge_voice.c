@@ -48,7 +48,7 @@
 #define BV_FRAMES 32             /* queued host messages; a short network burst must not end the call */
 #define BV_PREBUFFER 15360       /* 320 ms jitter buffer before (re)starting playback */
 #define BV_PRIME_WAIT_US 400000  /* a short burst before a gap is played, not held for the next one */
-#define BV_CATCHUP 24000         /* above 500 ms queued, inaudible chunks are skipped to shed lag */
+#define BV_CATCHUP 24000         /* above 500 ms queued, all-zero chunks are skipped to shed lag */
 #define BV_SPEAKER_HOLD_MS 300   /* microphone is sent as silence this long after audible output */
 #define BV_NOTICE_US 4000000     /* how long a host notice replaces the status line */
 #define BV_CLEANUP_US 15000000   /* never wait a whole conversation deadline for release proof */
@@ -494,10 +494,11 @@ static void play_task(void *arg){
         if(epoch!=atomic_load(&c->audio_epoch)||!atomic_load(&c->play_gate)||stopping(c)||
            atomic_load(&c->failed)||esp_timer_get_time()>=c->work)continue;
         if(converse){
-            if(live_pcm_audible(pcm,n))
+            unsigned peak=live_pcm_peak(pcm,n);
+            if(peak>=LIVE_AUDIBLE_PEAK)
                 atomic_store(&c->speaker_until,(uint32_t)(esp_timer_get_time()/1000)+BV_SPEAKER_HOLD_MS);
             /* Only digital silence is ever skipped, and only while behind. */
-            else if(xStreamBufferBytesAvailable(c->playback)>BV_CATCHUP){
+            else if(peak==0 && xStreamBufferBytesAvailable(c->playback)>BV_CATCHUP){
 #if defined(PET_PRIVATE_MIC_DIAG)
                 int i=bv_diag_bin(c->mic_start,esp_timer_get_time(),&c->play_clipped);
                 if(i>=0)c->play_bins[i].play_skipped+=n;

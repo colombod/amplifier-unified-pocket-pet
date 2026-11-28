@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "device_power.h"
 
 /* Waveshare ESP32-S3-Touch-AMOLED-1.8 @ 01fd3200370a4417b257e8a4c185a04ef931342a:
  * examples/arduino-v2/libraries/Mylibrary/pin_config.h selects AXP2101.
@@ -9,9 +10,28 @@
  * No voltage, charging, wake, long-press timing or recovery configuration. */
 enum {
     AXP2101_ADDRESS=0x34, AXP2101_ID_REG=0x03, AXP2101_ID=0x4a,
+    AXP2101_STATUS1=0x00, AXP2101_VBUS_GOOD=0x20, AXP2101_BAT_PRESENT=0x08,
+    AXP2101_CURRENT_MASK=0x60,
+    AXP2101_STANDBY=0x00, AXP2101_CHARGING=0x20, AXP2101_DISCHARGING=0x40,
     AXP2101_COMMON=0x10, AXP2101_OFF=0x01, AXP2101_RESET=0x02,
     AXP2101_IRQ2_ENABLE=0x41, AXP2101_IRQ2_STATUS=0x49, AXP2101_KEY_SHORT=0x08,
 };
+
+/* STATUS1 and STATUS2 are adjacent. A battery can remain connected while
+ * USB supplies the device. During a transition, conflicting flags cannot
+ * establish a single source. REG01[3] is input voltage regulation status
+ * in the X-Powers datasheet, so it cannot establish battery power. */
+static inline power_source_t axp2101_source(uint8_t status1,uint8_t status2)
+{
+    bool good=(status1 & AXP2101_VBUS_GOOD)!=0;
+    bool battery=(status1 & AXP2101_BAT_PRESENT)!=0;
+    uint8_t current=status2 & AXP2101_CURRENT_MASK;
+    if(good && (current==AXP2101_STANDBY || (battery && current==AXP2101_CHARGING)))
+        return POWER_SOURCE_USB;
+    if(!good && battery && current==AXP2101_DISCHARGING)
+        return POWER_SOURCE_BATTERY;
+    return POWER_SOURCE_UNKNOWN;
+}
 
 typedef struct {
     bool (*read)(void *ctx,uint8_t reg,uint8_t *value);

@@ -8,7 +8,8 @@ static inline unsigned live_pcm_peak(const void *data,size_t length) {
  for(size_t i=0;i+1<length;i+=2){int value=(int16_t)((unsigned)bytes[i]|((unsigned)bytes[i+1]<<8));unsigned amplitude=value<0?-value:value;if(amplitude>peak)peak=amplitude;}
  return peak;
 }
-static inline bool live_pcm_audible(const void *data,size_t length) {return live_pcm_peak(data,length)>=250;}
+enum { LIVE_AUDIBLE_PEAK=250 };
+static inline bool live_pcm_audible(const void *data,size_t length) {return live_pcm_peak(data,length)>=LIVE_AUDIBLE_PEAK;}
 
 /* Bounds both TCP-buffer splits and actual RFC6455 continuation frames.
  * Control frames may be interleaved without changing the JSON message. */

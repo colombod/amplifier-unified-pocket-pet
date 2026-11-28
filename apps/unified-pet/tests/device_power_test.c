@@ -149,6 +149,14 @@ static void test_gate(void)
 
 int main(void)
 {
+    assert(axp2101_source(0x20,0x00)==POWER_SOURCE_USB); /* USB, no battery attached */
+    assert(axp2101_source(0x28,0x20)==POWER_SOURCE_USB); /* USB with charging cell */
+    assert(axp2101_source(0x08,0x40)==POWER_SOURCE_BATTERY);
+    assert(axp2101_source(0x08,0x48)==POWER_SOURCE_BATTERY);
+    assert(axp2101_source(0x20,0x08)==POWER_SOURCE_USB);
+    assert(axp2101_source(0x28,0x40)==POWER_SOURCE_UNKNOWN); /* conflicting supplies */
+    assert(axp2101_source(0x00,0x48)==POWER_SOURCE_UNKNOWN); /* absent cell */
+    assert(axp2101_source(0x20,0xe0)==POWER_SOURCE_UNKNOWN); /* reserved current */
     test_boot();
     test_pwr();
     test_confirmation();

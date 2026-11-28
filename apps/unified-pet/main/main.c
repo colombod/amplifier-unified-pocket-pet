@@ -333,6 +333,12 @@ static void power_refresh(lv_timer_t *timer) {
     if(request!=POWER_NONE && diag_input && lv_indev_get_state(diag_input)==LV_INDEV_STATE_RELEASED)
         power_request(request);
 }
+/* Updating an LVGL label frees and reallocates its text, even if it is
+ * identical. Use this for ordinary labels whose text LVGL does not elide. */
+static void update_label(lv_obj_t *object,const char *text) {
+    const char *shown=lv_label_get_text(object);
+    if(!shown || strcmp(shown,text)!=0) lv_label_set_text(object,text);
+}
 static void refresh(lv_timer_t *timer) {
     diag_mark(&input_diag.loop_in);
     audio_test_reap_finished();live_voice_reap_finished();
@@ -344,7 +350,7 @@ static void refresh(lv_timer_t *timer) {
     bool closing=releasing||(voice.active&&voice.state==LIVE_CLOSING);
     bool connecting=voice.active&&voice.state==LIVE_CONNECTING;
     bool mic_on=voice.active&&!closing&&!connecting;
-    lv_label_set_text(talk_label,closing?"Closing...":connecting?"Tap to cancel":mic_on?"Mic on - tap to mute":"Mic off - tap to talk");
+    update_label(talk_label,closing?"Closing...":connecting?"Tap to cancel":mic_on?"Mic on - tap to mute":"Mic off - tap to talk");
     /* Same button and microphone throughout: lit when on, struck through when off. */
     static int mic_shown=-1;
     if(mic_shown!=(int)mic_on){
@@ -357,30 +363,44 @@ static void refresh(lv_timer_t *timer) {
     else lv_obj_remove_state(settings_gear,LV_STATE_DISABLED);
     if(releasing||tailnet_busy||(a.busy && !voice.active))lv_obj_add_state(talk_button,LV_STATE_DISABLED);
     else lv_obj_remove_state(talk_button,LV_STATE_DISABLED);
-    lv_label_set_text_fmt(volume_label,"Volume %d%%",a.volume);
+    char text[96];
+    snprintf(text,sizeof(text),"Volume %d%%",a.volume);
+    update_label(volume_label,text);
     if(a.busy||tailnet_busy)lv_obj_add_state(audio_back,LV_STATE_DISABLED);
     else lv_obj_remove_state(audio_back,LV_STATE_DISABLED);
     network_status_t s;network_snapshot(&s);
     const char *signal=s.rssi>=-55?"excellent":s.rssi>=-67?"good":s.rssi>=-75?"fair":"weak";
     /* The network's name only while associated with it (wifi_name.h). */
     char connection[40];wifi_name_line(connection,sizeof(connection),s.connected,s.joining,s.ssid);
-    lv_label_set_text(settings_connection,connection);
-    if(s.connected){lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Connected");lv_label_set_text_fmt(settings_signal,"Signal %s",signal);}
-    else{lv_label_set_text(wifi_badge,LV_SYMBOL_WIFI "  Disconnected");lv_label_set_text(settings_signal,"");}
-    lv_obj_set_style_text_color(wifi_badge,lv_color_hex(s.connected?0x86efac:0xfbbf24),0);
-    lv_label_set_text_fmt(settings_key,"%s\nVoice: %s",
+    /* LV_LABEL_LONG_MODE_DOTS can edit the label's displayed text in place. */
+    static char last_connection[sizeof(connection)];
+    if(!lv_label_get_text(settings_connection) || strcmp(connection,last_connection)!=0) {
+        lv_label_set_text(settings_connection,connection);
+        strlcpy(last_connection,connection,sizeof(last_connection));
+    }
+    static int shown_connected=-1;
+    if(shown_connected!=(int)s.connected) {
+        shown_connected=s.connected;
+        lv_label_set_text_static(wifi_badge,s.connected?LV_SYMBOL_WIFI "  Connected":LV_SYMBOL_WIFI "  Disconnected");
+        lv_obj_set_style_text_color(wifi_badge,lv_color_hex(s.connected?0x86efac:0xfbbf24),0);
+    }
+    if(s.connected) snprintf(text,sizeof(text),"Signal %s",signal);
+    else text[0]='\0';
+    update_label(settings_signal,text);
+    snprintf(text,sizeof(text),"%s\nVoice: %s",
         !s.bridge_valid?"Bridge settings invalid":s.bridge_enabled?"Host bridge configured":s.key_saved?"Standalone OpenAI key saved":"Configure bridge or standalone key",
         voice.active?"mic on":"mic off");
+    update_label(settings_key,text);
     bool visible=s.setup&&panel_requested;
     if(visible!=was_setup) {
         was_setup=visible;
         if(visible){lv_obj_clear_flag(setup_panel,LV_OBJ_FLAG_HIDDEN);}
         else lv_obj_add_flag(setup_panel,LV_OBJ_FLAG_HIDDEN);
     }
-    lv_label_set_text(subtitle,(voice.active || voice.state==LIVE_ERROR || s.connected)?voice.message:s.joining?"Connecting Wi-Fi...":"Let's get connected");
+    update_label(subtitle,(voice.active || voice.state==LIVE_ERROR || s.connected)?voice.message:s.joining?"Connecting Wi-Fi...":"Let's get connected");
     if(s.setup) {
         char details[120];snprintf(details,sizeof(details),"%s\nPassword: %s\nThen open 192.168.4.1",s.ap_ssid,s.ap_password);
-        lv_label_set_text(wifi_details,details);lv_label_set_text(setup_message,s.joining?"Connecting to your Wi-Fi...":s.connected&&s.settings_saved?"Saved. Tap Done.":s.connected?"Not saved. Check your phone.":"Finish setup on your phone");
+        update_label(wifi_details,details);update_label(setup_message,s.joining?"Connecting to your Wi-Fi...":s.connected&&s.settings_saved?"Saved. Tap Done.":s.connected?"Not saved. Check your phone.":"Finish setup on your phone");
         char payload[160];snprintf(payload,sizeof(payload),"WIFI:T:WPA;S:%s;P:%s;;",s.ap_ssid,s.ap_password);
         static char last_payload[160];
         if(strcmp(last_payload,payload)) {lv_qrcode_update(qr,payload,strlen(payload));strlcpy(last_payload,payload,sizeof(last_payload));}
@@ -389,7 +409,8 @@ static void refresh(lv_timer_t *timer) {
     if(wave_ticks){frame=22+(24-wave_ticks)/6;--wave_ticks;}
     else if(s.joining || voice.state==LIVE_CONNECTING || voice.state==LIVE_THINKING || voice.state==LIVE_RECONNECTING) frame=45+(tick_count/2)%6;
     else frame=(tick_count/3)%6;
-    lv_image_set_src(pet,&frames[frame]);tick_count++;
+    if(lv_image_get_src(pet)!=&frames[frame]) lv_image_set_src(pet,&frames[frame]);
+    tick_count++;
     diag_visibility(lv_obj_has_flag(setup_panel,LV_OBJ_FLAG_HIDDEN),panel_requested);
     diag_mark(&input_diag.loop_out);
 }
