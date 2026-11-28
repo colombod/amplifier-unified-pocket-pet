@@ -19,6 +19,10 @@ project, not an official or endorsed Amplifier Unified product.
 
 The LAN preview is usable with **one selected chat and one request at a time**. Wait for the spoken answer before asking another question. Follow-ups are not queued; during a slow request the pet may speak once while sending and once while waiting for the reply. **Mic Off** ends the audio, not work Unified already accepted. There is no background playback, remote mic reopening, off-home device access, or on-device workspace switching in this release.
 
+## Phone and USB setup
+
+Open [Pocket Pet setup](https://colombod.github.io/amplifier-unified-pocket-pet/) for the phone setup guide, paired USB settings and a backup-first USB firmware updater. Desktop Chrome or Edge and a USB data cable are required for the browser USB features. The updater accepts the known 0.3.21-amplifier application on a provisioned Waveshare AMOLED 1.8 V2. The 0.3.22-setup-preview firmware adds paired USB settings. Phone setup works with either version.
+
 ## Install, deploy, and configure
 
 **You’ll need:** a **Waveshare ESP32-S3-Touch-AMOLED-1.8 V2** (not the LCD-1.83 or earlier AMOLED version), a USB-C data cable, a phone, and a 2.4 GHz LAN. The gateway needs a Linux host with stock Amplifier Unified, a TLS certificate the pet trusts, and your own OpenAI API key with `gpt-live-1` access. The live voice path was verified with stock Unified `0.119.1`; run the guide’s compatibility check before pairing a different release.

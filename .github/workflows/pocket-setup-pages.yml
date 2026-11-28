@@ -1,0 +1,39 @@
+name: Pocket Pet setup on Pages
+on:
+  push:
+    branches: [pages/setup-preview]
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: pocket-setup-pages
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify the published setup preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release download v0.3.22-setup-preview --repo "$REPO" --pattern pocket-setup-site.zip
+          echo '486a357ce6311c533c4cc5f51dfa30c1dae5f8b779b2f016ee2d29446d714dae  pocket-setup-site.zip' | sha256sum --check
+          unzip -q pocket-setup-site.zip -d site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.site.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: site
+        uses: actions/deploy-pages@v4

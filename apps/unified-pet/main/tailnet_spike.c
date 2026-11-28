@@ -251,14 +251,24 @@ static void report(esp_err_t command_error) {
         (unsigned long)s.stage_ms[5],(unsigned long)s.stage_ms[6],(unsigned long)s.stage_ms[7],(unsigned long)s.stage_ms[8],(unsigned long)s.stage_ms[9]);
     if(n>0&&(size_t)n<sizeof(line))usb_serial_jtag_write_bytes(line,n,pdMS_TO_TICKS(100));
 }
+static void setup_usb_write(const char *bytes,size_t size) {
+    usb_serial_jtag_write_bytes(bytes,size,pdMS_TO_TICKS(500));
+}
 static void console(void *arg) {
-    (void)arg;char line[32];size_t n=0;bool discard=false;
+    (void)arg;static char line[1680];size_t n=0;bool discard=false;
+    TickType_t last=0;
     for(;;) {
-        char c;if(usb_serial_jtag_read_bytes(&c,1,pdMS_TO_TICKS(100))!=1)continue;
+        char c;
+        if(usb_serial_jtag_read_bytes(&c,1,pdMS_TO_TICKS(100))!=1) {
+            if(n&&xTaskGetTickCount()-last>=pdMS_TO_TICKS(5000)) {memset(line,0,n);n=0;discard=true;}
+            continue;
+        }
+        last=xTaskGetTickCount();
         if(c=='\r'||c=='\n') {
             line[n]=0;
             if(!discard) {
-                if(!strcmp(line,"tailnet start"))report(tailnet_spike_start());
+                if(!strncmp(line,"PS1 ",4))network_usb_setup(line+4,setup_usb_write);
+                else if(!strcmp(line,"tailnet start"))report(tailnet_spike_start());
                 else if(!strcmp(line,"tailnet cancel")){tailnet_spike_cancel();report(ESP_OK);}
                 else if(!strcmp(line,"tailnet status"))report(ESP_OK);
 #if defined(PET_PRIVATE_MIC_DIAG)
@@ -342,8 +352,8 @@ static void console(void *arg) {
                 }
 #endif
             }
-            memset(line,0,sizeof(line));n=0;discard=false;
-        } else if((unsigned char)c<32||(unsigned char)c>126||n>=sizeof(line)-1)discard=true;
+            memset(line,0,n);n=0;discard=false;
+        } else if((unsigned char)c<32||(unsigned char)c>126||n>=sizeof(line)-1||(n>=31&&memcmp(line,"PS1 ",4)))discard=true;
         else if(!discard)line[n++]=c;
     }
 }
@@ -357,6 +367,6 @@ esp_err_t tailnet_spike_init(void) {
         usb_serial_jtag_driver_config_t cfg={.rx_buffer_size=256,.tx_buffer_size=2048};
         esp_err_t e=usb_serial_jtag_driver_install(&cfg);if(e!=ESP_OK)return e;
     }
-    if(xTaskCreate(console,"tailnet_usb",4096,NULL,2,NULL)!=pdPASS)return ESP_ERR_NO_MEM;
+    if(xTaskCreate(console,"tailnet_usb",6144,NULL,2,NULL)!=pdPASS)return ESP_ERR_NO_MEM;
     return ESP_OK;
 }

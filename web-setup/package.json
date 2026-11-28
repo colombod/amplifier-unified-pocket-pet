@@ -1,0 +1,17 @@
+{
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "esbuild": "0.28.2",
+    "esptool-js": "0.7.1"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.1"
+  },
+  "name": "pocket-pet-setup",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test.mjs"
+  }
+}

@@ -35,3 +35,5 @@ esp_err_t network_copy_bridge_token(char *out,size_t capacity);
  * Timeout is NOT an acknowledgment; caller must not activate a tunnel then. */
 esp_err_t network_pause_setup(uint32_t timeout_ms);
 esp_err_t network_resume_setup(uint32_t timeout_ms);
+
+void network_usb_setup(char *frame,void (*send)(const char *,size_t));

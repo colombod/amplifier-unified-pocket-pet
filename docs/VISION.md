@@ -49,9 +49,7 @@ spoken reply. An update should leave the pet they already set up intact.
 The user owns product direction, consequential choices and explicit limits.
 The delivery manager owns design, sequencing, implementation, ordinary repairs,
 integration and evidence within that authority. Routine work is not returned to
-the user for supervision. No wakeword, always-on recording, offline intelligence,
-numeric battery-life promise or new spending/deployment permission is implied.
-Those remain separate choices where genuinely needed.
+the user for supervision. The owner can opt into a configurable local wake phrase. Manual microphone control and touch-to-talk remain available. The conversation and pending-question behavior is defined in the [delivery contract](CONTRACT.md). Battery-life targets, offline intelligence and new spending remain separate decisions.
 
 This follows the concise narrative-vision convention of
 [Microsoft Amplifier Converge](https://github.com/microsoft/amplifier-converge/blob/9c785283c6ef16782ad7847e3ef3ddc8ac7e6462/docs/writing-guide.md).

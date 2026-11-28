@@ -39,6 +39,7 @@ for name in tailnet_storage tailnet_policy; do
     "$IDF_PATH/components/json/cJSON/cJSON.c" "$PET_REPO/components/tailtiny/src/x25519.c" -o "$out/$name"
   "$out/$name"
 done
+sh tests/run_usb_setup.sh "$out/usb-setup"
 sh tests/run_storage.sh "$out/storage"
 sh tests/run_wifi_name.sh "$out/wifi-name"
 for name in setup_bridge bridge_protocol; do

@@ -43,6 +43,23 @@ See the [vision](VISION.md) and [architecture](ARCHITECTURE.md).
   product. Versioned evidence and unresolved checks belong in the
   [implementation brief](../PROJECT-BRIEF.md#delivery-sequence) and release notes.
 
+## Wake phrases and conversation lifetime
+
+The owner can opt into a configurable, locally recognized wake phrase and still tap to talk. Mic Off suppresses wake detection immediately. Enabling local detection must disclose that the microphone samples locally while armed. Local samples cannot start streaming until a selected phrase is recognized. Saving settings, network recovery, repeated detections, and a question arriving from Unified cannot start a new call.
+
+| Event | Required experience |
+| --- | --- |
+| A wake or tap occurs offline, during setup, or while audio is busy | Keep the existing screen responsive and explain availability. Never enqueue a delayed start. |
+| A matching wake arrives while armed and ready | Start one normal conversation, show the active microphone, and suppress further wakes until the call closes. A wake grants audio admission only. Existing send and approval rules still apply. |
+| A human speaks, then Unified takes minutes to respond | Apply the short silence timeout only when waiting for human speech. Keep the accepted request associated with its exact destination and request ID. Avoid duplicate submissions after a disconnect. |
+| A response is spoken | Suppress wake recognition during speaker output. Open a fresh human-response interval after playback drains. Stop and the absolute call limit retain priority. |
+| Long silence or the call cap expires | Close network audio and release the codec. Return to local phrase detection only if still enabled. An explicit user mute persists until the owner re-enables listening or starts a call. |
+| A gateway question arrives while asleep, muted or disconnected | Keep a durable pending question with workspace, conversation, question ID and revision. Notify according to the owner's notification policy. Opening the microphone requires a new user wake or tap. |
+| Several questions arrive, including a replay or a newer revision | Deduplicate by identity and revision, surface the owning conversation and let the user select. Validate that the question is still open and that answering is authorized. A late answer for another request never preempts current playback. |
+| A session ends with accepted or uncertain work | Preserve the gateway journal and pending attention. Close audio without cancelling the work. Do not replay an uncertain answer. |
+
+The shipped LAN gateway uses a 90-second human-turn interval and a 600-second overall limit. Its host tests cover exact replies after 150 and 180 seconds. The setup preview ships phone and USB provisioning. Its microphone still starts by touch. On-device phrase recognition and background delivery of durable questions require separate implementation and acoustic and end-to-end qualification. The [Lean model](../apps/unified-pet/tests/proofs/Wake.lean) checks the proposed timing, phrase and mute transitions. It assumes authenticated, correctly correlated events. It models a pending question as a Boolean and does not establish transport, deduplication, wake accuracy, physical mute or battery life.
+
 ## Check and change
 
 Check the actual delivered journey, including recovery and user-visible
@@ -52,7 +69,7 @@ one increment into approval of the whole product. Record the agreed wording and
 notify affected owners when a consequential promise changes. Ordinary
 implementation choices within the agreement do not need a separate process.
 
-**Left open:** wakewords, always-on capture, barge-in, notification and
+**Left open:** wake model provisioning, barge-in, notification and
 quiet-hours policy, and numeric latency or battery targets. Media adaptation
 and how to expose a native Unified overview remain implementation choices
 within the [architecture boundaries](ARCHITECTURE.md).

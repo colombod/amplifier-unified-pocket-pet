@@ -4,6 +4,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+lean -DwarningAsError=true tests/proofs/Wake.lean
 lean -DwarningAsError=true --run tests/proofs/Lan.lean > "$work/lean-table"
 PYTHONDONTWRITEBYTECODE=1 python3 - "$work/firmware-policy.inc" <<'PYCODE'
 from pathlib import Path

@@ -195,8 +195,7 @@ static esp_err_t page(httpd_req_t *req) {
     }
     return httpd_resp_send(req,(const char*)setup_html_start,setup_html_end-setup_html_start);
 }
-static esp_err_t status_get(httpd_req_t *req) {
-    if(!ap_request(req)) return ESP_OK;
+static cJSON *setup_status(bool phone) {
     network_status_t s; network_snapshot(&s);
     cJSON *o=cJSON_CreateObject();
     cJSON_AddStringToObject(o,"firmware_version",esp_app_get_description()->version);
@@ -209,7 +208,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     cJSON_AddNumberToObject(o,"rssi",s.rssi);
     cJSON_AddStringToObject(o,"ssid",s.ssid);
     cJSON_AddStringToObject(o,"message",s.message);
-    cJSON_AddStringToObject(o,"token",token);
+    if(phone)cJSON_AddStringToObject(o,"token",token);
     setup_unified_target_t target;
     esp_err_t target_err=network_copy_unified_target(&target);
     if(target_err==ESP_OK||target_err==ESP_ERR_NVS_NOT_FOUND) {
@@ -228,7 +227,11 @@ static esp_err_t status_get(httpd_req_t *req) {
         cJSON_AddStringToObject(o,"bridge_fqdn",bridge.fqdn);
         cJSON_AddNumberToObject(o,"bridge_port",bridge.port);
     }
-    return json_reply(req,o);
+    return o;
+}
+static esp_err_t status_get(httpd_req_t *req) {
+    if(!ap_request(req))return ESP_OK;
+    return json_reply(req,setup_status(true));
 }
 static esp_err_t scan_get(httpd_req_t *req) {
     if(!ap_request(req)) return ESP_OK;
@@ -255,6 +258,98 @@ static esp_err_t scan_get(httpd_req_t *req) {
     }
     free(records); return json_reply(req,list);
 }
+/* HTTP and paired USB share validation, persistence and acknowledgement semantics. */
+typedef struct {
+    cJSON *value;
+    httpd_err_code_t code;
+    const char *error;
+} setup_reply_t;
+static atomic_flag setup_writer=ATOMIC_FLAG_INIT;
+static esp_err_t setup_error(setup_reply_t *out,httpd_err_code_t code,const char *message) {
+    out->code=code;out->error=message;return ESP_FAIL;
+}
+static esp_err_t setup_result(setup_reply_t *out,cJSON *value) {
+    if(!value)return setup_error(out,HTTPD_500_INTERNAL_SERVER_ERROR,"Out of memory");
+    out->value=value;return ESP_OK;
+}
+static esp_err_t apply_settings(setup_reply_t *reply_out,cJSON *json) {
+    if(!json)return setup_error(reply_out,HTTPD_400_BAD_REQUEST,"Invalid setup JSON");
+    cJSON *action=cJSON_GetObjectItemCaseSensitive(json,"action");
+    unsigned actions=0;
+    for(cJSON *i=json->child;i;i=i->next)if(i->string&&!strcmp(i->string,"action"))actions++;
+    if(actions>1){cJSON_Delete(json);return setup_error(reply_out,HTTPD_400_BAD_REQUEST,"Duplicate setup action");}
+    if(action) {
+        if(cJSON_IsString(action)&&!strcmp(action->valuestring,"bridge_gateway")) {
+            if(xSemaphoreTake(state_lock,pdMS_TO_TICKS(500))!=pdTRUE) {
+                cJSON_Delete(json);return setup_error(reply_out,HTTPD_500_INTERNAL_SERVER_ERROR,"Setup busy");
+            }
+            bool saved=state.bridge_token_saved;
+            esp_err_t e=setup_bridge_save(storage.own,json,&saved);
+            refresh_bridge_mode(); /* also fences unresolved rollback, even when save failed */
+            if(e==ESP_OK) {
+                if(!state.bridge_valid)e=ESP_ERR_INVALID_STATE;
+                saved=state.bridge_token_saved;
+            }
+            xSemaphoreGive(state_lock);cJSON_Delete(json);
+            if(e!=ESP_OK)return setup_error(reply_out,e==ESP_ERR_INVALID_ARG?HTTPD_400_BAD_REQUEST:HTTPD_500_INTERNAL_SERVER_ERROR,"Bridge save not confirmed");
+            cJSON *reply=cJSON_CreateObject();
+            cJSON_AddBoolToObject(reply,"bridge_saved",true);cJSON_AddBoolToObject(reply,"bridge_token_saved",saved);
+            return setup_result(reply_out,reply);
+        }
+        if(cJSON_IsString(action)&&!strcmp(action->valuestring,"unified_target")) {
+            esp_err_t e=setup_unified_save(storage.own,json);cJSON_Delete(json);
+            if(e!=ESP_OK)return setup_error(reply_out,e==ESP_ERR_INVALID_ARG?HTTPD_400_BAD_REQUEST:HTTPD_500_INTERNAL_SERVER_ERROR,"Unified target save not confirmed");
+            cJSON *reply=cJSON_CreateObject();cJSON_AddBoolToObject(reply,"unified_target_saved",true);
+            return setup_result(reply_out,reply);
+        }
+        if(!cJSON_IsString(action) || strcmp(action->valuestring,"tailscale_key")) {
+            cJSON_Delete(json);
+            return setup_error(reply_out,HTTPD_400_BAD_REQUEST,"Unknown setup action");
+        }
+        /* Synchronous key-only persistence: no station/OpenAI prerequisites,
+         * queue command, reconnect, or inference from a previous Wi-Fi save. */
+        network_status_t current;network_snapshot(&current);
+        bool saved=current.tailscale_key_saved;
+        esp_err_t err=pet_store_tailscale_save(&storage,json,&saved);
+        cJSON_Delete(json);
+        if(err==ESP_ERR_INVALID_ARG)
+            return setup_error(reply_out,HTTPD_400_BAD_REQUEST,"Tailscale auth key must be a string of at most 255 bytes");
+        if(err!=ESP_OK)
+            return setup_error(reply_out,HTTPD_500_INTERNAL_SERVER_ERROR,"Tailscale key save not confirmed. Keep setup open and retry.");
+        xSemaphoreTake(state_lock,portMAX_DELAY);state.tailscale_key_saved=saved;xSemaphoreGive(state_lock);
+        cJSON *reply=cJSON_CreateObject();
+        cJSON_AddBoolToObject(reply,"tailscale_key_saved",saved);
+        return setup_result(reply_out,reply);
+    }
+    cJSON *ssid=cJSON_GetObjectItemCaseSensitive(json,"ssid"), *pass=cJSON_GetObjectItemCaseSensitive(json,"password"), *key=cJSON_GetObjectItemCaseSensitive(json,"key");
+    network_status_t saved; network_snapshot(&saved);
+    bool valid=cJSON_IsString(ssid)&&cJSON_IsString(pass)&&cJSON_IsString(key);
+    valid=valid && strlen(ssid->valuestring)>0 && strlen(ssid->valuestring)<=32 &&
+        strlen(pass->valuestring)<=63 && (!pass->valuestring[0] || strlen(pass->valuestring)>=8) &&
+        strlen(key->valuestring)<256 && ((!key->valuestring[0] && (saved.key_saved||saved.bridge_enabled)) ||
+        (strlen(key->valuestring)>=20 && !strncmp(key->valuestring,"sk-",3) && !strpbrk(key->valuestring," \t\r\n")));
+    if(!valid) { cJSON_Delete(json); return setup_error(reply_out,HTTPD_400_BAD_REQUEST,"Check network name, password (8–63 bytes), and required OpenAI API key"); }
+    network_status_t s; network_snapshot(&s);
+    if(s.joining) { cJSON_Delete(json); return setup_error(reply_out,HTTPD_400_BAD_REQUEST,"Already connecting"); }
+    command_t cmd={.kind=1};
+    strlcpy(cmd.ssid,ssid->valuestring,sizeof(cmd.ssid)); strlcpy(cmd.password,pass->valuestring,sizeof(cmd.password)); strlcpy(cmd.key,key->valuestring,sizeof(cmd.key));
+    /* Wipe the parsed secret strings before returning their allocations. */
+    memset(pass->valuestring,0,strlen(pass->valuestring)); memset(key->valuestring,0,strlen(key->valuestring)); cJSON_Delete(json);
+    xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=true;state.settings_saved=false;state.configure_generation++;xSemaphoreGive(state_lock);
+    message("Settings received. Connecting to Wi-Fi...");
+    ESP_LOGI("pet_net","Configuration request accepted");
+    BaseType_t queued=enqueue(&cmd); memset(&cmd,0,sizeof(cmd));
+    if(queued!=pdTRUE) {xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=false;xSemaphoreGive(state_lock);}
+    if(queued!=pdTRUE) return setup_error(reply_out,HTTPD_500_INTERNAL_SERVER_ERROR,"Busy; try again");
+    return setup_result(reply_out,cJSON_CreateObject());
+}
+static void submit_settings(setup_reply_t *out,cJSON *json) {
+    if(atomic_flag_test_and_set(&setup_writer)) {
+        cJSON_Delete(json);setup_error(out,HTTPD_500_INTERNAL_SERVER_ERROR,"Another save is in progress");return;
+    }
+    apply_settings(out,json);
+    atomic_flag_clear(&setup_writer);
+}
 static esp_err_t configure(httpd_req_t *req) {
     if(!mutation_allowed(req)) return ESP_OK;
     if(req->content_len<=0 || req->content_len>1600)
@@ -266,75 +361,42 @@ static esp_err_t configure(httpd_req_t *req) {
         if(n<=0) { free(body); return ESP_FAIL; } have+=n;
     }
     cJSON *json=setup_parse_json(body,have); memset(body,0,have); free(body);
-    if(!json)return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Invalid setup JSON");
-    cJSON *action=cJSON_GetObjectItemCaseSensitive(json,"action");
-    unsigned actions=0;
-    for(cJSON *i=json->child;i;i=i->next)if(i->string&&!strcmp(i->string,"action"))actions++;
-    if(actions>1){cJSON_Delete(json);return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Duplicate setup action");}
-    if(action) {
-        if(cJSON_IsString(action)&&!strcmp(action->valuestring,"bridge_gateway")) {
-            if(xSemaphoreTake(state_lock,pdMS_TO_TICKS(500))!=pdTRUE) {
-                cJSON_Delete(json);return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Setup busy");
-            }
-            bool saved=state.bridge_token_saved;
-            esp_err_t e=setup_bridge_save(storage.own,json,&saved);
-            refresh_bridge_mode(); /* also fences unresolved rollback, even when save failed */
-            if(e==ESP_OK) {
-                if(!state.bridge_valid)e=ESP_ERR_INVALID_STATE;
-                saved=state.bridge_token_saved;
-            }
-            xSemaphoreGive(state_lock);cJSON_Delete(json);
-            if(e!=ESP_OK)return httpd_resp_send_err(req,e==ESP_ERR_INVALID_ARG?HTTPD_400_BAD_REQUEST:HTTPD_500_INTERNAL_SERVER_ERROR,"Bridge save not confirmed");
-            cJSON *reply=cJSON_CreateObject();
-            cJSON_AddBoolToObject(reply,"bridge_saved",true);cJSON_AddBoolToObject(reply,"bridge_token_saved",saved);
-            return json_reply(req,reply);
-        }
-        if(cJSON_IsString(action)&&!strcmp(action->valuestring,"unified_target")) {
-            esp_err_t e=setup_unified_save(storage.own,json);cJSON_Delete(json);
-            if(e!=ESP_OK)return httpd_resp_send_err(req,e==ESP_ERR_INVALID_ARG?HTTPD_400_BAD_REQUEST:HTTPD_500_INTERNAL_SERVER_ERROR,"Unified target save not confirmed");
-            cJSON *reply=cJSON_CreateObject();cJSON_AddBoolToObject(reply,"unified_target_saved",true);
-            return json_reply(req,reply);
-        }
-        if(!cJSON_IsString(action) || strcmp(action->valuestring,"tailscale_key")) {
-            cJSON_Delete(json);
-            return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Unknown setup action");
-        }
-        /* Synchronous key-only persistence: no station/OpenAI prerequisites,
-         * queue command, reconnect, or inference from a previous Wi-Fi save. */
-        network_status_t current;network_snapshot(&current);
-        bool saved=current.tailscale_key_saved;
-        esp_err_t err=pet_store_tailscale_save(&storage,json,&saved);
-        cJSON_Delete(json);
-        if(err==ESP_ERR_INVALID_ARG)
-            return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Tailscale auth key must be a string of at most 255 bytes");
-        if(err!=ESP_OK)
-            return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Tailscale key save not confirmed. Keep setup open and retry.");
-        xSemaphoreTake(state_lock,portMAX_DELAY);state.tailscale_key_saved=saved;xSemaphoreGive(state_lock);
-        cJSON *reply=cJSON_CreateObject();
-        cJSON_AddBoolToObject(reply,"tailscale_key_saved",saved);
-        return json_reply(req,reply);
+    setup_reply_t out={0};
+    submit_settings(&out,json);
+    if(out.error)return httpd_resp_send_err(req,out.code,out.error);
+    return json_reply(req,out.value);
+}
+void network_usb_setup(char *frame,void (*send)(const char *,size_t)) {
+    /* PS1 <8 hex digits> <displayed AP password> <status|save> [JSON] */
+    char *id=strsep(&frame," ");
+    if(!id||strlen(id)!=8||strspn(id,"0123456789abcdef")!=8)return;
+    char *password=strsep(&frame," "),*op=strsep(&frame," ");
+    setup_reply_t out={0};
+    bool active=network_activity_begin();
+    network_status_t s;
+    network_snapshot(&s);
+    if(!active||!s.setup||s.setup_paused||!password||!s.ap_password[0]||strcmp(password,s.ap_password)) {
+        out.error="Open Phone setup on the pet and enter its displayed password";
+    } else {
+        xSemaphoreTake(state_lock,portMAX_DELAY);
+        setup_activity_seen=true;setup_activity_at=now_ms();
+        xSemaphoreGive(state_lock);
+        if(op&&!strcmp(op,"status")&&!frame)out.value=setup_status(false);
+        else if(op&&!strcmp(op,"save")&&frame&&strlen(frame)<=1600)
+            submit_settings(&out,setup_parse_json(frame,strlen(frame)));
+        else out.error="Invalid setup command";
     }
-    cJSON *ssid=cJSON_GetObjectItemCaseSensitive(json,"ssid"), *pass=cJSON_GetObjectItemCaseSensitive(json,"password"), *key=cJSON_GetObjectItemCaseSensitive(json,"key");
-    network_status_t saved; network_snapshot(&saved);
-    bool valid=cJSON_IsString(ssid)&&cJSON_IsString(pass)&&cJSON_IsString(key);
-    valid=valid && strlen(ssid->valuestring)>0 && strlen(ssid->valuestring)<=32 &&
-        strlen(pass->valuestring)<=63 && (!pass->valuestring[0] || strlen(pass->valuestring)>=8) &&
-        strlen(key->valuestring)<256 && ((!key->valuestring[0] && (saved.key_saved||saved.bridge_enabled)) ||
-        (strlen(key->valuestring)>=20 && !strncmp(key->valuestring,"sk-",3) && !strpbrk(key->valuestring," \t\r\n")));
-    if(!valid) { cJSON_Delete(json); return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Check network name, password (8–63 bytes), and required OpenAI API key"); }
-    network_status_t s; network_snapshot(&s);
-    if(s.joining) { cJSON_Delete(json); return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Already connecting"); }
-    command_t cmd={.kind=1};
-    strlcpy(cmd.ssid,ssid->valuestring,sizeof(cmd.ssid)); strlcpy(cmd.password,pass->valuestring,sizeof(cmd.password)); strlcpy(cmd.key,key->valuestring,sizeof(cmd.key));
-    /* Wipe the parsed secret strings before returning their allocations. */
-    memset(pass->valuestring,0,strlen(pass->valuestring)); memset(key->valuestring,0,strlen(key->valuestring)); cJSON_Delete(json);
-    xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=true;state.settings_saved=false;state.configure_generation++;xSemaphoreGive(state_lock);
-    message("Settings received. Connecting to Wi-Fi...");
-    ESP_LOGI("pet_net","Configuration request accepted");
-    BaseType_t queued=enqueue(&cmd); memset(&cmd,0,sizeof(cmd));
-    if(queued!=pdTRUE) {xSemaphoreTake(state_lock,portMAX_DELAY);state.joining=false;xSemaphoreGive(state_lock);}
-    if(queued!=pdTRUE) return httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"Busy; try again");
-    return httpd_resp_sendstr(req,"{}");
+    if(active)network_activity_end();
+    memset(&s,0,sizeof(s));
+    if(!out.value&&!out.error)out.error="Out of memory";
+    char *body=out.value?cJSON_PrintUnformatted(out.value):NULL;
+    cJSON_Delete(out.value);
+    const char *payload=body?body:(out.error?out.error:"Out of memory");
+    char *response=NULL;
+    if(asprintf(&response,"\nPS1 %s %s %s\n",id,body?"OK":"ERR",payload)>=0) {
+        send(response,strlen(response));free(response);
+    }
+    free(body);
 }
 static esp_err_t finish(httpd_req_t *req) {
     if(!mutation_allowed(req)) return ESP_OK;
